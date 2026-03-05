@@ -212,6 +212,44 @@ async fn run_live() -> Result<()> {
     loop {
         portfolio.reset_daily_if_needed();
 
+        // Check if any open bets have resolved
+        let open_ids: Vec<String> = portfolio
+            .open_bets()
+            .iter()
+            .map(|b| b.market_id.clone())
+            .collect();
+
+        for market_id in &open_ids {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            match scanner.check_market_resolution(market_id).await {
+                Ok(Some(yes_won)) => {
+                    if let Some(pnl) = portfolio.resolve_bet(market_id, yes_won) {
+                        let emoji = if pnl > 0.0 { "✅" } else { "❌" };
+                        let outcome = if yes_won { "YES" } else { "NO" };
+                        let msg = format!(
+                            "{emoji} *Bet resolved: {outcome}*\n\
+                             💵 PnL: `€{pnl:+.2}`\n\
+                             💰 Bankroll: `€{bankroll:.2}`",
+                            bankroll = portfolio.bankroll,
+                        );
+                        let _ = notifier.send(&msg).await;
+                        tracing::info!(
+                            market = %market_id,
+                            outcome = outcome,
+                            pnl = format_args!("€{pnl:+.2}"),
+                            bankroll = format_args!("€{:.2}", portfolio.bankroll),
+                            "Bet resolved"
+                        );
+                    }
+                }
+                Ok(None) => {} // still open
+                Err(e) => {
+                    tracing::warn!(market = %market_id, err = %e, "Resolution check failed");
+                }
+            }
+        }
+
+        // Send daily report if we haven't today
         if portfolio.should_send_daily_report() && !portfolio.bets.is_empty() {
             portfolio.take_snapshot();
             let report = portfolio.daily_summary();

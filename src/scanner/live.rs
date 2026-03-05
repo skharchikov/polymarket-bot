@@ -84,11 +84,12 @@ struct CryptoContext {
     btc_24h_change: f64,
     eth_24h_change: f64,
     sol_24h_change: f64,
+    news_headlines: Vec<String>,
 }
 
 impl CryptoContext {
     fn summary(&self) -> String {
-        format!(
+        let mut s = format!(
             "LIVE CRYPTO PRICES:\n\
              BTC: ${:.0} ({:+.1}% 24h)\n\
              ETH: ${:.0} ({:+.1}% 24h)\n\
@@ -99,7 +100,16 @@ impl CryptoContext {
             self.eth_24h_change,
             self.sol_price,
             self.sol_24h_change,
-        )
+        );
+
+        if !self.news_headlines.is_empty() {
+            s.push_str("\n\nRECENT CRYPTO NEWS:\n");
+            for (i, headline) in self.news_headlines.iter().enumerate() {
+                s.push_str(&format!("{}. {}\n", i + 1, headline));
+            }
+        }
+
+        s
     }
 }
 
@@ -144,8 +154,13 @@ impl LiveScanner {
     }
 
     async fn fetch_crypto_context(&self) -> Result<CryptoContext> {
-        let url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana&vs_currencies=usd&include_24hr_change=true";
-        let resp: serde_json::Value = self.http.get(url).send().await?.json().await?;
+        // Fetch prices
+        let price_url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana&vs_currencies=usd&include_24hr_change=true";
+        let resp: serde_json::Value = self.http.get(price_url).send().await?.json().await?;
+
+        // Fetch news headlines from CoinGecko status updates (free, no key)
+        let news = self.fetch_crypto_news().await.unwrap_or_default();
+
         Ok(CryptoContext {
             btc_price: resp["bitcoin"]["usd"].as_f64().unwrap_or(0.0),
             eth_price: resp["ethereum"]["usd"].as_f64().unwrap_or(0.0),
@@ -153,7 +168,56 @@ impl LiveScanner {
             btc_24h_change: resp["bitcoin"]["usd_24h_change"].as_f64().unwrap_or(0.0),
             eth_24h_change: resp["ethereum"]["usd_24h_change"].as_f64().unwrap_or(0.0),
             sol_24h_change: resp["solana"]["usd_24h_change"].as_f64().unwrap_or(0.0),
+            news_headlines: news,
         })
+    }
+
+    /// Fetch recent crypto news from CoinGecko trending + search (free).
+    async fn fetch_crypto_news(&self) -> Result<Vec<String>> {
+        let url = "https://api.coingecko.com/api/v3/search/trending";
+        let resp: serde_json::Value = self.http.get(url).send().await?.json().await?;
+
+        let mut headlines = Vec::new();
+
+        // Extract trending coins as market-relevant news
+        if let Some(coins) = resp["coins"].as_array() {
+            for coin in coins.iter().take(5) {
+                if let (Some(name), Some(symbol), Some(price_change)) = (
+                    coin["item"]["name"].as_str(),
+                    coin["item"]["symbol"].as_str(),
+                    coin["item"]["data"]["price_change_percentage_24h"]
+                        .as_object()
+                        .and_then(|o| o["usd"].as_f64()),
+                ) {
+                    headlines.push(format!(
+                        "{name} ({symbol}) trending, {price_change:+.1}% 24h"
+                    ));
+                }
+            }
+        }
+
+        // Extract trending NFTs/categories for broader market sentiment
+        if let Some(nfts) = resp["nfts"].as_array() {
+            for nft in nfts.iter().take(2) {
+                if let Some(name) = nft["name"].as_str() {
+                    headlines.push(format!("NFT trending: {name}"));
+                }
+            }
+        }
+
+        Ok(headlines)
+    }
+
+    /// Check if a specific market has resolved. Returns Some(true) if YES won,
+    /// Some(false) if NO won, None if still open.
+    pub async fn check_market_resolution(&self, market_id: &str) -> Result<Option<bool>> {
+        let url = format!("{GAMMA_API}/markets/{market_id}");
+        let resp = self.http.get(&url).send().await?;
+        let text = resp.text().await?;
+        let market: GammaMarket = serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse market {market_id}"))?;
+
+        Ok(market.resolved_yes())
     }
 
     pub async fn fetch_active_markets(&self) -> Result<Vec<GammaMarket>> {
@@ -325,6 +389,7 @@ impl LiveScanner {
                     btc_24h_change: 0.0,
                     eth_24h_change: 0.0,
                     sol_24h_change: 0.0,
+                    news_headlines: Vec::new(),
                 }
             }
         };
