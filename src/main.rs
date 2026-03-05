@@ -11,24 +11,12 @@ mod strategies;
 mod telegram;
 
 use anyhow::Result;
-use chrono::{Datelike, Utc};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use storage::portfolio::PortfolioState;
 
 const MAX_SIGNALS_PER_DAY: usize = 3;
 const SCAN_INTERVAL_MINS: u64 = 30;
-
-static SIGNALS_TODAY: AtomicUsize = AtomicUsize::new(0);
-static LAST_RESET_DAY: AtomicUsize = AtomicUsize::new(0);
-
-fn reset_daily_counter_if_needed() {
-    let today = Utc::now().ordinal() as usize;
-    let last = LAST_RESET_DAY.load(Ordering::Relaxed);
-    if last != today {
-        SIGNALS_TODAY.store(0, Ordering::Relaxed);
-        LAST_RESET_DAY.store(today, Ordering::Relaxed);
-    }
-}
+const STARTING_BANKROLL: f64 = 300.0;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -45,44 +33,87 @@ async fn main() -> Result<()> {
 
     let notifier = telegram::notifier::TelegramNotifier::from_env()?;
     let scanner = scanner::live::LiveScanner::new();
+    let mut portfolio = PortfolioState::load_or_create(STARTING_BANKROLL);
 
-    // Send startup message
     let _ = notifier
-        .send("🤖 *Polymarket Signal Bot started*\nScanning crypto markets for high-edge opportunities...")
+        .send(&format!(
+            "🤖 *Polymarket Signal Bot started*\n\
+             💰 Bankroll: `€{:.2}`\n\
+             📊 Open bets: {}\n\
+             Scanning crypto markets for high-edge YES opportunities...",
+            portfolio.bankroll,
+            portfolio.open_bets().len(),
+        ))
         .await;
 
     loop {
-        reset_daily_counter_if_needed();
+        portfolio.reset_daily_if_needed();
 
-        let remaining = MAX_SIGNALS_PER_DAY - SIGNALS_TODAY.load(Ordering::Relaxed);
+        // Send daily report if we haven't today
+        if portfolio.should_send_daily_report() && !portfolio.bets.is_empty() {
+            portfolio.take_snapshot();
+            let report = portfolio.daily_summary();
+            let _ = notifier.send(&report).await;
+            portfolio.mark_daily_report_sent();
+            tracing::info!("Daily report sent");
+        }
+
+        let remaining = MAX_SIGNALS_PER_DAY.saturating_sub(portfolio.signals_sent_today);
         if remaining == 0 {
-            tracing::info!("Daily signal limit reached, waiting for next day");
+            tracing::info!("Daily signal limit reached");
             tokio::time::sleep(Duration::from_secs(SCAN_INTERVAL_MINS * 60)).await;
             continue;
         }
 
-        tracing::info!(remaining_signals = remaining, "Starting market scan...");
+        tracing::info!(
+            remaining = remaining,
+            bankroll = format_args!("€{:.2}", portfolio.bankroll),
+            "Starting scan..."
+        );
 
-        match scanner.scan().await {
+        // Skip markets we already have open bets on
+        let skip_ids: Vec<String> = portfolio
+            .open_bets()
+            .iter()
+            .map(|b| b.market_id.clone())
+            .collect();
+
+        match scanner.scan(&skip_ids).await {
             Ok(signals) => {
-                let to_send = signals.into_iter().take(remaining);
+                for signal in signals.into_iter().take(remaining) {
+                    // Place paper bet with realistic costs
+                    if let Some(bet) = portfolio.place_bet(
+                        &signal.market_id,
+                        &signal.question,
+                        signal.current_price,
+                        signal.kelly_size,
+                        signal.estimated_prob,
+                        signal.confidence,
+                        signal.edge,
+                        &signal.reasoning,
+                        signal.end_date.as_deref(),
+                    ) {
+                        tracing::info!(
+                            market = %bet.question,
+                            cost = format_args!("€{:.2}", bet.cost),
+                            price = format_args!("{:.1}¢", bet.slipped_price * 100.0),
+                            edge = format_args!("+{:.1}%", bet.edge * 100.0),
+                            bankroll = format_args!("€{:.2}", portfolio.bankroll),
+                            "Bet placed"
+                        );
 
-                for signal in to_send {
-                    tracing::info!(
-                        market = %signal.question,
-                        edge = format_args!("+{:.1}%", signal.edge * 100.0),
-                        score = format_args!("{:.4}", signal.score()),
-                        "Sending YES signal"
-                    );
-
-                    let msg = signal.to_telegram_message();
-                    match notifier.send(&msg).await {
-                        Ok(()) => {
-                            SIGNALS_TODAY.fetch_add(1, Ordering::Relaxed);
-                        }
-                        Err(e) => {
-                            tracing::error!(err = %e, "Failed to send telegram signal");
-                        }
+                        // Send signal + bet info to Telegram
+                        let msg = format!(
+                            "{}\n\n💸 *Paper bet placed:* `€{:.2}` @ `{:.1}¢` (incl. {:.1}% slippage + {:.1}% fee)\n\
+                             💰 Remaining bankroll: `€{:.2}`",
+                            signal.to_telegram_message(),
+                            bet.cost,
+                            bet.slipped_price * 100.0,
+                            1.0, // slippage %
+                            2.0, // fee %
+                            portfolio.bankroll,
+                        );
+                        let _ = notifier.send(&msg).await;
                     }
 
                     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -95,7 +126,8 @@ async fn main() -> Result<()> {
 
         tracing::info!(
             next_scan_mins = SCAN_INTERVAL_MINS,
-            signals_sent_today = SIGNALS_TODAY.load(Ordering::Relaxed),
+            signals_today = portfolio.signals_sent_today,
+            open_bets = portfolio.open_bets().len(),
             "Scan cycle complete"
         );
         tokio::time::sleep(Duration::from_secs(SCAN_INTERVAL_MINS * 60)).await;

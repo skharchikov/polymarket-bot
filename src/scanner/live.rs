@@ -11,14 +11,15 @@ use crate::pricing::kelly::fractional_kelly;
 const GAMMA_API: &str = "https://gamma-api.polymarket.com";
 const CLOB_API: &str = "https://clob.polymarket.com";
 
-/// Minimum expected edge (edge * confidence) to emit a signal.
-const MIN_EDGE_PCT: f64 = 0.10;
-/// Minimum volume to consider a market liquid enough.
+/// Minimum technical edge before we bother calling the LLM.
+const MIN_TECHNICAL_EDGE: f64 = 0.08;
+/// Minimum final edge (after LLM confirmation) to emit a signal.
+const MIN_FINAL_EDGE: f64 = 0.10;
 const MIN_VOLUME: f64 = 5000.0;
-/// Kelly fraction — conservative quarter-Kelly.
 const KELLY_FRACTION: f64 = 0.25;
-/// Maximum days until resolution.
 const MAX_DAYS_TO_EXPIRY: i64 = 7;
+/// Max markets to send to LLM per scan (cost control).
+const MAX_LLM_CALLS: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct Signal {
@@ -64,7 +65,17 @@ impl Signal {
     }
 }
 
-/// Live crypto prices fetched from CoinGecko.
+/// Pre-LLM candidate with technical analysis score.
+#[derive(Debug)]
+struct TechnicalCandidate {
+    market: GammaMarket,
+    token_id: String,
+    current_price: f64,
+    history: Vec<PriceTick>,
+    tech_prob: f64,
+    tech_edge: f64,
+}
+
 #[derive(Debug)]
 struct CryptoContext {
     btc_price: f64,
@@ -105,7 +116,7 @@ impl LiveScanner {
             .preamble(
                 "You are an expert crypto analyst and prediction market trader.\n\n\
                  Your job: Given a Polymarket crypto question, current market price, price history, \
-                 AND live crypto prices/news, estimate the TRUE probability that YES wins.\n\n\
+                 AND live crypto prices, estimate the TRUE probability that YES wins.\n\n\
                  You MUST consider:\n\
                  1. The LIVE crypto prices provided — these are real-time, use them\n\
                  2. The price trend from the market's history\n\
@@ -132,19 +143,9 @@ impl LiveScanner {
         }
     }
 
-    /// Fetch live crypto prices from CoinGecko (free, no API key).
     async fn fetch_crypto_context(&self) -> Result<CryptoContext> {
         let url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana&vs_currencies=usd&include_24hr_change=true";
-
-        let resp: serde_json::Value = self
-            .http
-            .get(url)
-            .send()
-            .await?
-            .json()
-            .await
-            .context("failed to parse coingecko response")?;
-
+        let resp: serde_json::Value = self.http.get(url).send().await?.json().await?;
         Ok(CryptoContext {
             btc_price: resp["bitcoin"]["usd"].as_f64().unwrap_or(0.0),
             eth_price: resp["ethereum"]["usd"].as_f64().unwrap_or(0.0),
@@ -155,7 +156,6 @@ impl LiveScanner {
         })
     }
 
-    /// Fetch active, open markets from Gamma API.
     pub async fn fetch_active_markets(&self) -> Result<Vec<GammaMarket>> {
         let mut all = Vec::new();
         let mut offset = 0;
@@ -165,10 +165,8 @@ impl LiveScanner {
             let url = format!(
                 "{GAMMA_API}/markets?closed=false&active=true&limit={page_size}&offset={offset}&order=volumeNum&ascending=false"
             );
-
             let resp = self.http.get(&url).send().await?;
             let text = resp.text().await?;
-
             let page: Vec<GammaMarket> = serde_json::from_str(&text).with_context(|| {
                 format!(
                     "failed to parse gamma markets (first 200 chars): {}",
@@ -185,32 +183,19 @@ impl LiveScanner {
             offset += count;
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-
         Ok(all)
     }
 
-    /// Fetch recent price history for a token.
     pub async fn fetch_price_history(&self, token_id: &str) -> Result<Vec<PriceTick>> {
         let url = format!("{CLOB_API}/prices-history?market={token_id}&interval=max");
-
         #[derive(serde::Deserialize)]
         struct Resp {
             history: Vec<PriceTick>,
         }
-
-        let resp: Resp = self
-            .http
-            .get(&url)
-            .send()
-            .await?
-            .json()
-            .await
-            .context("failed to parse price history")?;
-
+        let resp: Resp = self.http.get(&url).send().await?.json().await?;
         Ok(resp.history)
     }
 
-    /// Returns true if the market expires within MAX_DAYS_TO_EXPIRY.
     fn expires_within_window(end_date: Option<&str>) -> bool {
         let Some(date_str) = end_date else {
             return false;
@@ -223,7 +208,58 @@ impl LiveScanner {
         end > now && end <= deadline
     }
 
-    /// Ask the LLM to estimate probability given market context + live crypto data.
+    /// Pure technical analysis — no LLM call. Returns estimated prob of YES.
+    fn technical_estimate(history: &[PriceTick], current_price: f64) -> f64 {
+        let n = history.len();
+        if n < 5 {
+            return current_price;
+        }
+
+        let prices: Vec<f64> = history.iter().map(|t| t.p).collect();
+
+        // 1. SMA momentum: short vs long average
+        let short_w = (n / 4).max(3).min(n);
+        let sma_short: f64 = prices[n - short_w..].iter().sum::<f64>() / short_w as f64;
+        let sma_long: f64 = prices.iter().sum::<f64>() / n as f64;
+        let momentum = sma_short - sma_long;
+
+        // 2. Trend: linear slope
+        let x_mean = (n - 1) as f64 / 2.0;
+        let y_mean = sma_long;
+        let mut num = 0.0;
+        let mut den = 0.0;
+        for (i, &p) in prices.iter().enumerate() {
+            let x = i as f64 - x_mean;
+            num += x * (p - y_mean);
+            den += x * x;
+        }
+        let slope = if den > 0.0 { num / den } else { 0.0 };
+
+        // 3. Recent volatility
+        let recent = &prices[n.saturating_sub(10)..];
+        let recent_mean: f64 = recent.iter().sum::<f64>() / recent.len() as f64;
+        let vol: f64 = (recent
+            .iter()
+            .map(|p| (p - recent_mean).powi(2))
+            .sum::<f64>()
+            / recent.len() as f64)
+            .sqrt();
+
+        // Combine signals: trend + momentum, dampened by volatility
+        let vol_factor = if vol > 0.15 {
+            0.3 // high vol = less trust in signals
+        } else if vol < 0.02 {
+            1.0 // low vol = strong signal
+        } else {
+            0.7
+        };
+
+        let signal = (momentum * 2.0 + slope * n as f64 * 0.3) * vol_factor;
+
+        (current_price + signal).clamp(0.02, 0.98)
+    }
+
+    /// LLM call — only for top technical candidates.
     async fn llm_estimate(
         &self,
         question: &str,
@@ -235,12 +271,10 @@ impl LiveScanner {
         let history_summary = if history.len() >= 5 {
             let recent: Vec<&PriceTick> = history.iter().rev().take(10).collect();
             let prices: Vec<String> = recent.iter().rev().map(|t| format!("{:.2}", t.p)).collect();
-
             let first = history.first().unwrap().p;
             let min = history.iter().map(|t| t.p).fold(f64::MAX, f64::min);
             let max = history.iter().map(|t| t.p).fold(f64::MIN, f64::max);
             let avg = history.iter().map(|t| t.p).sum::<f64>() / history.len() as f64;
-
             format!(
                 "Recent prices: [{}]\nAll-time: min={min:.2}, max={max:.2}, avg={avg:.2}, start={first:.2}\nTotal ticks: {}",
                 prices.join(", "),
@@ -254,25 +288,24 @@ impl LiveScanner {
         let now: DateTime<Utc> = Utc::now();
 
         let prompt = format!(
-            "{crypto_summary}\n\n\
+            "{crypto}\n\n\
              Market: \"{question}\"\n\
              Current YES price: {current_price:.4} ({pct:.1}%)\n\
              Expiry: {expiry}\n\
              Current time: {now}\n\n\
              Price history:\n{history_summary}\n\n\
-             Using the LIVE crypto prices above, analyze this market and estimate the TRUE probability of YES.",
-            crypto_summary = crypto.summary(),
+             Using the LIVE crypto prices above, estimate TRUE probability of YES.",
+            crypto = crypto.summary(),
             pct = current_price * 100.0,
         );
 
         let response = self.llm.chat(prompt, vec![]).await?;
-
         parse_llm_response(&response)
     }
 
-    /// Scan all active crypto markets and return scored YES-only signals.
-    pub async fn scan(&self) -> Result<Vec<Signal>> {
-        // Fetch live crypto prices first
+    /// Main scan: technical filter → top N → LLM confirmation → signals.
+    pub async fn scan(&self, skip_market_ids: &[String]) -> Result<Vec<Signal>> {
+        // 1. Fetch live crypto prices (free)
         let crypto = match self.fetch_crypto_context().await {
             Ok(c) => {
                 tracing::info!(
@@ -284,7 +317,7 @@ impl LiveScanner {
                 c
             }
             Err(e) => {
-                tracing::warn!(err = %e, "Failed to fetch crypto prices, using defaults");
+                tracing::warn!(err = %e, "Failed to fetch crypto prices");
                 CryptoContext {
                     btc_price: 0.0,
                     eth_price: 0.0,
@@ -296,10 +329,10 @@ impl LiveScanner {
             }
         };
 
+        // 2. Fetch and filter markets (free)
         let markets = self.fetch_active_markets().await?;
         tracing::info!(total = markets.len(), "Fetched active markets");
 
-        // Filter: crypto, not noise, enough volume, has token, expires within 7 days
         let candidates: Vec<&GammaMarket> = markets
             .iter()
             .filter(|m| m.is_crypto_related())
@@ -307,112 +340,133 @@ impl LiveScanner {
             .filter(|m| m.volume_num >= MIN_VOLUME)
             .filter(|m| m.yes_token_id().is_some())
             .filter(|m| Self::expires_within_window(m.end_date.as_deref()))
+            .filter(|m| !skip_market_ids.contains(&m.market_id))
             .collect();
 
-        tracing::info!(
-            crypto_candidates = candidates.len(),
-            "Filtered crypto markets (expiring within {MAX_DAYS_TO_EXPIRY} days)"
-        );
+        tracing::info!(candidates = candidates.len(), "Crypto markets (≤7 days)");
 
-        let mut signals = Vec::new();
+        // 3. Technical analysis on each candidate (free — just math)
+        let mut tech_candidates: Vec<TechnicalCandidate> = Vec::new();
 
         for gm in &candidates {
             let token_id = gm.yes_token_id().unwrap();
-
             let current_price = match &gm.outcome_prices {
-                Some(prices_str) => {
-                    let prices: Vec<String> = serde_json::from_str(prices_str).unwrap_or_default();
-                    prices
-                        .first()
-                        .and_then(|s| s.parse::<f64>().ok())
-                        .unwrap_or(0.0)
+                Some(s) => {
+                    let p: Vec<String> = serde_json::from_str(s).unwrap_or_default();
+                    p.first().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0)
                 }
                 None => continue,
             };
 
-            if current_price <= 0.03 || current_price >= 0.97 {
+            if current_price <= 0.05 || current_price >= 0.95 {
                 continue;
             }
 
-            // Fetch price history
-            tokio::time::sleep(Duration::from_millis(150)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
             let history = match self.fetch_price_history(&token_id).await {
                 Ok(h) if h.len() >= 10 => h,
                 Ok(_) => continue,
                 Err(e) => {
-                    tracing::warn!(market = %gm.market_id, err = %e, "Failed to fetch history");
+                    tracing::warn!(market = %gm.market_id, err = %e, "History fetch failed");
                     continue;
                 }
             };
 
-            // Ask LLM with live crypto context
+            let tech_prob = Self::technical_estimate(&history, current_price);
+            let tech_edge = tech_prob - current_price;
+
+            tracing::info!(
+                market = %gm.question,
+                price = format_args!("{:.1}%", current_price * 100.0),
+                tech = format_args!("{:.1}%", tech_prob * 100.0),
+                edge = format_args!("{:+.1}%", tech_edge * 100.0),
+                "Technical analysis"
+            );
+
+            // Only keep YES-edge candidates above threshold
+            if tech_edge >= MIN_TECHNICAL_EDGE {
+                tech_candidates.push(TechnicalCandidate {
+                    market: (*gm).clone(),
+                    token_id,
+                    current_price,
+                    history,
+                    tech_prob,
+                    tech_edge,
+                });
+            }
+        }
+
+        // Sort by technical edge, take top N for LLM
+        tech_candidates.sort_by(|a, b| b.tech_edge.partial_cmp(&a.tech_edge).unwrap());
+        let top = tech_candidates.into_iter().take(MAX_LLM_CALLS);
+
+        tracing::info!("Sending top candidates to LLM for confirmation...");
+
+        // 4. LLM confirmation only on best technical candidates (paid)
+        let mut signals = Vec::new();
+
+        for tc in top {
             tokio::time::sleep(Duration::from_millis(200)).await;
             let (prob, confidence, reasoning) = match self
                 .llm_estimate(
-                    &gm.question,
-                    current_price,
-                    &history,
-                    gm.end_date.as_deref(),
+                    &tc.market.question,
+                    tc.current_price,
+                    &tc.history,
+                    tc.market.end_date.as_deref(),
                     &crypto,
                 )
                 .await
             {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!(market = %gm.market_id, err = %e, "LLM estimate failed");
+                    tracing::warn!(market = %tc.market.market_id, err = %e, "LLM failed");
                     continue;
                 }
             };
 
-            let edge = prob - current_price;
+            let edge = prob - tc.current_price;
 
-            // YES only — skip if LLM thinks NO is more likely
             if edge <= 0.0 {
-                tracing::debug!(
-                    market = %gm.question,
-                    edge = format_args!("{:+.1}%", edge * 100.0),
-                    "Skipping — no YES edge"
+                tracing::info!(
+                    market = %tc.market.question,
+                    llm_prob = format_args!("{:.1}%", prob * 100.0),
+                    "LLM disagrees — no YES edge"
                 );
                 continue;
             }
 
-            let kelly_size = fractional_kelly(prob, current_price, KELLY_FRACTION);
+            let kelly_size = fractional_kelly(prob, tc.current_price, KELLY_FRACTION);
             let effective_edge = edge * confidence;
 
             tracing::info!(
-                market = %gm.question,
-                price = format_args!("{:.1}%", current_price * 100.0),
-                est = format_args!("{:.1}%", prob * 100.0),
+                market = %tc.market.question,
+                price = format_args!("{:.1}%", tc.current_price * 100.0),
+                llm = format_args!("{:.1}%", prob * 100.0),
                 edge = format_args!("+{:.1}%", edge * 100.0),
                 conf = format_args!("{:.0}%", confidence * 100.0),
                 kelly = format_args!("{:.1}%", kelly_size * 100.0),
-                "Analyzed"
+                "LLM confirmed"
             );
 
-            if effective_edge >= MIN_EDGE_PCT && kelly_size > 0.01 && confidence >= 0.5 {
+            if effective_edge >= MIN_FINAL_EDGE && kelly_size > 0.01 && confidence >= 0.5 {
                 signals.push(Signal {
-                    market_id: gm.market_id.clone(),
-                    question: gm.question.clone(),
-                    current_price,
+                    market_id: tc.market.market_id,
+                    question: tc.market.question,
+                    current_price: tc.current_price,
                     estimated_prob: prob,
                     confidence,
                     edge,
                     kelly_size,
                     reasoning,
-                    end_date: gm.end_date.clone(),
-                    volume: gm.volume_num,
+                    end_date: tc.market.end_date,
+                    volume: tc.market.volume_num,
                 });
             }
         }
 
-        // Sort by score (best first)
         signals.sort_by(|a, b| b.score().partial_cmp(&a.score()).unwrap());
 
-        tracing::info!(
-            signals = signals.len(),
-            "Scan complete, high-conviction YES signals"
-        );
-
+        tracing::info!(signals = signals.len(), "Final high-conviction signals");
         Ok(signals)
     }
 }
@@ -436,13 +490,11 @@ fn parse_llm_response(response: &str) -> Result<(f64, f64, String)> {
         #[serde(default)]
         reasoning: String,
     }
-
     fn default_confidence() -> f64 {
         0.5
     }
 
     let est: Est = serde_json::from_str(json_str).context("failed to parse LLM response")?;
-
     Ok((
         est.probability.clamp(0.01, 0.99),
         est.confidence.clamp(0.0, 1.0),
