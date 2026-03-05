@@ -24,9 +24,11 @@ impl Crawler {
         }
     }
 
-    /// Fetch resolved markets from Gamma API.
+    /// Fetch resolved markets from Gamma API, newest first.
     pub async fn fetch_resolved_markets(&self, limit: usize) -> Result<Vec<GammaMarket>> {
-        let url = format!("{GAMMA_API}/markets?closed=true&limit={limit}");
+        let url = format!(
+            "{GAMMA_API}/markets?closed=true&limit={limit}&order=updatedAt&ascending=false"
+        );
         let markets: Vec<GammaMarket> = self
             .client
             .get(&url)
@@ -53,35 +55,31 @@ impl Crawler {
     }
 
     /// Crawl resolved markets and build historical dataset.
-    pub async fn build_dataset(&self, market_limit: usize) -> Result<Vec<HistoricalMarket>> {
+    /// If `crypto_only` is true, only include crypto-related markets.
+    pub async fn build_dataset(
+        &self,
+        market_limit: usize,
+        crypto_only: bool,
+    ) -> Result<Vec<HistoricalMarket>> {
         let gamma_markets = self.fetch_resolved_markets(market_limit).await?;
         tracing::info!(count = gamma_markets.len(), "Fetched resolved markets");
 
         let mut dataset = Vec::new();
 
         for gm in &gamma_markets {
-            let resolved_yes = match gm.outcome.as_deref() {
-                Some("Yes") => true,
-                Some("No") => false,
-                _ => continue, // skip unresolved
-            };
-
-            let token_ids = match &gm.clob_token_ids {
-                Some(ids) if !ids.is_empty() => ids.clone(),
-                _ => continue,
-            };
-
-            // Parse comma-separated token IDs, take the first (YES token)
-            let token_id = token_ids
-                .split(',')
-                .next()
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-
-            if token_id.is_empty() {
+            if crypto_only && !gm.is_crypto_related() {
                 continue;
             }
+
+            let resolved_yes = match gm.resolved_yes() {
+                Some(v) => v,
+                None => continue,
+            };
+
+            let token_id = match gm.yes_token_id() {
+                Some(id) => id,
+                None => continue,
+            };
 
             let end_date = match &gm.end_date {
                 Some(d) => match d.parse() {
@@ -97,7 +95,9 @@ impl Crawler {
                 Ok(history) if !history.is_empty() => {
                     tracing::info!(
                         market = %gm.market_id,
+                        question = %gm.question,
                         ticks = history.len(),
+                        resolved_yes,
                         "Downloaded price history"
                     );
                     dataset.push(HistoricalMarket {
