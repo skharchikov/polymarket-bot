@@ -9,7 +9,7 @@ mod storage;
 mod strategies;
 
 use anyhow::Result;
-use backtest::engine::{BacktestConfig, BacktestResult, run_backtest, run_backtest_async};
+use backtest::engine::{BacktestConfig, BacktestResult, run_backtest};
 use data::crawler::Crawler;
 
 #[tokio::main]
@@ -23,19 +23,32 @@ async fn main() -> Result<()> {
 
     dotenvy::dotenv().ok();
 
-    tracing::info!("Polymarket trading bot starting...");
+    tracing::info!("Polymarket backtest starting...");
 
-    // 1. Crawl historical crypto markets
-    let crawler = Crawler::new(200);
-    tracing::info!("Fetching resolved crypto markets...");
-    let dataset = crawler.build_dataset(200, true).await?;
+    // 1. Crawl large dataset — 2000 markets, crypto only
+    let crawler = Crawler::new(100);
+    let dataset = crawler.build_dataset(2000, true).await?;
 
     if dataset.is_empty() {
-        tracing::warn!("No historical markets with price data found");
+        tracing::warn!("No historical markets found");
         return Ok(());
     }
 
-    tracing::info!(markets = dataset.len(), "Dataset ready");
+    let yes_count = dataset.iter().filter(|m| m.resolved_yes).count();
+    let no_count = dataset.len() - yes_count;
+    let avg_ticks: f64 = dataset
+        .iter()
+        .map(|m| m.price_history.len() as f64)
+        .sum::<f64>()
+        / dataset.len() as f64;
+
+    tracing::info!(
+        markets = dataset.len(),
+        yes = yes_count,
+        no = no_count,
+        avg_ticks = avg_ticks as usize,
+        "Dataset ready"
+    );
 
     let config = BacktestConfig {
         starting_cash: 10_000.0,
@@ -43,90 +56,94 @@ async fn main() -> Result<()> {
         position_size_pct: 0.02,
     };
 
-    // 2. Baseline: SMA momentum estimator
-    tracing::info!("Running SMA baseline backtest...");
-    let sma_result = run_backtest(&dataset, &config, |market, current_price| {
-        let history = &market.price_history;
-        if history.len() < 10 {
-            return (current_price, 0.3);
+    // Strategy 1: SMA Momentum
+    let sma = run_backtest(&dataset, &config, |market, price| {
+        let h = &market.price_history;
+        if h.len() < 10 {
+            return (price, 0.3);
+        }
+        let recent: Vec<f64> = h.iter().rev().take(10).map(|t| t.p).collect();
+        let sma3: f64 = recent[..3].iter().sum::<f64>() / 3.0;
+        let sma10: f64 = recent.iter().sum::<f64>() / 10.0;
+        let momentum = sma3 - sma10;
+        let est = (price + momentum * 2.0).clamp(0.05, 0.95);
+        let conf = (momentum.abs() * 10.0).clamp(0.2, 0.8);
+        (est, conf)
+    });
+    log_results("SMA Momentum (3/10)", &config, &sma);
+
+    // Strategy 2: Mean Reversion
+    let mr = run_backtest(&dataset, &config, |market, price| {
+        let h = &market.price_history;
+        if h.len() < 20 {
+            return (price, 0.2);
+        }
+        let avg: f64 = h.iter().map(|t| t.p).sum::<f64>() / h.len() as f64;
+        let deviation = price - avg;
+        let est = (price - deviation * 0.4).clamp(0.05, 0.95);
+        let conf = (deviation.abs() * 5.0).clamp(0.1, 0.7);
+        (est, conf)
+    });
+    log_results("Mean Reversion", &config, &mr);
+
+    // Strategy 3: Trend Following with volatility filter
+    let tf = run_backtest(&dataset, &config, |market, price| {
+        let h = &market.price_history;
+        if h.len() < 20 {
+            return (price, 0.2);
+        }
+        let prices: Vec<f64> = h.iter().map(|t| t.p).collect();
+        let n = prices.len();
+
+        let first_half: f64 = prices[..n / 2].iter().sum::<f64>() / (n / 2) as f64;
+        let second_half: f64 = prices[n / 2..].iter().sum::<f64>() / (n - n / 2) as f64;
+        let trend = second_half - first_half;
+
+        let recent: Vec<f64> = prices.iter().rev().take(10).copied().collect();
+        let mean: f64 = recent.iter().sum::<f64>() / recent.len() as f64;
+        let vol: f64 =
+            (recent.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / recent.len() as f64).sqrt();
+
+        if vol > 0.15 || vol < 0.01 {
+            return (price, 0.1);
         }
 
-        let recent: Vec<f64> = history.iter().rev().take(10).map(|t| t.p).collect();
-        let sma_short: f64 = recent[..3].iter().sum::<f64>() / 3.0;
-        let sma_long: f64 = recent.iter().sum::<f64>() / 10.0;
-
-        // Momentum: if short SMA > long SMA, trend is up
-        let momentum = sma_short - sma_long;
-        let estimate = (current_price + momentum * 2.0).clamp(0.05, 0.95);
-        let confidence = (momentum.abs() * 10.0).clamp(0.2, 0.8);
-
-        (estimate, confidence)
+        let est = (price + trend * 1.5).clamp(0.05, 0.95);
+        let conf = (trend.abs() * 8.0).clamp(0.2, 0.85);
+        (est, conf)
     });
+    log_results("Trend Following", &config, &tf);
 
-    print_results("SMA Momentum", &config, &sma_result);
-
-    // 3. LLM-powered estimator (if OPENAI_API_KEY is set)
-    if std::env::var("OPENAI_API_KEY").is_ok() {
-        tracing::info!("Running LLM-powered backtest...");
-        let estimator = agent::estimator::LlmEstimator::new();
-
-        // Limit LLM calls to save API costs — use a subset
-        let llm_subset: Vec<_> = dataset.iter().take(15).cloned().collect();
-
-        let llm_result = run_backtest_async(&llm_subset, &config, |market, price| {
-            let question = market.question.clone();
-            let est = &estimator;
-            async move {
-                match est.estimate(&question, price).await {
-                    Ok((prob, conf)) => {
-                        tracing::info!(
-                            question = %question,
-                            market_price = price,
-                            llm_prob = prob,
-                            confidence = conf,
-                            "LLM estimate"
-                        );
-                        (prob, conf)
-                    }
-                    Err(e) => {
-                        tracing::warn!(err = %e, "LLM estimate failed, using market price");
-                        (price, 0.0)
-                    }
-                }
-            }
-        })
-        .await;
-
-        print_results("LLM (GPT-4o-mini)", &config, &llm_result);
-    } else {
-        tracing::warn!("OPENAI_API_KEY not set, skipping LLM backtest");
-    }
+    // Strategy 4: Contrarian
+    let contrarian = run_backtest(&dataset, &config, |_market, price| {
+        let distance_from_half = (price - 0.5).abs();
+        if distance_from_half < 0.15 {
+            return (price, 0.1);
+        }
+        let est = price + (0.5 - price) * 0.3;
+        let conf = (distance_from_half * 2.0).clamp(0.3, 0.8);
+        (est, conf)
+    });
+    log_results("Contrarian", &config, &contrarian);
 
     Ok(())
 }
 
-fn print_results(name: &str, config: &BacktestConfig, result: &BacktestResult) {
+fn log_results(name: &str, config: &BacktestConfig, result: &BacktestResult) {
     let m = &result.metrics;
-    println!("\n===== {name} BACKTEST =====");
-    println!("Starting capital:  ${:.2}", config.starting_cash);
-    println!("Final equity:      ${:.2}", result.portfolio.total_equity());
-    println!("ROI:               {:.2}%", m.roi * 100.0);
-    println!("Total trades:      {}", m.total_trades);
-    println!("Winning trades:    {}", m.winning_trades);
-    println!(
-        "Win rate:          {:.1}%",
-        if m.total_trades > 0 {
-            m.win_rate * 100.0
-        } else {
-            0.0
-        }
+    tracing::info!(
+        strategy = name,
+        start = format_args!("${:.0}", config.starting_cash),
+        end = format_args!("${:.0}", result.portfolio.total_equity()),
+        roi = format_args!("{:.2}%", m.roi * 100.0),
+        trades = m.total_trades,
+        wins = m.winning_trades,
+        losses = m.total_trades - m.winning_trades,
+        win_rate = format_args!("{:.1}%", m.win_rate * 100.0),
+        pnl = format_args!("${:.2}", m.total_pnl),
+        max_dd = format_args!("{:.2}%", m.max_drawdown * 100.0),
+        sharpe = format_args!("{:.3}", m.sharpe_ratio),
+        brier = format_args!("{:.4}", m.brier_score),
+        "Backtest result"
     );
-    println!("Total PnL:         ${:.2}", m.total_pnl);
-    println!("Max drawdown:      {:.2}%", m.max_drawdown * 100.0);
-    println!("Sharpe ratio:      {:.3}", m.sharpe_ratio);
-    println!(
-        "Brier score:       {:.4} (0=perfect, 0.25=random)",
-        m.brier_score
-    );
-    println!("===========================\n");
 }
