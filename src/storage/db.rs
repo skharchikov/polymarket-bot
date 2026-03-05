@@ -1,14 +1,13 @@
 use std::collections::HashMap;
 
-use crate::strategies::mispricing::TradeSignal;
+use crate::strategies::signal::Signal;
 
-/// Simple in-memory trade log. Replace with SQLite/Postgres for persistence.
 pub struct TradeLog {
     trades: Vec<TradeRecord>,
 }
 
 pub struct TradeRecord {
-    pub signal: TradeSignal,
+    pub signal: Signal,
     pub amount_usd: f64,
     pub tx_hash: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
@@ -19,7 +18,7 @@ impl TradeLog {
         Self { trades: Vec::new() }
     }
 
-    pub fn record(&mut self, signal: TradeSignal, amount_usd: f64, tx_hash: String) {
+    pub fn record(&mut self, signal: Signal, amount_usd: f64, tx_hash: String) {
         self.trades.push(TradeRecord {
             signal,
             amount_usd,
@@ -28,7 +27,7 @@ impl TradeLog {
         });
     }
 
-    pub fn summary(&self) -> HashMap<String, f64> {
+    pub fn exposure_by_market(&self) -> HashMap<String, f64> {
         let mut exposure: HashMap<String, f64> = HashMap::new();
         for trade in &self.trades {
             *exposure.entry(trade.signal.market_id.clone()).or_default() += trade.amount_usd;
