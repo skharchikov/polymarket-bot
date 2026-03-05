@@ -70,10 +70,9 @@ async fn main() -> Result<()> {
                 for signal in to_send {
                     tracing::info!(
                         market = %signal.question,
-                        side = %signal.side,
-                        edge = format_args!("{:+.1}%", signal.edge * 100.0),
+                        edge = format_args!("+{:.1}%", signal.edge * 100.0),
                         score = format_args!("{:.4}", signal.score()),
-                        "Sending signal"
+                        "Sending YES signal"
                     );
 
                     let msg = signal.to_telegram_message();
