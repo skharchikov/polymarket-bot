@@ -21,6 +21,8 @@ pub struct Portfolio {
     pub positions: HashMap<String, Position>,
     pub equity_curve: Vec<f64>,
     pub trade_results: Vec<TradeResult>,
+    pub slippage_pct: f64,
+    pub fee_pct: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -34,18 +36,28 @@ pub struct TradeResult {
 
 impl Portfolio {
     pub fn new(starting_cash: f64) -> Self {
+        Self::with_costs(starting_cash, 0.0, 0.0)
+    }
+
+    pub fn with_costs(starting_cash: f64, slippage_pct: f64, fee_pct: f64) -> Self {
         Self {
             starting_cash,
             cash: starting_cash,
             positions: HashMap::new(),
             equity_curve: vec![starting_cash],
             trade_results: Vec::new(),
+            slippage_pct,
+            fee_pct,
         }
     }
 
-    /// Open a position. Cost = size * price.
+    /// Open a position. Cost = size * effective_price (with slippage + fees).
     pub fn open_position(&mut self, market_id: &str, side: Side, size: f64, price: f64) -> bool {
-        let cost = size * price;
+        // Slippage moves the price against us
+        let slipped_price = (price * (1.0 + self.slippage_pct)).min(0.99);
+        let fee = size * slipped_price * self.fee_pct;
+        let cost = size * slipped_price + fee;
+
         if cost > self.cash {
             return false;
         }
@@ -57,24 +69,26 @@ impl Portfolio {
                 market_id: market_id.to_string(),
                 side,
                 size,
-                entry_price: price,
+                entry_price: slipped_price,
             },
         );
         true
     }
 
     /// Resolve a position given the market outcome.
-    /// Returns PnL for the trade.
     pub fn resolve(&mut self, market_id: &str, resolved_yes: bool) -> Option<f64> {
         let pos = self.positions.remove(market_id)?;
         let won =
             (pos.side == Side::Yes && resolved_yes) || (pos.side == Side::No && !resolved_yes);
 
         let payout = if won { pos.size } else { 0.0 };
+        // Fee on payout
+        let exit_fee = payout * self.fee_pct;
+        let net_payout = payout - exit_fee;
         let cost = pos.size * pos.entry_price;
-        let pnl = payout - cost;
+        let pnl = net_payout - cost;
 
-        self.cash += payout;
+        self.cash += net_payout;
         self.trade_results.push(TradeResult {
             market_id: market_id.to_string(),
             side: pos.side,

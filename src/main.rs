@@ -10,7 +10,7 @@ mod strategies;
 
 use anyhow::Result;
 use backtest::engine::{BacktestConfig, BacktestResult, run_backtest};
-use data::crawler::Crawler;
+use data::crawler::{Crawler, CrawlerConfig};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -25,9 +25,15 @@ async fn main() -> Result<()> {
 
     tracing::info!("Polymarket backtest starting...");
 
-    // 1. Crawl large dataset — 2000 markets, crypto only
-    let crawler = Crawler::new(100);
-    let dataset = crawler.build_dataset(2000, true).await?;
+    let crawler = Crawler::new(CrawlerConfig {
+        market_limit: 2000,
+        crypto_only: true,
+        min_volume: 1000.0,
+        min_ticks: 20,
+        min_duration_hours: 4.0,
+        ..CrawlerConfig::default()
+    });
+    let dataset = crawler.build_dataset().await?;
 
     if dataset.is_empty() {
         tracing::warn!("No historical markets found");
@@ -54,17 +60,20 @@ async fn main() -> Result<()> {
         starting_cash: 10_000.0,
         edge_threshold: 0.05,
         position_size_pct: 0.02,
+        slippage_pct: 0.01,
+        fee_pct: 0.02,
     };
 
-    // Strategy 1: SMA Momentum
+    // Strategy 1: SMA Momentum — only uses history up to entry point
     let sma = run_backtest(&dataset, &config, |market, price| {
         let h = &market.price_history;
         if h.len() < 10 {
             return (price, 0.3);
         }
-        let recent: Vec<f64> = h.iter().rev().take(10).map(|t| t.p).collect();
-        let sma3: f64 = recent[..3].iter().sum::<f64>() / 3.0;
-        let sma10: f64 = recent.iter().sum::<f64>() / 10.0;
+        // Use first 10 ticks (available at entry time, no look-ahead)
+        let window: Vec<f64> = h.iter().take(10).map(|t| t.p).collect();
+        let sma3: f64 = window[window.len() - 3..].iter().sum::<f64>() / 3.0;
+        let sma10: f64 = window.iter().sum::<f64>() / 10.0;
         let momentum = sma3 - sma10;
         let est = (price + momentum * 2.0).clamp(0.05, 0.95);
         let conf = (momentum.abs() * 10.0).clamp(0.2, 0.8);
@@ -72,49 +81,16 @@ async fn main() -> Result<()> {
     });
     log_results("SMA Momentum (3/10)", &config, &sma);
 
-    // Strategy 2: Mean Reversion
-    let mr = run_backtest(&dataset, &config, |market, price| {
-        let h = &market.price_history;
-        if h.len() < 20 {
-            return (price, 0.2);
-        }
-        let avg: f64 = h.iter().map(|t| t.p).sum::<f64>() / h.len() as f64;
-        let deviation = price - avg;
-        let est = (price - deviation * 0.4).clamp(0.05, 0.95);
-        let conf = (deviation.abs() * 5.0).clamp(0.1, 0.7);
+    // Strategy 2: Mean Reversion — uses only first tick context
+    let mr = run_backtest(&dataset, &config, |_market, price| {
+        let deviation = price - 0.5;
+        let est = (price - deviation * 0.3).clamp(0.05, 0.95);
+        let conf = (deviation.abs() * 4.0).clamp(0.1, 0.7);
         (est, conf)
     });
     log_results("Mean Reversion", &config, &mr);
 
-    // Strategy 3: Trend Following with volatility filter
-    let tf = run_backtest(&dataset, &config, |market, price| {
-        let h = &market.price_history;
-        if h.len() < 20 {
-            return (price, 0.2);
-        }
-        let prices: Vec<f64> = h.iter().map(|t| t.p).collect();
-        let n = prices.len();
-
-        let first_half: f64 = prices[..n / 2].iter().sum::<f64>() / (n / 2) as f64;
-        let second_half: f64 = prices[n / 2..].iter().sum::<f64>() / (n - n / 2) as f64;
-        let trend = second_half - first_half;
-
-        let recent: Vec<f64> = prices.iter().rev().take(10).copied().collect();
-        let mean: f64 = recent.iter().sum::<f64>() / recent.len() as f64;
-        let vol: f64 =
-            (recent.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / recent.len() as f64).sqrt();
-
-        if vol > 0.15 || vol < 0.01 {
-            return (price, 0.1);
-        }
-
-        let est = (price + trend * 1.5).clamp(0.05, 0.95);
-        let conf = (trend.abs() * 8.0).clamp(0.2, 0.85);
-        (est, conf)
-    });
-    log_results("Trend Following", &config, &tf);
-
-    // Strategy 4: Contrarian
+    // Strategy 3: Contrarian — bet against extreme prices
     let contrarian = run_backtest(&dataset, &config, |_market, price| {
         let distance_from_half = (price - 0.5).abs();
         if distance_from_half < 0.15 {
@@ -125,6 +101,21 @@ async fn main() -> Result<()> {
         (est, conf)
     });
     log_results("Contrarian", &config, &contrarian);
+
+    // Strategy 4: Fractional Kelly value — edge-weighted sizing
+    let kelly = run_backtest(&dataset, &config, |market, price| {
+        let h = &market.price_history;
+        if h.len() < 5 {
+            return (price, 0.2);
+        }
+        // Simple trend from first few ticks
+        let start_avg = h.iter().take(3).map(|t| t.p).sum::<f64>() / 3.0;
+        let trend = price - start_avg;
+        let est = (price + trend * 1.5).clamp(0.05, 0.95);
+        let conf = (trend.abs() * 6.0).clamp(0.15, 0.75);
+        (est, conf)
+    });
+    log_results("Kelly Value", &config, &kelly);
 
     Ok(())
 }

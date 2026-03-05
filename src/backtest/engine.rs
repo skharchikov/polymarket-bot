@@ -9,6 +9,10 @@ pub struct BacktestConfig {
     pub starting_cash: f64,
     pub edge_threshold: f64,
     pub position_size_pct: f64,
+    /// Slippage as a fraction of price (e.g., 0.01 = 1%)
+    pub slippage_pct: f64,
+    /// Trading fee as a fraction of notional (e.g., 0.02 = 2%)
+    pub fee_pct: f64,
 }
 
 impl Default for BacktestConfig {
@@ -17,6 +21,8 @@ impl Default for BacktestConfig {
             starting_cash: 10_000.0,
             edge_threshold: 0.05,
             position_size_pct: 0.02,
+            slippage_pct: 0.01,
+            fee_pct: 0.02,
         }
     }
 }
@@ -35,16 +41,17 @@ pub fn run_backtest<F>(
 where
     F: FnMut(&HistoricalMarket, f64) -> (f64, f64),
 {
-    let mut portfolio = Portfolio::new(config.starting_cash);
+    let mut portfolio =
+        Portfolio::with_costs(config.starting_cash, config.slippage_pct, config.fee_pct);
     let mut predictions: Vec<(f64, bool)> = Vec::new();
 
     for market in markets {
-        if market.price_history.is_empty() {
+        if market.price_history.len() < 2 {
             continue;
         }
 
-        let mid_idx = market.price_history.len() / 2;
-        let entry_price = market.price_history[mid_idx].p;
+        // Enter at the first tick — no look-ahead bias
+        let entry_price = market.price_history[0].p;
 
         if entry_price <= 0.01 || entry_price >= 0.99 {
             continue;
@@ -107,16 +114,17 @@ where
     F: FnMut(&HistoricalMarket, f64) -> Fut,
     Fut: Future<Output = (f64, f64)>,
 {
-    let mut portfolio = Portfolio::new(config.starting_cash);
+    let mut portfolio =
+        Portfolio::with_costs(config.starting_cash, config.slippage_pct, config.fee_pct);
     let mut predictions: Vec<(f64, bool)> = Vec::new();
 
     for market in markets {
-        if market.price_history.is_empty() {
+        if market.price_history.len() < 2 {
             continue;
         }
 
-        let mid_idx = market.price_history.len() / 2;
-        let entry_price = market.price_history[mid_idx].p;
+        // Enter at the first tick — no look-ahead bias
+        let entry_price = market.price_history[0].p;
 
         if entry_price <= 0.01 || entry_price >= 0.99 {
             continue;
@@ -194,6 +202,7 @@ mod tests {
 
     #[test]
     fn test_backtest_profitable_edge() {
+        // Entry at first tick (0.50), oracle knows outcome
         let markets = vec![
             make_market("m1", vec![0.50, 0.50, 0.50, 0.55, 0.60], true),
             make_market("m2", vec![0.80, 0.80, 0.80, 0.75, 0.70], false),
@@ -203,6 +212,8 @@ mod tests {
             starting_cash: 1000.0,
             edge_threshold: 0.05,
             position_size_pct: 0.10,
+            slippage_pct: 0.0,
+            fee_pct: 0.0,
         };
 
         let result = run_backtest(&markets, &config, |market, _price| {
@@ -226,10 +237,39 @@ mod tests {
             starting_cash: 1000.0,
             edge_threshold: 0.05,
             position_size_pct: 0.10,
+            slippage_pct: 0.0,
+            fee_pct: 0.0,
         };
 
         let result = run_backtest(&markets, &config, |_market, price| (price, 1.0));
 
         assert_eq!(result.metrics.total_trades, 0);
+    }
+
+    #[test]
+    fn test_slippage_and_fees_reduce_profit() {
+        let markets = vec![make_market("m1", vec![0.50, 0.55, 0.60, 0.65, 0.70], true)];
+
+        let no_costs = BacktestConfig {
+            starting_cash: 1000.0,
+            edge_threshold: 0.05,
+            position_size_pct: 0.10,
+            slippage_pct: 0.0,
+            fee_pct: 0.0,
+        };
+
+        let with_costs = BacktestConfig {
+            slippage_pct: 0.02,
+            fee_pct: 0.02,
+            ..no_costs
+        };
+
+        let r1 = run_backtest(&markets, &no_costs, |_, _| (0.90, 1.0));
+        let r2 = run_backtest(&markets, &with_costs, |_, _| (0.90, 1.0));
+
+        assert!(
+            r2.metrics.total_pnl < r1.metrics.total_pnl,
+            "Costs should reduce profit"
+        );
     }
 }
