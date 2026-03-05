@@ -48,9 +48,9 @@ pub fn evaluate(
     }
 
     let (side, price) = if edge > 0.0 {
-        (Side::Yes, market.yes_price)
+        (Side::Yes, market.yes_price())
     } else {
-        (Side::No, market.no_price)
+        (Side::No, market.no_price())
     };
 
     let kelly_pct = fractional_kelly(estimate.estimated_probability, price, config.kelly_fraction);

@@ -1,5 +1,5 @@
-use anyhow::Result;
 use crate::strategies::mispricing::TradeSignal;
+use anyhow::Result;
 
 pub struct PolymarketExecutor {
     // TODO: add Polygon provider + contract instances

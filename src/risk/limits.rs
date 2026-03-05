@@ -9,7 +9,11 @@ pub struct RiskLimits {
 }
 
 impl RiskLimits {
-    pub fn new(max_per_market_pct: f64, max_total_exposure_pct: f64, max_daily_trades: usize) -> Self {
+    pub fn new(
+        max_per_market_pct: f64,
+        max_total_exposure_pct: f64,
+        max_daily_trades: usize,
+    ) -> Self {
         Self {
             max_per_market_pct,
             max_total_exposure_pct,
