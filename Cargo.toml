@@ -31,5 +31,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "2"
 
+# Telegram
+teloxide = { version = "0.13", features = ["macros"] }
+
 # Environment variables
 dotenvy = "0.15"

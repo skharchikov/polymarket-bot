@@ -28,6 +28,18 @@ pub struct HistoricalMarket {
     pub price_history: Vec<PriceTick>,
 }
 
+impl HistoricalMarket {
+    /// Duration of the market in hours based on first and last price tick.
+    pub fn duration_hours(&self) -> f64 {
+        if self.price_history.len() < 2 {
+            return 0.0;
+        }
+        let first = self.price_history.first().unwrap().t;
+        let last = self.price_history.last().unwrap().t;
+        (last - first) as f64 / 3600.0
+    }
+}
+
 /// Compact market info from Gamma API for crawling.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,18 +51,19 @@ pub struct GammaMarket {
     pub clob_token_ids: Option<String>,
     #[serde(default)]
     pub end_date: Option<String>,
-    /// JSON array string, e.g. "[\"1\", \"0\"]" — first element is YES price
     #[serde(default)]
     pub outcome_prices: Option<String>,
-    /// JSON array string, e.g. "[\"Yes\", \"No\"]"
     #[serde(default)]
     pub outcomes: Option<String>,
     #[serde(default)]
     pub category: Option<String>,
+    #[serde(default)]
+    pub volume_num: f64,
+    #[serde(default)]
+    pub liquidity_num: f64,
 }
 
 impl GammaMarket {
-    /// Determine resolution from outcomePrices: ["1","0"] = YES won, ["0","1"] = NO won.
     pub fn resolved_yes(&self) -> Option<bool> {
         let prices_str = self.outcome_prices.as_ref()?;
         let prices: Vec<String> = serde_json::from_str(prices_str).ok()?;
@@ -62,11 +75,10 @@ impl GammaMarket {
         } else if yes_price == 0.0 && no_price == 1.0 {
             Some(false)
         } else {
-            None // not fully resolved
+            None
         }
     }
 
-    /// Parse clobTokenIds JSON array, return first token (YES token).
     pub fn yes_token_id(&self) -> Option<String> {
         let ids_str = self.clob_token_ids.as_ref()?;
         let ids: Vec<String> = serde_json::from_str(ids_str).ok()?;
@@ -85,32 +97,30 @@ impl GammaMarket {
             "solana",
             "sol",
             "crypto",
-            "token",
             "defi",
             "nft",
             "blockchain",
-            "altcoin",
             "dogecoin",
             "doge",
             "xrp",
             "ripple",
             "cardano",
-            "ada",
             "polkadot",
             "avalanche",
-            "avax",
             "chainlink",
-            "link",
             "bnb",
             "binance",
             "coinbase",
             "stablecoin",
-            "usdc",
-            "usdt",
-            "tether",
             "memecoin",
         ];
 
         KEYWORDS.iter().any(|kw| q.contains(kw)) || cat.contains("crypto")
+    }
+
+    /// Returns true for short-duration noise markets (5-min up/down, etc).
+    pub fn is_short_duration_noise(&self) -> bool {
+        let q = self.question.to_lowercase();
+        q.contains("up or down")
     }
 }
