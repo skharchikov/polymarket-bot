@@ -172,14 +172,66 @@ impl LiveScanner {
         })
     }
 
-    /// Fetch recent crypto news from CoinGecko trending + search (free).
+    /// Fetch crypto news from multiple free sources.
     async fn fetch_crypto_news(&self) -> Result<Vec<String>> {
+        let mut headlines = Vec::new();
+
+        // 1. Fear & Greed Index (alternative.me — free, no key)
+        if let Ok(fng) = self.fetch_fear_greed().await {
+            headlines.push(fng);
+        }
+
+        // 2. CoinGecko global market data (free)
+        if let Ok(global) = self.fetch_global_market().await {
+            headlines.extend(global);
+        }
+
+        // 3. CoinGecko trending coins
+        if let Ok(trending) = self.fetch_trending().await {
+            headlines.extend(trending);
+        }
+
+        Ok(headlines)
+    }
+
+    async fn fetch_fear_greed(&self) -> Result<String> {
+        let url = "https://api.alternative.me/fng/?limit=1";
+        let resp: serde_json::Value = self.http.get(url).send().await?.json().await?;
+        let data = &resp["data"][0];
+        let value = data["value"].as_str().unwrap_or("?");
+        let label = data["value_classification"].as_str().unwrap_or("Unknown");
+        Ok(format!("Fear & Greed Index: {value}/100 ({label})"))
+    }
+
+    async fn fetch_global_market(&self) -> Result<Vec<String>> {
+        let url = "https://api.coingecko.com/api/v3/global";
+        let resp: serde_json::Value = self.http.get(url).send().await?.json().await?;
+        let data = &resp["data"];
+
+        let mut info = Vec::new();
+
+        if let Some(cap_change) = data["market_cap_change_percentage_24h_usd"].as_f64() {
+            let total_cap = data["total_market_cap"]["usd"].as_f64().unwrap_or(0.0);
+            info.push(format!(
+                "Total crypto market cap: ${:.0}B ({:+.1}% 24h)",
+                total_cap / 1e9,
+                cap_change
+            ));
+        }
+
+        if let Some(btc_dom) = data["market_cap_percentage"]["btc"].as_f64() {
+            info.push(format!("BTC dominance: {btc_dom:.1}%"));
+        }
+
+        Ok(info)
+    }
+
+    async fn fetch_trending(&self) -> Result<Vec<String>> {
         let url = "https://api.coingecko.com/api/v3/search/trending";
         let resp: serde_json::Value = self.http.get(url).send().await?.json().await?;
 
         let mut headlines = Vec::new();
 
-        // Extract trending coins as market-relevant news
         if let Some(coins) = resp["coins"].as_array() {
             for coin in coins.iter().take(5) {
                 if let (Some(name), Some(symbol), Some(price_change)) = (
@@ -192,15 +244,6 @@ impl LiveScanner {
                     headlines.push(format!(
                         "{name} ({symbol}) trending, {price_change:+.1}% 24h"
                     ));
-                }
-            }
-        }
-
-        // Extract trending NFTs/categories for broader market sentiment
-        if let Some(nfts) = resp["nfts"].as_array() {
-            for nft in nfts.iter().take(2) {
-                if let Some(name) = nft["name"].as_str() {
-                    headlines.push(format!("NFT trending: {name}"));
                 }
             }
         }

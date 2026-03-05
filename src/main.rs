@@ -32,7 +32,8 @@ async fn main() -> Result<()> {
     let cmd = std::env::args().nth(1).unwrap_or_default();
     match cmd.as_str() {
         "backtest" => run_backtest().await,
-        _ => run_live().await,
+        "test" => run_live_with_interval(2).await, // scan every 2 minutes
+        _ => run_live_with_interval(SCAN_INTERVAL_MINS).await,
     }
 }
 
@@ -191,8 +192,11 @@ fn log_result(
     );
 }
 
-async fn run_live() -> Result<()> {
-    tracing::info!("Polymarket Signal Bot starting...");
+async fn run_live_with_interval(scan_interval_mins: u64) -> Result<()> {
+    tracing::info!(
+        interval_mins = scan_interval_mins,
+        "Polymarket Signal Bot starting..."
+    );
 
     let notifier = telegram::notifier::TelegramNotifier::from_env()?;
     let scanner = scanner::live::LiveScanner::new();
@@ -261,7 +265,7 @@ async fn run_live() -> Result<()> {
         let remaining = MAX_SIGNALS_PER_DAY.saturating_sub(portfolio.signals_sent_today);
         if remaining == 0 {
             tracing::info!("Daily signal limit reached");
-            tokio::time::sleep(Duration::from_secs(SCAN_INTERVAL_MINS * 60)).await;
+            tokio::time::sleep(Duration::from_secs(scan_interval_mins * 60)).await;
             continue;
         }
 
@@ -320,11 +324,11 @@ async fn run_live() -> Result<()> {
         }
 
         tracing::info!(
-            next_scan_mins = SCAN_INTERVAL_MINS,
+            next_scan_mins = scan_interval_mins,
             signals_today = portfolio.signals_sent_today,
             open_bets = portfolio.open_bets().len(),
             "Scan cycle complete"
         );
-        tokio::time::sleep(Duration::from_secs(SCAN_INTERVAL_MINS * 60)).await;
+        tokio::time::sleep(Duration::from_secs(scan_interval_mins * 60)).await;
     }
 }
