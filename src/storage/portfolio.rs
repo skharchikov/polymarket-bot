@@ -323,6 +323,63 @@ impl PortfolioState {
         self.last_daily_report_date = Utc::now().format("%Y-%m-%d").to_string();
         let _ = self.save();
     }
+
+    /// Build a summary of past resolved bets for LLM learning.
+    /// Shows what we bet on, our estimate vs reality, and whether we won/lost.
+    pub fn learning_summary(&self) -> String {
+        let resolved = self.resolved_bets();
+        if resolved.is_empty() {
+            return String::new();
+        }
+
+        // Take last 10 resolved bets (most recent mistakes/wins)
+        let recent: Vec<&&Bet> = resolved.iter().rev().take(10).collect();
+
+        let wins = resolved.iter().filter(|b| b.won == Some(true)).count();
+        let losses = resolved.len() - wins;
+
+        let mut s = format!(
+            "Overall record: {wins}W/{losses}L ({:.0}% win rate)\n",
+            if wins + losses > 0 {
+                wins as f64 / (wins + losses) as f64 * 100.0
+            } else {
+                0.0
+            }
+        );
+
+        for bet in &recent {
+            let outcome = match bet.won {
+                Some(true) => "WON",
+                Some(false) => "LOST",
+                None => "PENDING",
+            };
+            let pnl = bet.pnl.unwrap_or(0.0);
+            s.push_str(&format!(
+                "- \"{question}\" | bought YES @ {price:.0}¢, est {est:.0}%, edge +{edge:.0}% | {outcome} (€{pnl:+.2}) | reason: {reason}\n",
+                question = truncate(&bet.question, 60),
+                price = bet.entry_price * 100.0,
+                est = bet.estimated_prob * 100.0,
+                edge = bet.edge * 100.0,
+                reason = truncate(&bet.reasoning, 80),
+            ));
+        }
+
+        // Add pattern analysis
+        let lost_bets: Vec<&&Bet> = resolved.iter().filter(|b| b.won == Some(false)).collect();
+        if !lost_bets.is_empty() {
+            let avg_lost_edge: f64 =
+                lost_bets.iter().map(|b| b.edge).sum::<f64>() / lost_bets.len() as f64;
+            let avg_lost_conf: f64 =
+                lost_bets.iter().map(|b| b.confidence).sum::<f64>() / lost_bets.len() as f64;
+            s.push_str(&format!(
+                "PATTERN: Lost bets had avg edge {:.0}%, avg confidence {:.0}%. Be more cautious with similar profiles.\n",
+                avg_lost_edge * 100.0,
+                avg_lost_conf * 100.0,
+            ));
+        }
+
+        s
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {

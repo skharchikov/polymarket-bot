@@ -281,7 +281,8 @@ async fn run_live_with_interval(scan_interval_mins: u64) -> Result<()> {
             .map(|b| b.market_id.clone())
             .collect();
 
-        match scanner.scan(&skip_ids).await {
+        let past_bets = portfolio.learning_summary();
+        match scanner.scan(&skip_ids, &past_bets).await {
             Ok(signals) => {
                 for signal in signals.into_iter().take(remaining) {
                     if let Some(bet) = portfolio.place_bet(

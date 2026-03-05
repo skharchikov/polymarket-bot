@@ -366,7 +366,7 @@ impl LiveScanner {
         (current_price + signal).clamp(0.02, 0.98)
     }
 
-    /// LLM call — only for top technical candidates.
+    /// LLM call — only for top technical candidates. Includes past bet history for learning.
     async fn llm_estimate(
         &self,
         question: &str,
@@ -374,6 +374,7 @@ impl LiveScanner {
         history: &[PriceTick],
         end_date: Option<&str>,
         crypto: &CryptoContext,
+        past_bets: &str,
     ) -> Result<(f64, f64, String)> {
         let history_summary = if history.len() >= 5 {
             let recent: Vec<&PriceTick> = history.iter().rev().take(10).collect();
@@ -394,16 +395,26 @@ impl LiveScanner {
         let expiry = end_date.unwrap_or("Unknown");
         let now: DateTime<Utc> = Utc::now();
 
-        let prompt = format!(
+        let mut prompt = format!(
             "{crypto}\n\n\
              Market: \"{question}\"\n\
              Current YES price: {current_price:.4} ({pct:.1}%)\n\
              Expiry: {expiry}\n\
              Current time: {now}\n\n\
-             Price history:\n{history_summary}\n\n\
-             Using the LIVE crypto prices above, estimate TRUE probability of YES.",
+             Price history:\n{history_summary}",
             crypto = crypto.summary(),
             pct = current_price * 100.0,
+        );
+
+        if !past_bets.is_empty() {
+            prompt.push_str(&format!(
+                "\n\nPAST BET HISTORY (learn from these):\n{past_bets}"
+            ));
+        }
+
+        prompt.push_str(
+            "\n\nUsing the LIVE crypto prices and learning from past bets above, \
+             estimate TRUE probability of YES.",
         );
 
         let response = self.llm.chat(prompt, vec![]).await?;
@@ -411,7 +422,12 @@ impl LiveScanner {
     }
 
     /// Main scan: technical filter → top N → LLM confirmation → signals.
-    pub async fn scan(&self, skip_market_ids: &[String]) -> Result<Vec<Signal>> {
+    /// `past_bets_summary` is fed to the LLM so it can learn from mistakes.
+    pub async fn scan(
+        &self,
+        skip_market_ids: &[String],
+        past_bets_summary: &str,
+    ) -> Result<Vec<Signal>> {
         // 1. Fetch live crypto prices (free)
         let crypto = match self.fetch_crypto_context().await {
             Ok(c) => {
@@ -522,6 +538,7 @@ impl LiveScanner {
                     &tc.history,
                     tc.market.end_date.as_deref(),
                     &crypto,
+                    past_bets_summary,
                 )
                 .await
             {
