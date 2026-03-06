@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::future::Future;
 
 use super::metrics::BacktestMetrics;
 use super::portfolio::{Portfolio, Side};
@@ -97,81 +96,6 @@ where
     }
 
     // Resolve all positions
-    let market_map: HashMap<&str, bool> = markets
-        .iter()
-        .map(|m| (m.market_id.as_str(), m.resolved_yes))
-        .collect();
-
-    let open_ids: Vec<String> = portfolio.positions.keys().cloned().collect();
-    for market_id in open_ids {
-        if let Some(&resolved_yes) = market_map.get(market_id.as_str()) {
-            portfolio.resolve(&market_id, resolved_yes);
-        }
-    }
-
-    portfolio.snapshot_equity(&HashMap::new());
-
-    let metrics = BacktestMetrics::compute(&portfolio, &predictions);
-    BacktestResult { portfolio, metrics }
-}
-
-/// Async version for LLM-based estimators.
-pub async fn run_backtest_async<F, Fut>(
-    markets: &[HistoricalMarket],
-    config: &BacktestConfig,
-    mut estimate_fn: F,
-) -> BacktestResult
-where
-    F: FnMut(&[PriceTick], f64) -> Fut,
-    Fut: Future<Output = (f64, f64)>,
-{
-    let mut portfolio =
-        Portfolio::with_costs(config.starting_cash, config.slippage_pct, config.fee_pct);
-    let mut predictions: Vec<(f64, bool)> = Vec::new();
-
-    for market in markets {
-        let n = market.price_history.len();
-        let entry_idx = ((n as f64 * config.entry_point) as usize).max(config.min_lookback);
-
-        if entry_idx >= n {
-            continue;
-        }
-
-        let observed = &market.price_history[..entry_idx];
-        let entry_price = market.price_history[entry_idx].p;
-
-        if entry_price <= 0.02 || entry_price >= 0.98 {
-            continue;
-        }
-
-        let (estimated_prob, confidence) = estimate_fn(observed, entry_price).await;
-        predictions.push((estimated_prob, market.resolved_yes));
-
-        let edge = estimated_prob - entry_price;
-        let effective_edge = edge * confidence;
-
-        if effective_edge.abs() < config.edge_threshold {
-            continue;
-        }
-
-        let (side, price) = if edge > 0.0 {
-            (Side::Yes, entry_price)
-        } else {
-            (Side::No, 1.0 - entry_price)
-        };
-
-        let size = config.position_size_pct * portfolio.cash / price;
-        if size <= 0.0 {
-            continue;
-        }
-
-        if portfolio.open_position(&market.market_id, side, size, price) {
-            let prices: HashMap<String, f64> =
-                HashMap::from([(market.market_id.clone(), entry_price)]);
-            portfolio.snapshot_equity(&prices);
-        }
-    }
-
     let market_map: HashMap<&str, bool> = markets
         .iter()
         .map(|m| (m.market_id.as_str(), m.resolved_yes))

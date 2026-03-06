@@ -8,7 +8,6 @@ pub enum Side {
 
 #[derive(Debug, Clone)]
 pub struct Position {
-    pub market_id: String,
     pub side: Side,
     pub size: f64,
     pub entry_price: f64,
@@ -27,18 +26,10 @@ pub struct Portfolio {
 
 #[derive(Debug, Clone)]
 pub struct TradeResult {
-    pub market_id: String,
-    pub side: Side,
-    pub entry_price: f64,
-    pub size: f64,
     pub pnl: f64,
 }
 
 impl Portfolio {
-    pub fn new(starting_cash: f64) -> Self {
-        Self::with_costs(starting_cash, 0.0, 0.0)
-    }
-
     pub fn with_costs(starting_cash: f64, slippage_pct: f64, fee_pct: f64) -> Self {
         Self {
             starting_cash,
@@ -66,7 +57,6 @@ impl Portfolio {
         self.positions.insert(
             market_id.to_string(),
             Position {
-                market_id: market_id.to_string(),
                 side,
                 size,
                 entry_price: slipped_price,
@@ -89,13 +79,7 @@ impl Portfolio {
         let pnl = net_payout - cost;
 
         self.cash += net_payout;
-        self.trade_results.push(TradeResult {
-            market_id: market_id.to_string(),
-            side: pos.side,
-            entry_price: pos.entry_price,
-            size: pos.size,
-            pnl,
-        });
+        self.trade_results.push(TradeResult { pnl });
 
         Some(pnl)
     }

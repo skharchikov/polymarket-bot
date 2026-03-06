@@ -54,12 +54,14 @@ pub struct GammaMarket {
     #[serde(default)]
     pub outcome_prices: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub outcomes: Option<String>,
     #[serde(default)]
     pub category: Option<String>,
     #[serde(default)]
     pub volume_num: f64,
     #[serde(default)]
+    #[allow(dead_code)]
     pub liquidity_num: f64,
 }
 

@@ -1,0 +1,4 @@
+target/
+.env
+portfolio_state.json
+.git/

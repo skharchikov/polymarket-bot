@@ -1,22 +1,21 @@
-mod agent;
 mod backtest;
 mod data;
-mod execution;
-mod markets;
 mod pricing;
-mod risk;
 mod scanner;
 mod storage;
-mod strategies;
 mod telegram;
 
 use anyhow::Result;
+use sqlx::PgPool;
 use std::time::Duration;
-use storage::portfolio::PortfolioState;
+use storage::portfolio::NewBet;
+use storage::postgres::PgPortfolio;
 
 const MAX_SIGNALS_PER_DAY: usize = 3;
 const SCAN_INTERVAL_MINS: u64 = 30;
-const STARTING_BANKROLL: f64 = 300.0;
+const SLIPPAGE_PCT: f64 = 0.01;
+const FEE_PCT: f64 = 0.02;
+const MIN_BET: f64 = 10.0;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -38,7 +37,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run_backtest() -> Result<()> {
-    use backtest::engine::{BacktestConfig, BacktestResult, run_backtest};
+    use backtest::engine::{BacktestConfig, run_backtest};
     use data::crawler::{Crawler, CrawlerConfig};
 
     tracing::info!("Polymarket backtest starting...");
@@ -198,50 +197,53 @@ async fn run_live_with_interval(scan_interval_mins: u64) -> Result<()> {
         "Polymarket Signal Bot starting..."
     );
 
+    let database_url =
+        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for live mode");
+    let pool = PgPool::connect(&database_url).await?;
+    let portfolio = PgPortfolio::new(pool).await?;
+    portfolio.run_migrations().await?;
+    tracing::info!("Database connected and migrations applied");
+
     let notifier = telegram::notifier::TelegramNotifier::from_env()?;
     let scanner = scanner::live::LiveScanner::new();
-    let mut portfolio = PortfolioState::load_or_create(STARTING_BANKROLL);
+
+    let bankroll = portfolio.bankroll().await?;
+    let open_count = portfolio.open_bets().await?.len();
 
     let _ = notifier
         .send(&format!(
             "🤖 *Polymarket Signal Bot started*\n\
-             💰 Bankroll: `€{:.2}`\n\
-             📊 Open bets: {}\n\
-             Scanning crypto markets for high-edge YES opportunities...",
-            portfolio.bankroll,
-            portfolio.open_bets().len(),
+             💰 Bankroll: `€{bankroll:.2}`\n\
+             📊 Open bets: {open_count}\n\
+             Scanning crypto markets for high-edge opportunities...",
         ))
         .await;
 
     loop {
-        portfolio.reset_daily_if_needed();
+        portfolio.reset_daily_if_needed().await?;
 
         // Check if any open bets have resolved
-        let open_ids: Vec<String> = portfolio
-            .open_bets()
-            .iter()
-            .map(|b| b.market_id.clone())
-            .collect();
+        let open_ids = portfolio.open_bet_market_ids().await?;
 
         for market_id in &open_ids {
             tokio::time::sleep(Duration::from_millis(200)).await;
             match scanner.check_market_resolution(market_id).await {
                 Ok(Some(yes_won)) => {
-                    if let Some(pnl) = portfolio.resolve_bet(market_id, yes_won) {
+                    if let Some(pnl) = portfolio.resolve_bet(market_id, yes_won).await? {
+                        let bankroll = portfolio.bankroll().await?;
                         let emoji = if pnl > 0.0 { "✅" } else { "❌" };
                         let outcome = if yes_won { "YES" } else { "NO" };
                         let msg = format!(
                             "{emoji} *Bet resolved: {outcome}*\n\
                              💵 PnL: `€{pnl:+.2}`\n\
                              💰 Bankroll: `€{bankroll:.2}`",
-                            bankroll = portfolio.bankroll,
                         );
                         let _ = notifier.send(&msg).await;
                         tracing::info!(
                             market = %market_id,
                             outcome = outcome,
                             pnl = format_args!("€{pnl:+.2}"),
-                            bankroll = format_args!("€{:.2}", portfolio.bankroll),
+                            bankroll = format_args!("€{bankroll:.2}"),
                             "Bet resolved"
                         );
                     }
@@ -254,66 +256,96 @@ async fn run_live_with_interval(scan_interval_mins: u64) -> Result<()> {
         }
 
         // Send daily report if we haven't today
-        if portfolio.should_send_daily_report() && !portfolio.bets.is_empty() {
-            portfolio.take_snapshot();
-            let report = portfolio.daily_summary();
+        let has_bets = !portfolio.all_bets().await?.is_empty();
+        if portfolio.should_send_daily_report().await? && has_bets {
+            portfolio.take_snapshot().await?;
+            let report = portfolio.daily_summary().await?;
             let _ = notifier.send(&report).await;
-            portfolio.mark_daily_report_sent();
+            portfolio.mark_daily_report_sent().await?;
             tracing::info!("Daily report sent");
         }
 
-        let remaining = MAX_SIGNALS_PER_DAY.saturating_sub(portfolio.signals_sent_today);
+        let signals_today = portfolio.signals_sent_today().await?;
+        let remaining = MAX_SIGNALS_PER_DAY.saturating_sub(signals_today);
         if remaining == 0 {
             tracing::info!("Daily signal limit reached");
             tokio::time::sleep(Duration::from_secs(scan_interval_mins * 60)).await;
             continue;
         }
 
+        let bankroll = portfolio.bankroll().await?;
         tracing::info!(
             remaining = remaining,
-            bankroll = format_args!("€{:.2}", portfolio.bankroll),
+            bankroll = format_args!("€{bankroll:.2}"),
             "Starting scan..."
         );
 
-        let skip_ids: Vec<String> = portfolio
-            .open_bets()
-            .iter()
-            .map(|b| b.market_id.clone())
-            .collect();
+        let skip_ids = portfolio.open_bet_market_ids().await?;
+        let past_bets = portfolio.learning_summary().await?;
 
-        let past_bets = portfolio.learning_summary();
         match scanner.scan(&skip_ids, &past_bets).await {
             Ok(signals) => {
                 for signal in signals.into_iter().take(remaining) {
-                    if let Some(bet) = portfolio.place_bet(
-                        &signal.market_id,
-                        &signal.question,
-                        signal.current_price,
-                        signal.kelly_size,
-                        signal.estimated_prob,
-                        signal.confidence,
-                        signal.edge,
-                        &signal.reasoning,
-                        signal.end_date.as_deref(),
-                    ) {
-                        tracing::info!(
-                            market = %bet.question,
-                            cost = format_args!("€{:.2}", bet.cost),
-                            price = format_args!("{:.1}¢", bet.slipped_price * 100.0),
-                            edge = format_args!("+{:.1}%", bet.edge * 100.0),
-                            bankroll = format_args!("€{:.2}", portfolio.bankroll),
-                            "Bet placed"
-                        );
+                    let bankroll = portfolio.bankroll().await?;
 
-                        let msg = format!(
-                            "{}\n\n💸 *Paper bet placed:* `€{:.2}` @ `{:.1}¢` (incl. 1% slippage + 2% fee)\n\
-                             💰 Remaining bankroll: `€{:.2}`",
-                            signal.to_telegram_message(),
-                            bet.cost,
-                            bet.slipped_price * 100.0,
-                            portfolio.bankroll,
+                    let raw_bet = bankroll * signal.kelly_size;
+                    let bet_amount = raw_bet.max(MIN_BET);
+                    let slipped_price = (signal.current_price * (1.0 + SLIPPAGE_PCT)).min(0.99);
+                    let shares = bet_amount / slipped_price;
+                    let fee = bet_amount * FEE_PCT;
+                    let total_cost = bet_amount + fee;
+
+                    if total_cost > bankroll {
+                        tracing::warn!(
+                            bankroll = format_args!("€{bankroll:.2}"),
+                            cost = format_args!("€{total_cost:.2}"),
+                            "Insufficient bankroll"
                         );
-                        let _ = notifier.send(&msg).await;
+                        continue;
+                    }
+
+                    let new_bet = NewBet {
+                        market_id: signal.market_id.clone(),
+                        question: signal.question.clone(),
+                        side: signal.side.clone(),
+                        entry_price: signal.current_price,
+                        slipped_price,
+                        shares,
+                        cost: bet_amount,
+                        fee,
+                        estimated_prob: signal.estimated_prob,
+                        confidence: signal.confidence,
+                        edge: signal.edge,
+                        kelly_size: signal.kelly_size,
+                        reasoning: signal.reasoning.clone(),
+                        end_date: signal.end_date.clone(),
+                        context: Some(signal.context.clone()),
+                    };
+
+                    match portfolio.place_bet(&new_bet).await {
+                        Ok(_bet_id) => {
+                            let new_bankroll = portfolio.bankroll().await?;
+                            tracing::info!(
+                                market = %signal.question,
+                                side = %signal.side,
+                                cost = format_args!("€{bet_amount:.2}"),
+                                price = format_args!("{:.1}¢", slipped_price * 100.0),
+                                edge = format_args!("+{:.1}%", signal.edge * 100.0),
+                                bankroll = format_args!("€{new_bankroll:.2}"),
+                                "Bet placed"
+                            );
+
+                            let msg = format!(
+                                "{}\n\n💸 *Paper bet placed:* `€{bet_amount:.2}` @ `{:.1}¢` (incl. 1% slippage + 2% fee)\n\
+                                 💰 Remaining bankroll: `€{new_bankroll:.2}`",
+                                signal.to_telegram_message(),
+                                slipped_price * 100.0,
+                            );
+                            let _ = notifier.send(&msg).await;
+                        }
+                        Err(e) => {
+                            tracing::error!(err = %e, "Failed to place bet in DB");
+                        }
                     }
 
                     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -324,10 +356,12 @@ async fn run_live_with_interval(scan_interval_mins: u64) -> Result<()> {
             }
         }
 
+        let signals_today = portfolio.signals_sent_today().await?;
+        let open_count = portfolio.open_bets().await?.len();
         tracing::info!(
             next_scan_mins = scan_interval_mins,
-            signals_today = portfolio.signals_sent_today,
-            open_bets = portfolio.open_bets().len(),
+            signals_today = signals_today,
+            open_bets = open_count,
             "Scan cycle complete"
         );
         tokio::time::sleep(Duration::from_secs(scan_interval_mins * 60)).await;

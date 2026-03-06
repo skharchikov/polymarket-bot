@@ -1,21 +1,60 @@
-use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
-const STATE_FILE: &str = "portfolio_state.json";
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum BetSide {
+    Yes,
+    No,
+}
 
-/// Slippage: price moves against us by this fraction when entering.
-const SLIPPAGE_PCT: f64 = 0.01;
-/// Polymarket trading fee (2% on profit, approximated as 2% of notional).
-const FEE_PCT: f64 = 0.02;
-/// Minimum bet size in EUR.
-const MIN_BET: f64 = 10.0;
+impl std::fmt::Display for BetSide {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BetSide::Yes => write!(f, "YES"),
+            BetSide::No => write!(f, "NO"),
+        }
+    }
+}
+
+/// Snapshot of market context at bet placement time — for post-mortem learning.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BetContext {
+    pub btc_price: f64,
+    pub eth_price: f64,
+    pub sol_price: f64,
+    pub btc_24h_change: f64,
+    pub btc_funding_rate: f64,
+    pub btc_open_interest: f64,
+    pub fear_greed: String,
+    pub book_depth: f64,
+    pub news_headlines: Vec<String>,
+}
+
+/// Parameters for placing a new bet.
+pub struct NewBet {
+    pub market_id: String,
+    pub question: String,
+    pub side: BetSide,
+    pub entry_price: f64,
+    pub slipped_price: f64,
+    pub shares: f64,
+    pub cost: f64,
+    pub fee: f64,
+    pub estimated_prob: f64,
+    pub confidence: f64,
+    pub edge: f64,
+    pub kelly_size: f64,
+    pub reasoning: String,
+    pub end_date: Option<String>,
+    pub context: Option<BetContext>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bet {
     pub market_id: String,
     pub question: String,
+    #[serde(default = "default_side")]
+    pub side: BetSide,
     pub entry_price: f64,
     pub slipped_price: f64,
     pub shares: f64,
@@ -27,11 +66,30 @@ pub struct Bet {
     pub kelly_size: f64,
     pub reasoning: String,
     pub end_date: Option<String>,
+    #[serde(default)]
+    pub context: Option<BetContext>,
     pub placed_at: DateTime<Utc>,
     pub resolved: bool,
     pub won: Option<bool>,
     pub pnl: Option<f64>,
     pub resolved_at: Option<DateTime<Utc>>,
+}
+
+fn default_side() -> BetSide {
+    BetSide::Yes
+}
+
+/// In-memory portfolio state, used by `PgPortfolio::learning_summary` to
+/// generate LLM feedback from the bet history stored in Postgres.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PortfolioState {
+    pub starting_bankroll: f64,
+    pub bankroll: f64,
+    pub bets: Vec<Bet>,
+    pub daily_snapshots: Vec<DailySnapshot>,
+    pub signals_sent_today: usize,
+    pub last_signal_date: String,
+    pub last_daily_report_date: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,336 +104,329 @@ pub struct DailySnapshot {
     pub roi_pct: f64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PortfolioState {
-    pub starting_bankroll: f64,
-    pub bankroll: f64,
-    pub bets: Vec<Bet>,
-    pub daily_snapshots: Vec<DailySnapshot>,
-    pub signals_sent_today: usize,
-    pub last_signal_date: String,
-    pub last_daily_report_date: String,
-}
-
 impl PortfolioState {
-    pub fn new(starting_bankroll: f64) -> Self {
-        Self {
-            starting_bankroll,
-            bankroll: starting_bankroll,
-            bets: Vec::new(),
-            daily_snapshots: Vec::new(),
-            signals_sent_today: 0,
-            last_signal_date: String::new(),
-            last_daily_report_date: String::new(),
-        }
-    }
-
-    pub fn load_or_create(starting_bankroll: f64) -> Self {
-        let path = Path::new(STATE_FILE);
-        if path.exists() {
-            match std::fs::read_to_string(path) {
-                Ok(content) => match serde_json::from_str(&content) {
-                    Ok(state) => {
-                        tracing::info!(bankroll = %format_args!("€{:.2}", starting_bankroll), "Loaded portfolio state");
-                        return state;
-                    }
-                    Err(e) => {
-                        tracing::warn!(err = %e, "Failed to parse state file, starting fresh");
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(err = %e, "Failed to read state file, starting fresh");
-                }
-            }
-        }
-        tracing::info!(bankroll = %format_args!("€{:.2}", starting_bankroll), "Starting fresh portfolio");
-        Self::new(starting_bankroll)
-    }
-
-    pub fn save(&self) -> Result<()> {
-        let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(STATE_FILE, json).context("failed to write portfolio state")?;
-        Ok(())
-    }
-
-    /// Reset daily signal counter if it's a new day.
-    pub fn reset_daily_if_needed(&mut self) {
-        let today = Utc::now().format("%Y-%m-%d").to_string();
-        if self.last_signal_date != today {
-            self.signals_sent_today = 0;
-            self.last_signal_date = today;
-        }
-    }
-
-    /// Place a paper bet with realistic slippage and fees.
-    /// Returns the bet details or None if we can't afford it.
-    pub fn place_bet(
-        &mut self,
-        market_id: &str,
-        question: &str,
-        entry_price: f64,
-        kelly_size: f64,
-        estimated_prob: f64,
-        confidence: f64,
-        edge: f64,
-        reasoning: &str,
-        end_date: Option<&str>,
-    ) -> Option<Bet> {
-        // Calculate bet size: kelly fraction of bankroll, but at least MIN_BET
-        let raw_bet = self.bankroll * kelly_size;
-        let bet_amount = raw_bet.max(MIN_BET);
-
-        if bet_amount > self.bankroll {
-            tracing::warn!(
-                bankroll = format_args!("€{:.2}", self.bankroll),
-                bet = format_args!("€{:.2}", bet_amount),
-                "Insufficient bankroll"
-            );
-            return None;
-        }
-
-        // Slippage: we pay more than the displayed price
-        let slipped_price = (entry_price * (1.0 + SLIPPAGE_PCT)).min(0.99);
-
-        // Shares = bet_amount / slipped_price
-        let shares = bet_amount / slipped_price;
-
-        // Fee on the trade
-        let fee = bet_amount * FEE_PCT;
-
-        // Total cost = bet + fee
-        let total_cost = bet_amount + fee;
-
-        if total_cost > self.bankroll {
-            tracing::warn!(
-                bankroll = format_args!("€{:.2}", self.bankroll),
-                cost = format_args!("€{:.2}", total_cost),
-                "Insufficient bankroll after fees"
-            );
-            return None;
-        }
-
-        self.bankroll -= total_cost;
-
-        let bet = Bet {
-            market_id: market_id.to_string(),
-            question: question.to_string(),
-            entry_price,
-            slipped_price,
-            shares,
-            cost: bet_amount,
-            fee_paid: fee,
-            estimated_prob,
-            confidence,
-            edge,
-            kelly_size,
-            reasoning: reasoning.to_string(),
-            end_date: end_date.map(|s| s.to_string()),
-            placed_at: Utc::now(),
-            resolved: false,
-            won: None,
-            pnl: None,
-            resolved_at: None,
-        };
-
-        self.bets.push(bet.clone());
-        self.signals_sent_today += 1;
-        let _ = self.save();
-
-        Some(bet)
-    }
-
-    /// Resolve a bet. If YES won, payout = shares * 1.0 minus exit fee.
-    /// If NO won, payout = 0.
-    pub fn resolve_bet(&mut self, market_id: &str, yes_won: bool) -> Option<f64> {
-        let bet = self
-            .bets
-            .iter_mut()
-            .find(|b| b.market_id == market_id && !b.resolved)?;
-
-        bet.resolved = true;
-        bet.won = Some(yes_won);
-        bet.resolved_at = Some(Utc::now());
-
-        let gross_payout = if yes_won { bet.shares } else { 0.0 };
-        let exit_fee = gross_payout * FEE_PCT;
-        let net_payout = gross_payout - exit_fee;
-        let pnl = net_payout - bet.cost;
-
-        bet.pnl = Some(pnl);
-        bet.fee_paid += exit_fee;
-
-        self.bankroll += net_payout;
-        let _ = self.save();
-
-        Some(pnl)
-    }
-
-    /// Check if we already have an open bet on this market.
-    pub fn has_open_bet(&self, market_id: &str) -> bool {
-        self.bets
-            .iter()
-            .any(|b| b.market_id == market_id && !b.resolved)
-    }
-
-    pub fn open_bets(&self) -> Vec<&Bet> {
-        self.bets.iter().filter(|b| !b.resolved).collect()
-    }
-
-    pub fn resolved_bets(&self) -> Vec<&Bet> {
+    fn resolved_bets(&self) -> Vec<&Bet> {
         self.bets.iter().filter(|b| b.resolved).collect()
     }
 
-    /// Generate daily stats summary.
-    pub fn daily_summary(&self) -> String {
-        let resolved = self.resolved_bets();
-        let open = self.open_bets();
-        let wins = resolved.iter().filter(|b| b.won == Some(true)).count();
-        let losses = resolved.iter().filter(|b| b.won == Some(false)).count();
-        let total_pnl: f64 = resolved.iter().filter_map(|b| b.pnl).sum();
-        let total_fees: f64 = self.bets.iter().map(|b| b.fee_paid).sum();
-        let roi = if self.starting_bankroll > 0.0 {
-            total_pnl / self.starting_bankroll * 100.0
-        } else {
-            0.0
-        };
-
-        let win_rate = if wins + losses > 0 {
-            wins as f64 / (wins + losses) as f64 * 100.0
-        } else {
-            0.0
-        };
-
-        let open_exposure: f64 = open.iter().map(|b| b.cost).sum();
-
-        let mut msg = format!(
-            "📊 *Daily Portfolio Report*\n\n\
-             💰 Bankroll: `€{bankroll:.2}`\n\
-             📈 Starting: `€{start:.2}`\n\
-             💵 Total PnL: `€{pnl:+.2}`\n\
-             📉 Total fees: `€{fees:.2}`\n\
-             🎯 ROI: `{roi:+.1}%`\n\n\
-             📋 *Stats:*\n\
-             Total bets: {total}\n\
-             Resolved: {resolved_count} (✅ {wins}W / ❌ {losses}L)\n\
-             Win rate: {win_rate:.0}%\n\
-             Open: {open_count} (€{open_exposure:.2} exposed)\n",
-            bankroll = self.bankroll,
-            start = self.starting_bankroll,
-            pnl = total_pnl,
-            fees = total_fees,
-            roi = roi,
-            total = self.bets.len(),
-            resolved_count = resolved.len(),
-            wins = wins,
-            losses = losses,
-            win_rate = win_rate,
-            open_count = open.len(),
-            open_exposure = open_exposure,
-        );
-
-        if !open.is_empty() {
-            msg.push_str("\n🔓 *Open bets:*\n");
-            for bet in &open {
-                msg.push_str(&format!(
-                    "• _{question}_ — €{cost:.2} @ {price:.0}¢ (edge +{edge:.0}%)\n",
-                    question = truncate(&bet.question, 50),
-                    cost = bet.cost,
-                    price = bet.slipped_price * 100.0,
-                    edge = bet.edge * 100.0,
-                ));
-            }
-        }
-
-        msg
-    }
-
-    /// Take a daily snapshot.
-    pub fn take_snapshot(&mut self) {
-        let resolved = self.resolved_bets();
-        let wins = resolved.iter().filter(|b| b.won == Some(true)).count();
-        let losses = resolved.iter().filter(|b| b.won == Some(false)).count();
-        let total_pnl: f64 = resolved.iter().filter_map(|b| b.pnl).sum();
-        let roi = total_pnl / self.starting_bankroll * 100.0;
-
-        let snapshot = DailySnapshot {
-            date: Utc::now().format("%Y-%m-%d").to_string(),
-            bankroll: self.bankroll,
-            open_bets: self.open_bets().len(),
-            total_bets: self.bets.len(),
-            wins,
-            losses,
-            total_pnl,
-            roi_pct: roi,
-        };
-
-        self.daily_snapshots.push(snapshot);
-        let _ = self.save();
-    }
-
-    /// Check if we should send a daily report.
-    pub fn should_send_daily_report(&self) -> bool {
-        let today = Utc::now().format("%Y-%m-%d").to_string();
-        self.last_daily_report_date != today
-    }
-
-    pub fn mark_daily_report_sent(&mut self) {
-        self.last_daily_report_date = Utc::now().format("%Y-%m-%d").to_string();
-        let _ = self.save();
-    }
-
-    /// Build a summary of past resolved bets for LLM learning.
-    /// Shows what we bet on, our estimate vs reality, and whether we won/lost.
+    /// Build a deep analysis of past bets for LLM learning.
     pub fn learning_summary(&self) -> String {
         let resolved = self.resolved_bets();
         if resolved.is_empty() {
             return String::new();
         }
 
-        // Take last 10 resolved bets (most recent mistakes/wins)
-        let recent: Vec<&&Bet> = resolved.iter().rev().take(10).collect();
-
-        let wins = resolved.iter().filter(|b| b.won == Some(true)).count();
-        let losses = resolved.len() - wins;
+        let wins: Vec<&&Bet> = resolved.iter().filter(|b| b.won == Some(true)).collect();
+        let losses: Vec<&&Bet> = resolved.iter().filter(|b| b.won == Some(false)).collect();
+        let total = resolved.len();
+        let win_rate = if total > 0 {
+            wins.len() as f64 / total as f64 * 100.0
+        } else {
+            0.0
+        };
+        let total_pnl: f64 = resolved.iter().filter_map(|b| b.pnl).sum();
 
         let mut s = format!(
-            "Overall record: {wins}W/{losses}L ({:.0}% win rate)\n",
-            if wins + losses > 0 {
-                wins as f64 / (wins + losses) as f64 * 100.0
-            } else {
-                0.0
-            }
+            "=== LEARNING FROM {total} PAST BETS ===\n\
+             Record: {}W/{}L ({win_rate:.0}% win rate), Total PnL: \u{20ac}{total_pnl:+.2}\n\n",
+            wins.len(),
+            losses.len(),
         );
 
-        for bet in &recent {
+        // Recent bet details with context
+        s.push_str("RECENT BETS (newest first):\n");
+        for bet in resolved.iter().rev().take(15) {
             let outcome = match bet.won {
                 Some(true) => "WON",
                 Some(false) => "LOST",
                 None => "PENDING",
             };
             let pnl = bet.pnl.unwrap_or(0.0);
+            let duration = bet
+                .resolved_at
+                .map(|r| {
+                    let hours = (r - bet.placed_at).num_hours();
+                    if hours < 24 {
+                        format!("{hours}h")
+                    } else {
+                        format!("{}d", hours / 24)
+                    }
+                })
+                .unwrap_or_default();
+
             s.push_str(&format!(
-                "- \"{question}\" | bought YES @ {price:.0}¢, est {est:.0}%, edge +{edge:.0}% | {outcome} (€{pnl:+.2}) | reason: {reason}\n",
-                question = truncate(&bet.question, 60),
+                "- \"{q}\" | {side} @ {price:.0}c, est {est:.0}%, edge +{edge:.1}%, conf {conf:.0}% | {outcome} \u{20ac}{pnl:+.2} ({duration})\n",
+                q = truncate(&bet.question, 55),
+                side = bet.side,
                 price = bet.entry_price * 100.0,
                 est = bet.estimated_prob * 100.0,
                 edge = bet.edge * 100.0,
-                reason = truncate(&bet.reasoning, 80),
+                conf = bet.confidence * 100.0,
+            ));
+            s.push_str(&format!("  Reasoning: {}\n", truncate(&bet.reasoning, 120)));
+            if let Some(ctx) = &bet.context {
+                let mut ctx_parts = Vec::new();
+                if ctx.btc_price > 0.0 {
+                    ctx_parts.push(format!(
+                        "BTC ${:.0} ({:+.1}%)",
+                        ctx.btc_price, ctx.btc_24h_change
+                    ));
+                }
+                if ctx.btc_funding_rate != 0.0 {
+                    ctx_parts.push(format!("funding {:.4}%", ctx.btc_funding_rate * 100.0));
+                }
+                if !ctx.fear_greed.is_empty() {
+                    ctx_parts.push(ctx.fear_greed.clone());
+                }
+                if ctx.book_depth > 0.0 {
+                    ctx_parts.push(format!("depth ${:.0}", ctx.book_depth));
+                }
+                if !ctx_parts.is_empty() {
+                    s.push_str(&format!("  Context: {}\n", ctx_parts.join(", ")));
+                }
+                if !ctx.news_headlines.is_empty() {
+                    s.push_str(&format!(
+                        "  News at bet time: {}\n",
+                        ctx.news_headlines.join("; ")
+                    ));
+                }
+            }
+        }
+
+        // Calibration analysis
+        s.push_str("\nCALIBRATION (are our probability estimates accurate?):\n");
+        let buckets: &[(f64, f64, &str)] = &[
+            (0.0, 0.40, "Low (0-40%)"),
+            (0.40, 0.60, "Mid (40-60%)"),
+            (0.60, 0.80, "High (60-80%)"),
+            (0.80, 1.01, "Very high (80%+)"),
+        ];
+        for &(lo, hi, label) in buckets {
+            let in_bucket: Vec<&&Bet> = resolved
+                .iter()
+                .filter(|b| b.estimated_prob >= lo && b.estimated_prob < hi)
+                .collect();
+            if in_bucket.is_empty() {
+                continue;
+            }
+            let avg_est =
+                in_bucket.iter().map(|b| b.estimated_prob).sum::<f64>() / in_bucket.len() as f64;
+            let actual_rate = in_bucket.iter().filter(|b| b.won == Some(true)).count() as f64
+                / in_bucket.len() as f64;
+            let gap = actual_rate - avg_est;
+            let direction = if gap > 0.05 {
+                "UNDERCONFIDENT"
+            } else if gap < -0.05 {
+                "OVERCONFIDENT"
+            } else {
+                "well-calibrated"
+            };
+            s.push_str(&format!(
+                "  {label}: {n} bets, avg est {avg:.0}%, actual win {act:.0}% -> {direction}\n",
+                n = in_bucket.len(),
+                avg = avg_est * 100.0,
+                act = actual_rate * 100.0,
             ));
         }
 
-        // Add pattern analysis
-        let lost_bets: Vec<&&Bet> = resolved.iter().filter(|b| b.won == Some(false)).collect();
-        if !lost_bets.is_empty() {
-            let avg_lost_edge: f64 =
-                lost_bets.iter().map(|b| b.edge).sum::<f64>() / lost_bets.len() as f64;
-            let avg_lost_conf: f64 =
-                lost_bets.iter().map(|b| b.confidence).sum::<f64>() / lost_bets.len() as f64;
+        // Side breakdown
+        let yes_bets: Vec<&&Bet> = resolved.iter().filter(|b| b.side == BetSide::Yes).collect();
+        let no_bets: Vec<&&Bet> = resolved.iter().filter(|b| b.side == BetSide::No).collect();
+        s.push_str("\nSIDE ANALYSIS:\n");
+        for (label, bets) in [("YES", &yes_bets), ("NO", &no_bets)] {
+            if bets.is_empty() {
+                continue;
+            }
+            let w = bets.iter().filter(|b| b.won == Some(true)).count();
+            let pnl: f64 = bets.iter().filter_map(|b| b.pnl).sum();
             s.push_str(&format!(
-                "PATTERN: Lost bets had avg edge {:.0}%, avg confidence {:.0}%. Be more cautious with similar profiles.\n",
+                "  {label}: {n} bets, {w}W/{l}L ({wr:.0}%), PnL \u{20ac}{pnl:+.2}\n",
+                n = bets.len(),
+                l = bets.len() - w,
+                wr = if bets.is_empty() {
+                    0.0
+                } else {
+                    w as f64 / bets.len() as f64 * 100.0
+                },
+            ));
+        }
+
+        // Confidence accuracy
+        s.push_str("\nCONFIDENCE vs REALITY:\n");
+        let conf_buckets: &[(f64, f64, &str)] = &[
+            (0.0, 0.50, "Low conf (<50%)"),
+            (0.50, 0.70, "Medium conf (50-70%)"),
+            (0.70, 1.01, "High conf (70%+)"),
+        ];
+        for &(lo, hi, label) in conf_buckets {
+            let in_bucket: Vec<&&Bet> = resolved
+                .iter()
+                .filter(|b| b.confidence >= lo && b.confidence < hi)
+                .collect();
+            if in_bucket.is_empty() {
+                continue;
+            }
+            let wr = in_bucket.iter().filter(|b| b.won == Some(true)).count() as f64
+                / in_bucket.len() as f64;
+            let pnl: f64 = in_bucket.iter().filter_map(|b| b.pnl).sum();
+            s.push_str(&format!(
+                "  {label}: {n} bets, {wr:.0}% win rate, PnL \u{20ac}{pnl:+.2}\n",
+                n = in_bucket.len(),
+                wr = wr * 100.0,
+            ));
+        }
+
+        // Edge size analysis
+        s.push_str("\nEDGE SIZE vs OUTCOME:\n");
+        let edge_buckets: &[(f64, f64, &str)] = &[
+            (0.0, 0.10, "Small edge (<10%)"),
+            (0.10, 0.20, "Medium edge (10-20%)"),
+            (0.20, 1.0, "Large edge (20%+)"),
+        ];
+        for &(lo, hi, label) in edge_buckets {
+            let in_bucket: Vec<&&Bet> = resolved
+                .iter()
+                .filter(|b| b.edge >= lo && b.edge < hi)
+                .collect();
+            if in_bucket.is_empty() {
+                continue;
+            }
+            let wr = in_bucket.iter().filter(|b| b.won == Some(true)).count() as f64
+                / in_bucket.len() as f64;
+            let pnl: f64 = in_bucket.iter().filter_map(|b| b.pnl).sum();
+            s.push_str(&format!(
+                "  {label}: {n} bets, {wr:.0}% win rate, PnL \u{20ac}{pnl:+.2}\n",
+                n = in_bucket.len(),
+                wr = wr * 100.0,
+            ));
+        }
+
+        // Market context correlation
+        let bets_with_ctx: Vec<&&Bet> = resolved.iter().filter(|b| b.context.is_some()).collect();
+        if !bets_with_ctx.is_empty() {
+            s.push_str("\nCONTEXT PATTERNS:\n");
+            let bullish: Vec<&&Bet> = bets_with_ctx
+                .iter()
+                .filter(|b| b.context.as_ref().unwrap().btc_24h_change > 0.0)
+                .copied()
+                .collect();
+            let bearish: Vec<&&Bet> = bets_with_ctx
+                .iter()
+                .filter(|b| b.context.as_ref().unwrap().btc_24h_change <= 0.0)
+                .copied()
+                .collect();
+            for (label, bets) in [("BTC bullish day", &bullish), ("BTC bearish day", &bearish)] {
+                if bets.is_empty() {
+                    continue;
+                }
+                let wr =
+                    bets.iter().filter(|b| b.won == Some(true)).count() as f64 / bets.len() as f64;
+                let pnl: f64 = bets.iter().filter_map(|b| b.pnl).sum();
+                s.push_str(&format!(
+                    "  {label}: {n} bets, {wr:.0}% win rate, PnL \u{20ac}{pnl:+.2}\n",
+                    n = bets.len(),
+                    wr = wr * 100.0,
+                ));
+            }
+
+            let pos_funding: Vec<&&Bet> = bets_with_ctx
+                .iter()
+                .filter(|b| b.context.as_ref().unwrap().btc_funding_rate > 0.0001)
+                .copied()
+                .collect();
+            let neg_funding: Vec<&&Bet> = bets_with_ctx
+                .iter()
+                .filter(|b| b.context.as_ref().unwrap().btc_funding_rate < -0.0001)
+                .copied()
+                .collect();
+            for (label, bets) in [
+                ("Positive funding", &pos_funding),
+                ("Negative funding", &neg_funding),
+            ] {
+                if bets.is_empty() {
+                    continue;
+                }
+                let wr =
+                    bets.iter().filter(|b| b.won == Some(true)).count() as f64 / bets.len() as f64;
+                s.push_str(&format!(
+                    "  {label}: {n} bets, {wr:.0}% win rate\n",
+                    n = bets.len(),
+                    wr = wr * 100.0,
+                ));
+            }
+        }
+
+        // Actionable lessons
+        s.push_str("\nACTIONABLE LESSONS:\n");
+        if !losses.is_empty() {
+            let avg_lost_edge = losses.iter().map(|b| b.edge).sum::<f64>() / losses.len() as f64;
+            let avg_lost_conf =
+                losses.iter().map(|b| b.confidence).sum::<f64>() / losses.len() as f64;
+            let avg_won_edge = if !wins.is_empty() {
+                wins.iter().map(|b| b.edge).sum::<f64>() / wins.len() as f64
+            } else {
+                0.0
+            };
+            let avg_won_conf = if !wins.is_empty() {
+                wins.iter().map(|b| b.confidence).sum::<f64>() / wins.len() as f64
+            } else {
+                0.0
+            };
+            s.push_str(&format!(
+                "  Winners avg: edge {:.0}%, conf {:.0}%\n\
+                 Losers avg: edge {:.0}%, conf {:.0}%\n",
+                avg_won_edge * 100.0,
+                avg_won_conf * 100.0,
                 avg_lost_edge * 100.0,
                 avg_lost_conf * 100.0,
             ));
+
+            if avg_lost_conf > avg_won_conf {
+                s.push_str("  WARNING: High confidence correlates with LOSSES. Lower confidence thresholds.\n");
+            }
+            if avg_lost_edge > avg_won_edge {
+                s.push_str("  WARNING: Large perceived edges tend to be WRONG. Be more skeptical of big edges.\n");
+            }
+
+            let loss_reasons: Vec<&str> = losses.iter().map(|b| b.reasoning.as_str()).collect();
+            let win_reasons: Vec<&str> = wins.iter().map(|b| b.reasoning.as_str()).collect();
+            let keywords = [
+                "momentum",
+                "trend",
+                "breakout",
+                "support",
+                "resistance",
+                "bullish",
+                "bearish",
+                "sentiment",
+                "funding",
+                "news",
+            ];
+            for kw in &keywords {
+                let in_losses = loss_reasons
+                    .iter()
+                    .filter(|r| r.to_lowercase().contains(kw))
+                    .count();
+                let in_wins = win_reasons
+                    .iter()
+                    .filter(|r| r.to_lowercase().contains(kw))
+                    .count();
+                let loss_rate = in_losses as f64 / losses.len().max(1) as f64;
+                let win_rate_kw = in_wins as f64 / wins.len().max(1) as f64;
+                if in_losses + in_wins >= 2 && loss_rate > win_rate_kw + 0.2 {
+                    s.push_str(&format!(
+                        "  AVOID reasoning based on \"{kw}\" — appears in {:.0}% of losses vs {:.0}% of wins\n",
+                        loss_rate * 100.0,
+                        win_rate_kw * 100.0,
+                    ));
+                } else if in_losses + in_wins >= 2 && win_rate_kw > loss_rate + 0.2 {
+                    s.push_str(&format!(
+                        "  TRUST reasoning based on \"{kw}\" — appears in {:.0}% of wins vs {:.0}% of losses\n",
+                        win_rate_kw * 100.0,
+                        loss_rate * 100.0,
+                    ));
+                }
+            }
         }
 
         s
