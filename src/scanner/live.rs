@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use reqwest::Client;
+use rig::client::{CompletionClient, ProviderClient};
 use rig::completion::Chat;
 use rig::providers::openai;
 use std::time::Duration;
@@ -93,7 +94,7 @@ impl LiveScanner {
     }
 
     /// Build an LLM agent for news-impact assessment.
-    fn build_agent(&self, temperature: f64) -> rig::agent::Agent<openai::CompletionModel> {
+    fn build_agent(&self, temperature: f64) -> rig::agent::Agent<openai::responses_api::ResponsesCompletionModel> {
         self.openai_client
             .agent("gpt-4o-mini")
             .preamble(
