@@ -14,6 +14,7 @@ pub struct StrategyProfile {
 
 /// A signal accepted by a strategy, with strategy-specific sizing.
 pub struct AcceptedSignal {
+    #[allow(dead_code)]
     pub strategy: String,
     pub kelly_size: f64,
 }

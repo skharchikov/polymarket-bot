@@ -35,8 +35,9 @@ pub struct AppConfig {
     #[config(env = "FEE_PCT", default = 0.02)]
     pub fee_pct: f64,
 
-    /// Minimum bet size in EUR.
+    /// Minimum bet size in EUR (used by strategy profiles at runtime).
     #[config(env = "MIN_BET", default = 10.0)]
+    #[allow(dead_code)]
     pub min_bet: f64,
 
     // --- Scanner filters ---
