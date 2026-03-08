@@ -10,8 +10,6 @@ pub struct StrategyProfile {
     pub min_confidence: f64,
     pub max_signals_per_day: usize,
     pub min_bet: f64,
-    /// Fraction of total bankroll allocated to this strategy at init.
-    pub bankroll_share: f64,
 }
 
 /// A signal accepted by a strategy, with strategy-specific sizing.
@@ -29,7 +27,6 @@ impl StrategyProfile {
             min_confidence: 0.40,
             max_signals_per_day: 5,
             min_bet: 5.0,
-            bankroll_share: 0.30,
         }
     }
 
@@ -41,7 +38,6 @@ impl StrategyProfile {
             min_confidence: 0.50,
             max_signals_per_day: 3,
             min_bet: 10.0,
-            bankroll_share: 0.40,
         }
     }
 
@@ -53,7 +49,6 @@ impl StrategyProfile {
             min_confidence: 0.65,
             max_signals_per_day: 2,
             min_bet: 15.0,
-            bankroll_share: 0.30,
         }
     }
 
@@ -73,14 +68,6 @@ impl StrategyProfile {
         if profiles.is_empty() {
             tracing::warn!("No valid strategies configured, defaulting to all three");
             profiles = vec![Self::aggressive(), Self::balanced(), Self::conservative()];
-        }
-
-        // Normalize bankroll shares to sum to 1.0
-        let total_share: f64 = profiles.iter().map(|p| p.bankroll_share).sum();
-        if total_share > 0.0 {
-            for p in &mut profiles {
-                p.bankroll_share /= total_share;
-            }
         }
 
         profiles
@@ -195,14 +182,61 @@ mod tests {
         assert_eq!(profiles.len(), 2);
         assert_eq!(profiles[0].name, "aggressive");
         assert_eq!(profiles[1].name, "conservative");
-        // Shares should be normalized
-        let total: f64 = profiles.iter().map(|p| p.bankroll_share).sum();
-        assert!((total - 1.0).abs() < 1e-9);
     }
 
     #[test]
     fn test_from_config_unknown_fallback() {
         let profiles = StrategyProfile::from_config("invalid");
         assert_eq!(profiles.len(), 3); // falls back to all three
+    }
+
+    #[test]
+    fn test_from_config_single_strategy() {
+        let profiles = StrategyProfile::from_config("balanced");
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "balanced");
+    }
+
+    #[test]
+    fn test_from_config_trims_whitespace() {
+        let profiles = StrategyProfile::from_config("  Aggressive , BALANCED  ");
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0].name, "aggressive");
+        assert_eq!(profiles[1].name, "balanced");
+    }
+
+    #[test]
+    fn test_evaluate_no_edge_rejects() {
+        // price == prob → zero edge
+        let s = StrategyProfile::aggressive();
+        let signal = test_signal(0.0, 0.80, 0.50, 0.50);
+        assert!(s.evaluate(&signal).is_none());
+    }
+
+    #[test]
+    fn test_evaluate_kelly_too_small_rejects() {
+        // Tiny edge → kelly < 0.01
+        let s = StrategyProfile::aggressive();
+        let signal = test_signal(0.005, 0.80, 0.50, 0.505);
+        assert!(s.evaluate(&signal).is_none());
+    }
+
+    #[test]
+    fn test_balanced_thresholds() {
+        let s = StrategyProfile::balanced();
+        // effective_edge = 0.10 * 0.55 = 0.055 < 0.08 → reject
+        let weak = test_signal(0.10, 0.55, 0.50, 0.60);
+        assert!(s.evaluate(&weak).is_none());
+
+        // effective_edge = 0.20 * 0.55 = 0.11 >= 0.08, conf 0.55 >= 0.50 → accept
+        let strong = test_signal(0.20, 0.55, 0.50, 0.70);
+        assert!(s.evaluate(&strong).is_some());
+    }
+
+    #[test]
+    fn test_label() {
+        assert_eq!(StrategyProfile::aggressive().label(), "🔥");
+        assert_eq!(StrategyProfile::balanced().label(), "⚖️");
+        assert_eq!(StrategyProfile::conservative().label(), "🛡️");
     }
 }

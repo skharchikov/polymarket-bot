@@ -1089,4 +1089,86 @@ mod tests {
     fn test_parse_invalid_json_fails() {
         assert!(parse_llm_response("not json at all").is_err());
     }
+
+    // --- sanitize_markdown ---
+
+    #[test]
+    fn test_sanitize_strips_markdown_chars() {
+        let input = "BTC_price *surged* to `$100k` [link]";
+        let result = sanitize_markdown(input);
+        assert!(!result.contains('_'));
+        assert!(!result.contains('*'));
+        assert!(!result.contains('`'));
+        assert!(!result.contains('['));
+        assert!(!result.contains(']'));
+    }
+
+    #[test]
+    fn test_sanitize_preserves_normal_text() {
+        let input = "Bitcoin rose 5% today";
+        assert_eq!(sanitize_markdown(input), input);
+    }
+
+    // --- summarize_history ---
+
+    #[test]
+    fn test_summarize_history_minimal() {
+        let result = summarize_history(&[], 0.5);
+        assert!(result.contains("minimal history"));
+    }
+
+    #[test]
+    fn test_summarize_history_with_data() {
+        let ticks: Vec<crate::data::models::PriceTick> = (0..20)
+            .map(|i| crate::data::models::PriceTick {
+                t: 1000 + i,
+                p: 0.4 + (i as f64) * 0.01,
+            })
+            .collect();
+        let result = summarize_history(&ticks, 0.59);
+        assert!(result.contains("Recent prices:"));
+        assert!(result.contains("Momentum:"));
+        assert!(result.contains("Ticks: 20"));
+    }
+
+    // --- Signal::score ---
+
+    #[test]
+    fn test_signal_score() {
+        let signal = Signal {
+            market_id: "test".into(),
+            question: "Test?".into(),
+            side: BetSide::Yes,
+            current_price: 0.50,
+            estimated_prob: 0.70,
+            confidence: 0.80,
+            edge: 0.20,
+            kelly_size: 0.10,
+            reasoning: "test".into(),
+            end_date: None,
+            volume: 1000.0,
+            context: BetContext::default(),
+        };
+        let expected = 0.20 * 0.80 * 0.10;
+        assert!((signal.score() - expected).abs() < 1e-9);
+    }
+
+    // --- parse edge cases ---
+
+    #[test]
+    fn test_parse_nested_json() {
+        // LLM sometimes wraps in markdown code blocks
+        let input =
+            "```json\n{\"probability\": 0.55, \"confidence\": 0.6, \"reasoning\": \"test\"}\n```";
+        let (prob, _, _) = parse_llm_response(input).unwrap();
+        assert!((prob - 0.55).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_probability_boundaries() {
+        // probability of exactly 0.0 should clamp to 0.01
+        let input = r#"{"probability": 0.0, "confidence": 0.5, "reasoning": "no chance"}"#;
+        let (prob, _, _) = parse_llm_response(input).unwrap();
+        assert!((prob - 0.01).abs() < 1e-9);
+    }
 }

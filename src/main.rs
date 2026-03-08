@@ -232,7 +232,9 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     );
 
     let strategies = Arc::new(StrategyProfile::from_config(&cfg.strategies));
-    portfolio.init_strategy_bankrolls(&strategies).await?;
+    portfolio
+        .init_strategy_bankrolls(&strategies, cfg.strategy_bankroll)
+        .await?;
     let strat_names: Vec<&str> = strategies.iter().map(|s| s.name.as_str()).collect();
     tracing::info!(strategies = ?strat_names, "Strategies loaded");
 
@@ -499,7 +501,16 @@ async fn news_scan_cycle(
 
                     let strat_bankroll = portfolio.strategy_bankroll(&strat.name).await?;
                     let raw_bet = strat_bankroll * accepted.kelly_size;
-                    let bet_amount = raw_bet.max(strat.min_bet);
+                    if raw_bet < strat.min_bet {
+                        tracing::debug!(
+                            strategy = %strat.name,
+                            kelly_bet = format_args!("€{raw_bet:.2}"),
+                            min_bet = format_args!("€{:.2}", strat.min_bet),
+                            "Kelly bet below minimum, skipping"
+                        );
+                        continue;
+                    }
+                    let bet_amount = raw_bet;
                     let slipped_price = (signal.current_price * (1.0 + cfg.slippage_pct)).min(0.99);
                     let shares = bet_amount / slipped_price;
                     let fee = bet_amount * cfg.fee_pct;
@@ -654,9 +665,10 @@ async fn heartbeat_cycle(
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        let truncated: String = s.chars().take(max).collect();
+        format!("{truncated}...")
     }
 }

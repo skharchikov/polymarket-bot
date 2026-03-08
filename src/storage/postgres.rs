@@ -65,11 +65,12 @@ impl PgPortfolio {
     // --- meta helpers ---
 
     async fn get_f64(&self, key: &str) -> Result<f64> {
-        let row: (Option<f64>,) = sqlx::query_as("SELECT value_f64 FROM portfolio WHERE key = $1")
-            .bind(key)
-            .fetch_one(&self.pool)
-            .await?;
-        Ok(row.0.unwrap_or(0.0))
+        let row: Option<(Option<f64>,)> =
+            sqlx::query_as("SELECT value_f64 FROM portfolio WHERE key = $1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.and_then(|r| r.0).unwrap_or(0.0))
     }
 
     async fn set_f64(&self, key: &str, val: f64) -> Result<()> {
@@ -82,12 +83,12 @@ impl PgPortfolio {
     }
 
     async fn get_text(&self, key: &str) -> Result<String> {
-        let row: (Option<String>,) =
+        let row: Option<(Option<String>,)> =
             sqlx::query_as("SELECT value_text FROM portfolio WHERE key = $1")
                 .bind(key)
-                .fetch_one(&self.pool)
+                .fetch_optional(&self.pool)
                 .await?;
-        Ok(row.0.unwrap_or_default())
+        Ok(row.and_then(|r| r.0).unwrap_or_default())
     }
 
     async fn set_text(&self, key: &str, val: &str) -> Result<()> {
@@ -146,34 +147,44 @@ impl PgPortfolio {
         self.set_f64(&format!("bankroll:{strategy}"), val).await
     }
 
+    /// Check if a portfolio key exists.
+    async fn key_exists(&self, key: &str) -> Result<bool> {
+        let row: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM portfolio WHERE key = $1")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.is_some())
+    }
+
     /// Initialize per-strategy bankroll keys if they don't exist.
+    /// Each strategy gets `strategy_bankroll` EUR independently.
     pub async fn init_strategy_bankrolls(
         &self,
         strategies: &[crate::strategy::StrategyProfile],
+        strategy_bankroll: f64,
     ) -> Result<()> {
-        let total = self.bankroll().await?;
-
         for s in strategies {
             let key = format!("bankroll:{}", s.name);
-            // Only init if key doesn't exist (value is 0.0 means not set yet)
-            let existing = self.get_f64(&key).await?;
-            if existing == 0.0 {
-                let amount = total * s.bankroll_share;
-                self.upsert_f64(&key, amount).await?;
+            if !self.key_exists(&key).await? {
+                self.upsert_f64(&key, strategy_bankroll).await?;
                 tracing::info!(
                     strategy = %s.name,
-                    bankroll = format_args!("€{amount:.2}"),
+                    bankroll = format_args!("€{strategy_bankroll:.2}"),
                     "Initialized strategy bankroll"
                 );
             }
         }
 
-        // Init signal counters
+        // Init signal counters (idempotent — won't overwrite existing)
         for s in strategies {
             let key = format!("signals_sent_today:{}", s.name);
-            self.upsert_f64(&key, 0.0).await?;
+            if !self.key_exists(&key).await? {
+                self.upsert_f64(&key, 0.0).await?;
+            }
             let key = format!("last_signal_date:{}", s.name);
-            self.upsert_text(&key, "").await?;
+            if !self.key_exists(&key).await? {
+                self.upsert_text(&key, "").await?;
+            }
         }
 
         Ok(())
@@ -588,9 +599,10 @@ impl BetRow {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        let truncated: String = s.chars().take(max).collect();
+        format!("{truncated}...")
     }
 }

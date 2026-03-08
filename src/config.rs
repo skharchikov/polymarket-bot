@@ -98,6 +98,10 @@ pub struct AppConfig {
     #[config(env = "MAX_PRICE", default = 0.97)]
     pub max_price: f64,
 
+    /// Starting bankroll per strategy in EUR.
+    #[config(env = "STRATEGY_BANKROLL", default = 300.0)]
+    pub strategy_bankroll: f64,
+
     /// Active strategies (comma-separated: aggressive,balanced,conservative).
     #[config(env = "STRATEGIES", default = "aggressive,balanced,conservative")]
     pub strategies: String,

@@ -285,4 +285,45 @@ mod tests {
         assert!((lerp(0.0, 1.0, 0.5) - 0.5).abs() < 1e-9);
         assert!((lerp(2.0, 4.0, 0.25) - 2.5).abs() < 1e-9);
     }
+
+    #[test]
+    fn test_prob_to_bin_boundary() {
+        // Exact bin boundaries
+        assert_eq!(prob_to_bin(0.1), 1);
+        assert_eq!(prob_to_bin(0.5), 5);
+        assert_eq!(prob_to_bin(0.099), 0);
+    }
+
+    #[test]
+    fn test_correct_monotonic() {
+        // With identity curve, correction should be roughly monotonic
+        let curve = identity_curve();
+        let mut prev = 0.0;
+        for i in 1..=19 {
+            let p = i as f64 * 0.05;
+            let c = curve.correct(p);
+            assert!(c >= prev - 0.01, "Non-monotonic at {p}: {c} < {prev}");
+            prev = c;
+        }
+    }
+
+    #[test]
+    fn test_underconfident_curve_shifts_up() {
+        // Actual outcomes are higher than LLM estimates
+        let mut bins = [0.0; NUM_BINS];
+        for (i, bin) in bins.iter_mut().enumerate() {
+            let midpoint = (i as f64 + 0.5) * BIN_WIDTH;
+            *bin = midpoint * 0.5 + 0.35; // shifts actuals upward
+        }
+        let curve = CalibrationCurve {
+            bins,
+            active: true,
+            total_samples: 100,
+        };
+        let corrected = curve.correct(0.35);
+        assert!(
+            corrected > 0.35,
+            "0.35 should be corrected up, got {corrected}"
+        );
+    }
 }
