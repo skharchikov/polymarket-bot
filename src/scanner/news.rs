@@ -219,47 +219,37 @@ impl NewsAggregator {
         Ok(items)
     }
 
-    /// Match news items to markets by keyword overlap.
+    /// Match news items to markets using BM25 relevance scoring.
     /// Returns markets with matched news, sorted by relevance.
     pub fn match_to_markets(news: &[NewsItem], markets: &[GammaMarket]) -> Vec<NewsMatch> {
+        let index = Bm25Index::build(news);
+
         let mut matches: Vec<NewsMatch> = Vec::new();
 
         for market in markets {
-            let market_words = extract_keywords(&market.question);
-            if market_words.is_empty() {
+            let query_terms = extract_keywords(&market.question);
+            if query_terms.is_empty() {
                 continue;
             }
 
-            let mut matched_news = Vec::new();
-            let mut best_score = 0.0_f64;
+            let mut scored_news: Vec<(f64, &NewsItem)> = news
+                .iter()
+                .enumerate()
+                .map(|(i, item)| (index.score(&query_terms, i), item))
+                .filter(|(score, _)| *score > BM25_MIN_SCORE)
+                .collect();
 
-            for item in news {
-                let news_words = extract_keywords(&item.title);
-                let summary_words = extract_keywords(&item.summary);
+            // Sort by score descending
+            scored_news.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-                // Count keyword overlap
-                let title_overlap = market_words
+            if !scored_news.is_empty() {
+                let best_score = scored_news[0].0;
+                let matched_news: Vec<NewsItem> = scored_news
                     .iter()
-                    .filter(|w| news_words.contains(w))
-                    .count();
-                let summary_overlap = market_words
-                    .iter()
-                    .filter(|w| summary_words.contains(w))
-                    .count();
+                    .take(5)
+                    .map(|(_, item)| (*item).clone())
+                    .collect();
 
-                let overlap = title_overlap + summary_overlap / 2;
-
-                // Need at least 2 keyword matches to consider relevant
-                if overlap >= 2 {
-                    let score = overlap as f64 / market_words.len().max(1) as f64;
-                    best_score = best_score.max(score);
-                    matched_news.push(item.clone());
-                }
-            }
-
-            if !matched_news.is_empty() {
-                // Keep top 5 most relevant news per market
-                matched_news.truncate(5);
                 matches.push(NewsMatch {
                     market: market.clone(),
                     news: matched_news,
@@ -271,6 +261,89 @@ impl NewsAggregator {
         // Sort by relevance score (best matches first)
         matches.sort_by(|a, b| b.relevance_score.partial_cmp(&a.relevance_score).unwrap());
         matches
+    }
+}
+
+// --- BM25 scoring ---
+
+/// Minimum BM25 score to consider a news item relevant to a market.
+const BM25_MIN_SCORE: f64 = 1.5;
+
+/// BM25 parameters — standard values from the literature.
+const BM25_K1: f64 = 1.2;
+const BM25_B: f64 = 0.75;
+
+/// In-memory BM25 index over a set of news items.
+struct Bm25Index {
+    /// Tokenized documents: doc_idx → terms
+    docs: Vec<Vec<String>>,
+    /// Document frequency: term → number of docs containing it
+    df: std::collections::HashMap<String, usize>,
+    /// Average document length
+    avgdl: f64,
+    /// Total number of documents
+    n: usize,
+}
+
+impl Bm25Index {
+    /// Build an index from news items. Combines title (2× weight) + summary.
+    fn build(news: &[NewsItem]) -> Self {
+        let mut df: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut docs = Vec::with_capacity(news.len());
+        let mut total_len = 0usize;
+
+        for item in news {
+            // Title terms appear twice for boosted weight
+            let mut terms = extract_keywords(&item.title);
+            terms.extend(extract_keywords(&item.title));
+            terms.extend(extract_keywords(&item.summary));
+
+            // Count unique terms for DF
+            let unique: std::collections::HashSet<&str> =
+                terms.iter().map(|s| s.as_str()).collect();
+            for term in &unique {
+                *df.entry((*term).to_string()).or_insert(0) += 1;
+            }
+
+            total_len += terms.len();
+            docs.push(terms);
+        }
+
+        let n = docs.len();
+        let avgdl = if n > 0 {
+            total_len as f64 / n as f64
+        } else {
+            1.0
+        };
+
+        Self { docs, df, avgdl, n }
+    }
+
+    /// Compute BM25 score for a query against document at index `doc_idx`.
+    fn score(&self, query_terms: &[String], doc_idx: usize) -> f64 {
+        let doc = &self.docs[doc_idx];
+        let dl = doc.len() as f64;
+        let mut score = 0.0;
+
+        for term in query_terms {
+            // Term frequency in this document
+            let tf = doc.iter().filter(|t| *t == term).count() as f64;
+            if tf == 0.0 {
+                continue;
+            }
+
+            // Inverse document frequency: log((N - df + 0.5) / (df + 0.5) + 1)
+            let df = *self.df.get(term).unwrap_or(&0) as f64;
+            let idf = ((self.n as f64 - df + 0.5) / (df + 0.5) + 1.0).ln();
+
+            // BM25 TF component
+            let tf_norm =
+                (tf * (BM25_K1 + 1.0)) / (tf + BM25_K1 * (1.0 - BM25_B + BM25_B * dl / self.avgdl));
+
+            score += idf * tf_norm;
+        }
+
+        score
     }
 }
 
@@ -404,5 +477,224 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         let truncated: String = s.chars().take(max).collect();
         format!("{truncated}...")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::models::GammaMarket;
+
+    fn news(title: &str, summary: &str) -> NewsItem {
+        NewsItem {
+            title: title.to_string(),
+            source: "test".to_string(),
+            url: String::new(),
+            published: None,
+            summary: summary.to_string(),
+        }
+    }
+
+    fn market(question: &str) -> GammaMarket {
+        GammaMarket {
+            market_id: "test".into(),
+            question: question.into(),
+            outcomes: None,
+            outcome_prices: None,
+            volume_num: 0.0,
+            liquidity_num: 0.0,
+            clob_token_ids: None,
+            end_date: None,
+            slug: None,
+            category: None,
+        }
+    }
+
+    #[test]
+    fn test_bm25_exact_match_scores_high() {
+        let items = vec![
+            news("Federal Reserve cuts interest rates by 50 basis points", ""),
+            news("New iPhone released by Apple", ""),
+        ];
+        let index = Bm25Index::build(&items);
+        let query = extract_keywords("Will the Federal Reserve cut interest rates?");
+
+        let score_fed = index.score(&query, 0);
+        let score_iphone = index.score(&query, 1);
+
+        assert!(
+            score_fed > score_iphone,
+            "Fed news should score higher: {score_fed} vs {score_iphone}"
+        );
+        assert!(
+            score_fed > BM25_MIN_SCORE,
+            "Fed news should pass threshold: {score_fed}"
+        );
+    }
+
+    #[test]
+    fn test_bm25_semantic_near_miss_keyword_overlap_would_miss() {
+        // "rates" appears in both but old keyword overlap needed ≥2 exact matches
+        let items = vec![news(
+            "Fed cuts rates in surprise move",
+            "Economy responds to monetary policy shift",
+        )];
+        let index = Bm25Index::build(&items);
+        let query = extract_keywords("Will interest rates decrease this quarter?");
+
+        let score = index.score(&query, 0);
+        assert!(
+            score > 0.0,
+            "Should find partial match via 'rates': {score}"
+        );
+    }
+
+    #[test]
+    fn test_bm25_title_boost() {
+        // Same word in title vs summary should score differently (title is 2x)
+        let items = vec![
+            news("Bitcoin crashes below 50k", "crypto market turmoil"),
+            news(
+                "Market update today",
+                "Bitcoin crashes below 50k in crypto turmoil",
+            ),
+        ];
+        let index = Bm25Index::build(&items);
+        let query = extract_keywords("Will Bitcoin crash?");
+
+        let score_title = index.score(&query, 0);
+        let score_summary = index.score(&query, 1);
+
+        assert!(
+            score_title > score_summary,
+            "Title match should score higher: {score_title} vs {score_summary}"
+        );
+    }
+
+    #[test]
+    fn test_bm25_idf_rewards_rare_terms() {
+        // "quantum" is rare, "technology" is common → "quantum" match should contribute more
+        let items = vec![
+            news("Quantum computing breakthrough announced", ""),
+            news("Technology stocks rise", ""),
+            news("Technology companies report earnings", ""),
+            news("New technology regulation proposed", ""),
+        ];
+        let index = Bm25Index::build(&items);
+        let query = extract_keywords("quantum technology");
+
+        let score_quantum = index.score(&query, 0);
+        let score_tech1 = index.score(&query, 1);
+
+        assert!(
+            score_quantum > score_tech1,
+            "Rare 'quantum' match should outscore common 'technology': {score_quantum} vs {score_tech1}"
+        );
+    }
+
+    #[test]
+    fn test_bm25_no_match_scores_zero() {
+        let items = vec![news("Apple releases new MacBook", "")];
+        let index = Bm25Index::build(&items);
+        let query = extract_keywords("Will Bitcoin reach 100k?");
+
+        let score = index.score(&query, 0);
+        assert!(
+            (score - 0.0).abs() < f64::EPSILON,
+            "No overlap should score 0: {score}"
+        );
+    }
+
+    #[test]
+    fn test_bm25_empty_corpus() {
+        let items: Vec<NewsItem> = vec![];
+        let index = Bm25Index::build(&items);
+        assert_eq!(index.n, 0);
+        assert!((index.avgdl - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_match_to_markets_uses_bm25() {
+        let items = vec![
+            news(
+                "Federal Reserve raises interest rates",
+                "Inflation concerns drive policy",
+            ),
+            news("SpaceX launches Starship successfully", ""),
+            news("Bitcoin ETF approved by SEC", "Crypto markets rally"),
+        ];
+
+        let markets = vec![
+            market("Will the Federal Reserve raise interest rates in March?"),
+            market("Will SpaceX launch Starship in Q1?"),
+        ];
+
+        let matches = NewsAggregator::match_to_markets(&items, &markets);
+
+        assert!(!matches.is_empty(), "Should find matches");
+
+        // Fed market should match Fed news
+        let fed_match = matches
+            .iter()
+            .find(|m| m.market.question.contains("Federal"))
+            .unwrap();
+        assert!(fed_match.news.iter().any(|n| n.title.contains("Federal")));
+
+        // SpaceX market should match SpaceX news
+        let spacex_match = matches
+            .iter()
+            .find(|m| m.market.question.contains("SpaceX"))
+            .unwrap();
+        assert!(spacex_match.news.iter().any(|n| n.title.contains("SpaceX")));
+    }
+
+    #[test]
+    fn test_match_to_markets_sorted_by_relevance() {
+        let items = vec![
+            news(
+                "Bitcoin surges past 100k as ETF inflows accelerate",
+                "Record institutional buying",
+            ),
+            news(
+                "Bitcoin mining difficulty reaches all-time high",
+                "Hash rate climbs",
+            ),
+            news("Weather forecast for tomorrow", ""),
+        ];
+
+        let markets = vec![
+            market("Will Bitcoin reach 150k by end of year?"),
+            market("Will it rain tomorrow in New York?"),
+        ];
+
+        let matches = NewsAggregator::match_to_markets(&items, &markets);
+
+        // Bitcoin market should have higher relevance (2 matching articles)
+        if matches.len() >= 2 {
+            assert!(
+                matches[0].relevance_score >= matches[1].relevance_score,
+                "Should be sorted by relevance"
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_keywords_filters_stop_words() {
+        let words = extract_keywords("Will the Federal Reserve cut interest rates?");
+        assert!(words.contains(&"federal".to_string()));
+        assert!(words.contains(&"reserve".to_string()));
+        assert!(!words.contains(&"will".to_string()));
+        assert!(!words.contains(&"the".to_string()));
+    }
+
+    #[test]
+    fn test_dedup_news() {
+        let mut items = vec![
+            news("Breaking: Fed cuts rates", ""),
+            news("BREAKING: Fed Cuts Rates!", ""),
+            news("Different headline entirely", ""),
+        ];
+        dedup_news(&mut items);
+        assert_eq!(items.len(), 2, "Near-duplicate should be removed");
     }
 }
