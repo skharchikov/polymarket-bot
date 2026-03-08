@@ -1,0 +1,54 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  DEPLOY_DIR: /opt/polymarket-bot
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    name: Deploy to Hetzner
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Write .env on server
+        run: |
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} \
+            "cat > $DEPLOY_DIR/.env" <<< "${{ secrets.DEPLOY_ENV }}"
+
+      - name: Copy files to server
+        run: |
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            --include='docker-compose.yml' \
+            --include='Dockerfile' \
+            --include='Cargo.toml' \
+            --include='Cargo.lock' \
+            --include='src/***' \
+            --include='migrations/***' \
+            --exclude='*' \
+            ./ deploy@${{ secrets.DEPLOY_HOST }}:$DEPLOY_DIR/
+
+      - name: Build and restart
+        run: |
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} "
+            cd $DEPLOY_DIR
+            docker compose build --no-cache
+            docker compose up -d
+            docker compose logs --tail=20 bot
+          "
