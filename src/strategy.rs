@@ -14,8 +14,6 @@ pub struct StrategyProfile {
 
 /// A signal accepted by a strategy, with strategy-specific sizing.
 pub struct AcceptedSignal {
-    #[allow(dead_code)]
-    pub strategy: String,
     pub kelly_size: f64,
 }
 
@@ -94,10 +92,7 @@ impl StrategyProfile {
             return None;
         }
 
-        Some(AcceptedSignal {
-            strategy: self.name.clone(),
-            kelly_size: kelly,
-        })
+        Some(AcceptedSignal { kelly_size: kelly })
     }
 
     pub fn label(&self) -> &str {
