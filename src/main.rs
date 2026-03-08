@@ -705,11 +705,12 @@ async fn news_scan_cycle(
                 let mut summary = format!(
                     "📡 {sources}\n\
                      📊 `{eligible}` markets, `{matched}` matched → `{assessed}` assessed\n\
-                     🎯 `{signals}` signals, `{gate_rej}` gate rejected",
+                     🎯 `{bets}` bets placed, `{candidates}` candidates, `{gate_rej}` gate rejected",
                     eligible = result.markets_scanned,
                     matched = result.news_matched,
                     assessed = result.llm_assessed,
-                    signals = result.signals.len(),
+                    bets = bets_placed.len(),
+                    candidates = result.signals.len(),
                     gate_rej = result.rejections.len(),
                 );
 
