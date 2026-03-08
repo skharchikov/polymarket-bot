@@ -11,6 +11,8 @@ pub struct ResolvedBet {
     pub won: bool,
     pub entry_price: f64,
     pub cost: f64,
+    pub edge: f64,
+    pub confidence: f64,
     pub pnl: f64,
     pub bankroll: f64,
     pub total_wins: usize,
@@ -149,17 +151,39 @@ impl PgPortfolio {
 
     pub async fn resolve_bet(&self, market_id: &str, yes_won: bool) -> Result<Option<ResolvedBet>> {
         // Find unresolved bet for this market
-        let row: Option<(i32, String, f64, f64, String, f64)> = sqlx::query_as(
-            "SELECT id, side, shares, cost, question, entry_price \
+        #[derive(sqlx::FromRow)]
+        struct OpenBetRow {
+            id: i32,
+            side: String,
+            shares: f64,
+            cost: f64,
+            question: String,
+            entry_price: f64,
+            edge: f64,
+            confidence: f64,
+        }
+
+        let row: Option<OpenBetRow> = sqlx::query_as(
+            "SELECT id, side, shares, cost, question, entry_price, edge, confidence \
              FROM bets WHERE market_id = $1 AND resolved = false LIMIT 1",
         )
         .bind(market_id)
         .fetch_optional(&self.pool)
         .await?;
 
-        let Some((bet_id, side_str, shares, cost, question, entry_price)) = row else {
+        let Some(r) = row else {
             return Ok(None);
         };
+        let (bet_id, side_str, shares, cost, question, entry_price, edge, confidence) = (
+            r.id,
+            r.side,
+            r.shares,
+            r.cost,
+            r.question,
+            r.entry_price,
+            r.edge,
+            r.confidence,
+        );
 
         let side = if side_str == "Yes" {
             BetSide::Yes
@@ -203,6 +227,8 @@ impl PgPortfolio {
             won: bet_won,
             entry_price,
             cost,
+            edge,
+            confidence,
             pnl,
             bankroll: bankroll + net_payout,
             total_wins: wins,

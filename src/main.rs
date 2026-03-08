@@ -322,12 +322,15 @@ async fn housekeeping_cycle(
                         "{emoji} *Bet {result_label}*\n\n\
                          📋 _{question}_\n\
                          🎲 Side: *{side}* @ `{price:.1}¢`\n\
+                         📈 Edge: `+{edge:.1}%` | Confidence: `{conf:.0}%`\n\
                          💵 Stake: `€{cost:.2}` → PnL: `€{pnl:+.2}` ({roi:+.0}%)\n\n\
                          💰 Bankroll: `€{bankroll:.2}`\n\
                          📊 Record: {wins}W / {losses}L | Total PnL: `€{total_pnl:+.2}`",
                         question = r.question,
                         side = r.side,
                         price = r.entry_price * 100.0,
+                        edge = r.edge * 100.0,
+                        conf = r.confidence * 100.0,
                         cost = r.cost,
                         pnl = r.pnl,
                         bankroll = r.bankroll,
