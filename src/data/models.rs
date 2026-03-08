@@ -57,6 +57,8 @@ pub struct GammaMarket {
     #[allow(dead_code)]
     pub outcomes: Option<String>,
     #[serde(default)]
+    pub slug: Option<String>,
+    #[serde(default)]
     pub category: Option<String>,
     #[serde(default)]
     pub volume_num: f64,
@@ -85,6 +87,13 @@ impl GammaMarket {
         let ids_str = self.clob_token_ids.as_ref()?;
         let ids: Vec<String> = serde_json::from_str(ids_str).ok()?;
         ids.into_iter().next().filter(|s| !s.is_empty())
+    }
+
+    pub fn polymarket_url(&self) -> String {
+        match &self.slug {
+            Some(slug) => format!("https://polymarket.com/event/{slug}"),
+            None => format!("https://polymarket.com/event/{}", self.market_id),
+        }
     }
 
     pub fn is_crypto_related(&self) -> bool {

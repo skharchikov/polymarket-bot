@@ -33,6 +33,7 @@ pub struct Signal {
     pub reasoning: String,
     pub end_date: Option<String>,
     pub volume: f64,
+    pub polymarket_url: String,
     pub context: BetContext,
 }
 
@@ -58,7 +59,7 @@ impl Signal {
 
         format!(
             "{emoji} *{side_label} Signal*\n\n\
-             \u{1f4cb} *{question}*\n\n\
+             \u{1f4cb} [{question}]({url})\n\n\
              \u{1f4b0} Current price: `{price:.1}\u{00a2}`\n\
              \u{1f3af} Our estimate: `{est:.1}%`\n\
              \u{1f4ca} Edge: `+{edge:.1}%`\n\
@@ -68,6 +69,7 @@ impl Signal {
              \u{23f0} Expires: {end}\
              {reasoning}",
             question = self.question,
+            url = self.polymarket_url,
             price = self.current_price * 100.0,
             est = self.estimated_prob * 100.0,
             edge = self.edge * 100.0,
@@ -823,6 +825,7 @@ impl LiveScanner {
                 reasoning,
                 end_date: nm.market.end_date.clone(),
                 volume: nm.market.volume_num,
+                polymarket_url: nm.market.polymarket_url(),
                 context: BetContext {
                     btc_price: 0.0,
                     eth_price: 0.0,
@@ -1219,6 +1222,7 @@ mod tests {
             reasoning: "test".into(),
             end_date: None,
             volume: 1000.0,
+            polymarket_url: String::new(),
             context: BetContext::default(),
         };
         let expected = 0.20 * 0.80 * 0.10;

@@ -123,6 +123,7 @@ mod tests {
             reasoning: "test".into(),
             end_date: None,
             volume: 1000.0,
+            polymarket_url: String::new(),
             context: BetContext::default(),
         }
     }
