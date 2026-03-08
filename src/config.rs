@@ -65,7 +65,7 @@ pub struct AppConfig {
     pub min_effective_edge: f64,
 
     /// LLM model to use for news impact assessment.
-    #[config(env = "LLM_MODEL", default = "gpt-4o-mini")]
+    #[config(env = "LLM_MODEL", default = "gpt-4o")]
     pub llm_model: String,
 }
 

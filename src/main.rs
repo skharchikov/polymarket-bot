@@ -28,12 +28,14 @@ async fn main() -> Result<()> {
     let cmd = std::env::args().nth(1).unwrap_or_default();
     match cmd.as_str() {
         "backtest" => run_backtest().await,
-        "test" | _ => {
+        "test" => {
             let mut cfg = AppConfig::load()?;
-            if cmd == "test" {
-                cfg.scan_interval_mins = 2;
-                cfg.news_scan_interval_mins = 2;
-            }
+            cfg.scan_interval_mins = 2;
+            cfg.news_scan_interval_mins = 2;
+            run_live(Arc::new(cfg)).await
+        }
+        _ => {
+            let cfg = AppConfig::load()?;
             run_live(Arc::new(cfg)).await
         }
     }
@@ -232,9 +234,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     let hk_interval = cfg.scan_interval_mins;
     let housekeeping = tokio::spawn(async move {
         loop {
-            if let Err(e) =
-                housekeeping_cycle(&hk_portfolio, &hk_notifier, &hk_scanner).await
-            {
+            if let Err(e) = housekeeping_cycle(&hk_portfolio, &hk_notifier, &hk_scanner).await {
                 tracing::error!(err = %e, "Housekeeping cycle failed");
             }
             tokio::time::sleep(Duration::from_secs(hk_interval * 60)).await;
@@ -251,9 +251,14 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             std::collections::HashSet::new();
 
         loop {
-            if let Err(e) =
-                news_scan_cycle(&ns_portfolio, &ns_notifier, &ns_scanner, &ns_cfg, &mut seen_headlines)
-                    .await
+            if let Err(e) = news_scan_cycle(
+                &ns_portfolio,
+                &ns_notifier,
+                &ns_scanner,
+                &ns_cfg,
+                &mut seen_headlines,
+            )
+            .await
             {
                 tracing::error!(err = %e, "News scan cycle failed");
             }

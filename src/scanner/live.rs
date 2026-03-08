@@ -89,7 +89,10 @@ impl LiveScanner {
     }
 
     /// Build an LLM agent for news-impact assessment.
-    fn build_agent(&self, temperature: f64) -> rig::agent::Agent<openai::responses_api::ResponsesCompletionModel> {
+    fn build_agent(
+        &self,
+        temperature: f64,
+    ) -> rig::agent::Agent<openai::responses_api::ResponsesCompletionModel> {
         self.openai_client
             .agent(&self.cfg.llm_model)
             .preamble(
@@ -489,7 +492,10 @@ impl LiveScanner {
                 "Signal candidate"
             );
 
-            if effective_edge >= self.cfg.min_effective_edge && kelly_size > 0.01 && confidence >= 0.5 {
+            if effective_edge >= self.cfg.min_effective_edge
+                && kelly_size > 0.01
+                && confidence >= 0.5
+            {
                 let news_headlines: Vec<String> = nm.news.iter().map(|n| n.title.clone()).collect();
 
                 signals.push(Signal {
