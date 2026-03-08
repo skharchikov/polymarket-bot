@@ -293,10 +293,13 @@ impl LiveScanner {
     }
 
     /// Main scan: fetch news → match to markets → LLM assesses impact → signals.
+    /// `seen_headlines` tracks already-processed headlines across cycles to avoid
+    /// wasting LLM calls on stale news.
     pub async fn scan(
         &self,
         skip_market_ids: &[String],
         past_bets_summary: &str,
+        seen_headlines: &mut std::collections::HashSet<String>,
     ) -> Result<Vec<Signal>> {
         // Step 1: Fetch all active markets (ALL categories, not just crypto)
         let markets = self.fetch_active_markets().await?;
@@ -322,7 +325,49 @@ impl LiveScanner {
         );
 
         // Step 2: Fetch breaking news from all sources
-        let news = self.news.fetch_all().await;
+        let mut news = self.news.fetch_all().await;
+
+        // Filter out headlines we've already processed in previous cycles
+        let before = news.len();
+        news.retain(|item| {
+            let key = item
+                .title
+                .to_lowercase()
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .take(60)
+                .collect::<String>();
+            !seen_headlines.contains(&key)
+        });
+        if before != news.len() {
+            tracing::info!(
+                total = before,
+                new = news.len(),
+                skipped = before - news.len(),
+                "Filtered already-seen headlines"
+            );
+        }
+
+        // Remember these headlines for next cycle
+        for item in &news {
+            let key = item
+                .title
+                .to_lowercase()
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .take(60)
+                .collect::<String>();
+            seen_headlines.insert(key);
+        }
+
+        // Prune seen set if it grows too large (keep last ~2000)
+        if seen_headlines.len() > 3000 {
+            let drain_count = seen_headlines.len() - 2000;
+            let keys: Vec<String> = seen_headlines.iter().take(drain_count).cloned().collect();
+            for k in keys {
+                seen_headlines.remove(&k);
+            }
+        }
 
         if news.is_empty() {
             tracing::warn!("No news fetched — check network/API access");
