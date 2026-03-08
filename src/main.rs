@@ -1,4 +1,5 @@
 mod backtest;
+mod calibration;
 mod config;
 mod data;
 mod pricing;
@@ -214,7 +215,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     );
 
     let pool = PgPool::connect(&cfg.database_url).await?;
-    let portfolio = Arc::new(PgPortfolio::new(pool).await?);
+    let portfolio = Arc::new(PgPortfolio::new(pool.clone()).await?);
     portfolio.run_migrations().await?;
     tracing::info!("Database connected and migrations applied");
 
@@ -222,7 +223,11 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         &cfg.telegram_bot_token,
         &cfg.telegram_chat_id,
     ));
-    let scanner = Arc::new(scanner::live::LiveScanner::new(&cfg));
+    let scanner = Arc::new(
+        scanner::live::LiveScanner::new(&cfg, pool)
+            .await
+            .expect("failed to init scanner"),
+    );
 
     let bankroll = portfolio.bankroll().await?;
     let open_count = portfolio.open_bets().await?.len();
@@ -243,7 +248,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
              ⏱ News: every {news_min}min | Housekeeping: every {hk_min}min\n\
              🎯 Max {max_sig} signals/day | Kelly: {kelly:.0}%\n\
              🔍 Min edge: {edge:.0}% | Min volume: ${vol:.0}\n\
-             🧠 Model: `{model}`",
+             🧠 Model: `{model}` ({agents}-agent consensus)",
             news_min = cfg.news_scan_interval_mins,
             hk_min = cfg.scan_interval_mins,
             max_sig = cfg.max_signals_per_day,
@@ -251,6 +256,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             edge = cfg.min_effective_edge * 100.0,
             vol = cfg.min_volume,
             model = cfg.llm_model,
+            agents = cfg.consensus_agents,
         ))
         .await;
 
@@ -353,6 +359,10 @@ async fn housekeeping_cycle(
         tokio::time::sleep(Duration::from_millis(200)).await;
         match scanner.check_market_resolution(market_id).await {
             Ok(Some(yes_won)) => {
+                // Resolve LLM estimates for calibration tracking
+                if let Err(e) = portfolio.resolve_estimates(market_id, yes_won).await {
+                    tracing::warn!(err = %e, "Failed to resolve LLM estimates");
+                }
                 if let Some(r) = portfolio.resolve_bet(market_id, yes_won).await? {
                     let emoji = if r.won { "✅" } else { "❌" };
                     let result_label = if r.won { "WON" } else { "LOST" };
@@ -406,6 +416,11 @@ async fn housekeeping_cycle(
         let _ = notifier.send(&report).await;
         portfolio.mark_daily_report_sent().await?;
         tracing::info!("Daily report sent");
+    }
+
+    // Reload calibration curve with any newly resolved data
+    if let Err(e) = scanner.reload_calibration().await {
+        tracing::warn!(err = %e, "Failed to reload calibration curve");
     }
 
     let open_count = portfolio.open_bets().await?.len();

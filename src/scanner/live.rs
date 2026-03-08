@@ -4,9 +4,12 @@ use reqwest::Client;
 use rig::client::{CompletionClient, ProviderClient};
 use rig::completion::Chat;
 use rig::providers::openai;
+use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
 
+use crate::calibration::CalibrationCurve;
 use crate::config::AppConfig;
 use crate::data::models::{GammaMarket, PriceTick};
 use crate::pricing::kelly::fractional_kelly;
@@ -39,6 +42,20 @@ impl Signal {
             BetSide::Yes => ("\u{1f7e2}", "YES"),
             BetSide::No => ("\u{1f534}", "NO"),
         };
+
+        // Format multi-agent reasoning as separate lines
+        let reasoning_lines: Vec<&str> = self.reasoning.split(" | ").collect();
+        let reasoning_block = if reasoning_lines.len() > 1 {
+            let mut block = String::from("\n\u{1f9e0} *Agent Consensus:*\n");
+            for line in &reasoning_lines {
+                let safe = sanitize_markdown(line);
+                block.push_str(&format!("  \u{2022} _{safe}_\n"));
+            }
+            block
+        } else {
+            format!("\n\u{1f4a1} _{}_", sanitize_markdown(&self.reasoning))
+        };
+
         format!(
             "{emoji} *{side_label} Signal*\n\n\
              \u{1f4cb} *{question}*\n\n\
@@ -48,8 +65,8 @@ impl Signal {
              \u{1f512} Confidence: `{conf:.0}%`\n\
              \u{1f4d0} Kelly size: `{kelly:.1}%` of bankroll\n\
              \u{1f4a7} Volume: `${vol:.0}`\n\
-             \u{23f0} Expires: {end}\n\n\
-             \u{1f4a1} _{reasoning}_",
+             \u{23f0} Expires: {end}\
+             {reasoning}",
             question = self.question,
             price = self.current_price * 100.0,
             est = self.estimated_prob * 100.0,
@@ -58,7 +75,7 @@ impl Signal {
             kelly = self.kelly_size * 100.0,
             vol = self.volume,
             end = self.end_date.as_deref().unwrap_or("N/A"),
-            reasoning = self.reasoning,
+            reasoning = reasoning_block,
         )
     }
 
@@ -74,55 +91,130 @@ pub struct ScanResult {
     pub news_new: usize,
 }
 
-pub struct LiveScanner {
-    http: Client,
-    openai_client: openai::Client,
-    news: NewsAggregator,
-    cfg: Arc<AppConfig>,
+/// Agent roles for multi-agent consensus.
+#[derive(Debug, Clone, Copy)]
+pub enum AgentRole {
+    /// Conservative: assumes market is efficient, looks for reasons news is priced in.
+    Skeptic,
+    /// Aggressive: looks for catalysts the market hasn't absorbed yet.
+    Catalyst,
+    /// Statistical: ignores narratives, focuses on base rates and historical patterns.
+    BaseRate,
 }
 
-impl LiveScanner {
-    pub fn new(cfg: &Arc<AppConfig>) -> Self {
-        let http = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .expect("failed to build HTTP client");
-        Self {
-            news: NewsAggregator::new(http.clone()),
-            http,
-            openai_client: openai::Client::from_env(),
-            cfg: Arc::clone(cfg),
+impl AgentRole {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Skeptic => "skeptic",
+            Self::Catalyst => "catalyst",
+            Self::BaseRate => "base_rate",
         }
     }
 
-    /// Build an LLM agent for news-impact assessment.
-    fn build_agent(
-        &self,
-        temperature: f64,
-    ) -> rig::agent::Agent<openai::responses_api::ResponsesCompletionModel> {
-        self.openai_client
-            .agent(&self.cfg.llm_model)
-            .preamble(
-                "You are an expert prediction market analyst.\n\n\
-                 Your job: Given a Polymarket prediction market and RECENT NEWS, assess whether \
-                 the news changes the probability of YES winning.\n\n\
-                 KEY PRINCIPLE: You are looking for NEWS that the market has NOT YET priced in.\n\
-                 If the news is old or already reflected in the price, say so (low confidence).\n\
-                 If the news is fresh and clearly impacts the outcome, say so (high confidence).\n\n\
-                 You can profit from BOTH sides:\n\
-                 - If news makes YES more likely than the current price suggests -> buy YES\n\
-                 - If news makes YES less likely than the current price suggests -> buy NO\n\n\
-                 Be honest and calibrated. Only give high confidence (>0.7) when:\n\
-                 1. The news is directly relevant to this specific market\n\
-                 2. The news clearly shifts the probability\n\
-                 3. The current price doesn't already reflect this news\n\n\
+    fn temperature(self) -> f64 {
+        match self {
+            Self::Skeptic => 0.1,
+            Self::Catalyst => 0.3,
+            Self::BaseRate => 0.2,
+        }
+    }
+
+    fn preamble(self) -> &'static str {
+        match self {
+            Self::Skeptic => {
+                "You are a SKEPTICAL prediction market analyst.\n\n\
+                 Your default assumption: the market price is already correct. News is usually \
+                 already priced in. Your job is to find reasons why the current price is RIGHT \
+                 and push back against overreaction to headlines.\n\n\
+                 Only give high confidence (>0.7) when you find genuinely new, market-moving \
+                 information that clearly hasn't been absorbed.\n\n\
                  Respond with ONLY a JSON object:\n\
                  {\"probability\": 0.XX, \"confidence\": 0.XX, \"reasoning\": \"one sentence\"}\n\n\
                  - probability: true probability of YES (0.01-0.99)\n\
                  - confidence: 0.0 (no useful info) to 1.0 (news clearly changes outcome)\n\
-                 - reasoning: explain what news matters and why price should move",
-            )
-            .temperature(temperature)
+                 - reasoning: explain why the market IS or ISN'T already priced correctly"
+            }
+            Self::Catalyst => {
+                "You are an AGGRESSIVE prediction market analyst looking for catalysts.\n\n\
+                 Your job: find fresh information that the market hasn't absorbed yet. \
+                 Look for breaking news, policy changes, data releases, and events that \
+                 clearly shift probabilities.\n\n\
+                 You can profit from BOTH sides:\n\
+                 - If news makes YES more likely than the current price suggests -> buy YES\n\
+                 - If news makes YES less likely than the current price suggests -> buy NO\n\n\
+                 Be calibrated, but don't be afraid to express conviction when the evidence is strong.\n\n\
+                 Respond with ONLY a JSON object:\n\
+                 {\"probability\": 0.XX, \"confidence\": 0.XX, \"reasoning\": \"one sentence\"}\n\n\
+                 - probability: true probability of YES (0.01-0.99)\n\
+                 - confidence: 0.0 (no useful info) to 1.0 (news clearly changes outcome)\n\
+                 - reasoning: explain what catalyst matters and why price should move"
+            }
+            Self::BaseRate => {
+                "You are a STATISTICAL prediction market analyst.\n\n\
+                 Ignore narratives and hype. Focus on:\n\
+                 1. Historical base rates: how often do events like this happen?\n\
+                 2. Price history momentum: is the trend meaningful or noise?\n\
+                 3. Time to expiry: how much can the probability realistically move?\n\n\
+                 Anchor to base rates first, then adjust for news only if it provides \
+                 strong statistical evidence.\n\n\
+                 Respond with ONLY a JSON object:\n\
+                 {\"probability\": 0.XX, \"confidence\": 0.XX, \"reasoning\": \"one sentence\"}\n\n\
+                 - probability: true probability of YES (0.01-0.99)\n\
+                 - confidence: 0.0 (no useful info) to 1.0 (news clearly changes outcome)\n\
+                 - reasoning: explain the base rate and any statistical adjustment"
+            }
+        }
+    }
+
+    /// Return the first N roles to use for consensus.
+    fn roles_for(n: usize) -> Vec<Self> {
+        let all = [Self::Skeptic, Self::Catalyst, Self::BaseRate];
+        all.into_iter().take(n.clamp(1, 3)).collect()
+    }
+}
+
+pub struct LiveScanner {
+    http: Client,
+    openai_client: openai::Client,
+    news: NewsAggregator,
+    pool: PgPool,
+    calibration: RwLock<CalibrationCurve>,
+    cfg: Arc<AppConfig>,
+}
+
+impl LiveScanner {
+    pub async fn new(cfg: &Arc<AppConfig>, pool: PgPool) -> Result<Self> {
+        let http = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("failed to build HTTP client");
+        let calibration = CalibrationCurve::load(&pool, cfg.calibration_min_samples).await?;
+        Ok(Self {
+            news: NewsAggregator::new(http.clone()),
+            http,
+            openai_client: openai::Client::from_env(),
+            pool,
+            calibration: RwLock::new(calibration),
+            cfg: Arc::clone(cfg),
+        })
+    }
+
+    /// Reload calibration curve from DB (call periodically).
+    pub async fn reload_calibration(&self) -> Result<()> {
+        let curve = CalibrationCurve::load(&self.pool, self.cfg.calibration_min_samples).await?;
+        *self.calibration.write().await = curve;
+        Ok(())
+    }
+
+    /// Build an LLM agent for a specific role.
+    fn build_agent(
+        &self,
+        role: AgentRole,
+    ) -> rig::agent::Agent<openai::responses_api::ResponsesCompletionModel> {
+        self.openai_client
+            .agent(&self.cfg.llm_model)
+            .preamble(role.preamble())
+            .temperature(role.temperature())
             .build()
     }
 
@@ -221,16 +313,49 @@ impl LiveScanner {
         p.first().and_then(|s| s.parse::<f64>().ok())
     }
 
-    /// Ask LLM: given this market + news, what's the true probability?
-    /// Uses 2-call consensus (speed/cost balance for news-driven approach).
-    async fn assess_news_impact(
+    /// Log an LLM estimate to the database for calibration tracking.
+    #[allow(clippy::too_many_arguments)]
+    async fn log_estimate(
         &self,
+        market: &GammaMarket,
+        role: &str,
+        raw_prob: f64,
+        raw_conf: f64,
+        consensus_prob: Option<f64>,
+        consensus_conf: Option<f64>,
+        current_price: f64,
+    ) {
+        let result = sqlx::query(
+            "INSERT INTO llm_estimates \
+             (market_id, question, agent_role, raw_probability, raw_confidence, \
+              consensus_probability, consensus_confidence, current_price) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(&market.market_id)
+        .bind(&market.question)
+        .bind(role)
+        .bind(raw_prob)
+        .bind(raw_conf)
+        .bind(consensus_prob)
+        .bind(consensus_conf)
+        .bind(current_price)
+        .execute(&self.pool)
+        .await;
+
+        if let Err(e) = result {
+            tracing::warn!(err = %e, "Failed to log LLM estimate");
+        }
+    }
+
+    /// Build the shared prompt for all agents (factual data only, no role framing).
+    fn build_market_prompt(
         market: &GammaMarket,
         current_price: f64,
         news: &[NewsItem],
         history_summary: &str,
         past_bets: &str,
-    ) -> Result<(f64, f64, String)> {
+        calibration_summary: &str,
+    ) -> String {
         let expiry = market.end_date.as_deref().unwrap_or("Unknown");
         let now = Utc::now();
 
@@ -279,22 +404,113 @@ impl LiveScanner {
             ));
         }
 
-        // Single LLM call (respects 3 RPM rate limit on Tier-1 OpenAI)
-        let agent = self.build_agent(0.2);
-        let response = agent
-            .chat(prompt.as_str(), vec![])
-            .await
-            .map_err(|e| anyhow::anyhow!("LLM call failed: {e}"))?;
-        let (prob, conf, reasoning) = parse_llm_response(&response)?;
+        if !calibration_summary.is_empty() {
+            prompt.push_str(&format!("\n\n{calibration_summary}"));
+        }
+
+        prompt
+    }
+
+    /// Multi-agent news impact assessment with consensus aggregation.
+    async fn assess_news_impact(
+        &self,
+        market: &GammaMarket,
+        current_price: f64,
+        news: &[NewsItem],
+        history_summary: &str,
+        past_bets: &str,
+    ) -> Result<(f64, f64, String)> {
+        let cal_summary = self.calibration.read().await.summary();
+        let prompt = Self::build_market_prompt(
+            market,
+            current_price,
+            news,
+            history_summary,
+            past_bets,
+            &cal_summary,
+        );
+
+        let roles = AgentRole::roles_for(self.cfg.consensus_agents);
+        let mut assessments: Vec<(AgentRole, f64, f64, String)> = Vec::new();
+
+        for (i, &role) in roles.iter().enumerate() {
+            if i > 0 {
+                tracing::info!("Waiting 25s for rate limit...");
+                tokio::time::sleep(Duration::from_secs(25)).await;
+            }
+
+            let agent = self.build_agent(role);
+            let result = agent
+                .chat(prompt.as_str(), vec![])
+                .await
+                .map_err(|e| anyhow::anyhow!("LLM call ({}) failed: {e}", role.label()))
+                .and_then(|resp| parse_llm_response(&resp));
+
+            match result {
+                Ok((prob, conf, reasoning)) => {
+                    tracing::info!(
+                        market = %market.question,
+                        agent = role.label(),
+                        prob = format_args!("{:.1}%", prob * 100.0),
+                        conf = format_args!("{:.0}%", conf * 100.0),
+                        "{reasoning}",
+                    );
+
+                    self.log_estimate(market, role.label(), prob, conf, None, None, current_price)
+                        .await;
+
+                    assessments.push((role, prob, conf, reasoning));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        market = %market.question,
+                        agent = role.label(),
+                        err = %e,
+                        "Agent assessment failed, continuing with remaining agents"
+                    );
+                }
+            }
+        }
+
+        if assessments.is_empty() {
+            anyhow::bail!("All agents failed for market: {}", market.question);
+        }
+
+        // Aggregate consensus
+        let (consensus_prob, consensus_conf, consensus_reasoning) =
+            aggregate_assessments(&assessments, self.cfg.consensus_max_spread);
+
+        // Apply calibration correction
+        let calibrated_prob = self.calibration.read().await.correct(consensus_prob);
+
+        if (calibrated_prob - consensus_prob).abs() > 0.02 {
+            tracing::info!(
+                raw = format_args!("{:.1}%", consensus_prob * 100.0),
+                calibrated = format_args!("{:.1}%", calibrated_prob * 100.0),
+                "Calibration correction applied"
+            );
+        }
+
+        // Log consensus estimate
+        self.log_estimate(
+            market,
+            "consensus",
+            consensus_prob,
+            consensus_conf,
+            Some(calibrated_prob),
+            Some(consensus_conf),
+            current_price,
+        )
+        .await;
 
         tracing::info!(
             market = %market.question,
-            prob = format_args!("{:.1}%", prob * 100.0),
-            conf = format_args!("{:.0}%", conf * 100.0),
-            "News impact assessment"
+            prob = format_args!("{:.1}%", calibrated_prob * 100.0),
+            conf = format_args!("{:.0}%", consensus_conf * 100.0),
+            "Consensus assessment"
         );
 
-        Ok((prob, conf, reasoning))
+        Ok((calibrated_prob, consensus_conf, consensus_reasoning))
     }
 
     /// Main scan: fetch news → match to markets → LLM assesses impact → signals.
@@ -460,10 +676,13 @@ impl LiveScanner {
         let mut signals = Vec::new();
 
         for (i, (nm, current_price, history_summary, book_depth)) in candidates.iter().enumerate() {
-            // Rate limit: wait 25s between LLM calls (3 RPM on Tier-1)
+            // Rate limit between candidates — must account for 3 RPM limit
+            // Each candidate uses consensus_agents calls internally (with 25s spacing),
+            // so we need extra spacing between candidates to stay under the limit.
             if i > 0 {
-                tracing::info!("Waiting 25s for rate limit...");
-                tokio::time::sleep(Duration::from_secs(25)).await;
+                let wait_secs = 25 * self.cfg.consensus_agents as u64;
+                tracing::info!(wait_secs, "Waiting for rate limit between candidates...");
+                tokio::time::sleep(Duration::from_secs(wait_secs)).await;
             }
 
             let (prob, confidence, reasoning) = match self
@@ -564,6 +783,74 @@ impl LiveScanner {
     }
 }
 
+/// Aggregate multi-agent assessments into a consensus probability, confidence, and reasoning.
+fn aggregate_assessments(
+    assessments: &[(AgentRole, f64, f64, String)],
+    max_spread: f64,
+) -> (f64, f64, String) {
+    if assessments.len() == 1 {
+        let (role, prob, conf, reasoning) = &assessments[0];
+        return (*prob, *conf, format!("[{}] {}", role.label(), reasoning));
+    }
+
+    // Confidence-weighted average probability
+    let total_weight: f64 = assessments.iter().map(|(_, _, c, _)| c).sum();
+    let weighted_prob = if total_weight > 0.0 {
+        assessments.iter().map(|(_, p, c, _)| p * c).sum::<f64>() / total_weight
+    } else {
+        assessments.iter().map(|(_, p, _, _)| p).sum::<f64>() / assessments.len() as f64
+    };
+
+    // Measure disagreement: standard deviation of probabilities
+    let mean_prob =
+        assessments.iter().map(|(_, p, _, _)| p).sum::<f64>() / assessments.len() as f64;
+    let variance = assessments
+        .iter()
+        .map(|(_, p, _, _)| (p - mean_prob).powi(2))
+        .sum::<f64>()
+        / assessments.len() as f64;
+    let std_dev = variance.sqrt();
+
+    // Agreement factor: 1.0 when agents agree, drops toward 0 as they diverge
+    let agreement = if max_spread > 0.0 {
+        (1.0 - std_dev / max_spread).max(0.0)
+    } else if std_dev < 0.001 {
+        1.0
+    } else {
+        0.0
+    };
+
+    // Final confidence: minimum confidence * agreement factor
+    let min_conf = assessments
+        .iter()
+        .map(|(_, _, c, _)| *c)
+        .fold(f64::MAX, f64::min);
+    let consensus_conf = (min_conf * agreement).clamp(0.0, 1.0);
+
+    // Build combined reasoning
+    let mut reasoning_parts: Vec<String> = assessments
+        .iter()
+        .map(|(role, prob, conf, reasoning)| {
+            format!(
+                "[{} {:.0}%@{:.0}%] {}",
+                role.label(),
+                prob * 100.0,
+                conf * 100.0,
+                reasoning
+            )
+        })
+        .collect();
+    reasoning_parts.push(format!(
+        "Consensus: {:.1}% (spread={:.1}%, agreement={:.0}%)",
+        weighted_prob * 100.0,
+        std_dev * 100.0,
+        agreement * 100.0,
+    ));
+    let consensus_reasoning = reasoning_parts.join(" | ");
+
+    (weighted_prob, consensus_conf, consensus_reasoning)
+}
+
 fn summarize_history(history: &[PriceTick], current_price: f64) -> String {
     if history.len() < 3 {
         return format!(
@@ -634,4 +921,173 @@ fn parse_llm_response(response: &str) -> Result<(f64, f64, String)> {
         est.confidence.clamp(0.0, 1.0),
         est.reasoning,
     ))
+}
+
+/// Strip characters that break Telegram MarkdownV1 inside italic `_..._` blocks.
+fn sanitize_markdown(s: &str) -> String {
+    s.replace(['_', '*'], " ")
+        .replace('`', "'")
+        .replace('[', "(")
+        .replace(']', ")")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- AgentRole ---
+
+    #[test]
+    fn test_roles_for_clamped() {
+        assert_eq!(AgentRole::roles_for(0).len(), 1);
+        assert_eq!(AgentRole::roles_for(1).len(), 1);
+        assert_eq!(AgentRole::roles_for(2).len(), 2);
+        assert_eq!(AgentRole::roles_for(3).len(), 3);
+        assert_eq!(AgentRole::roles_for(99).len(), 3);
+    }
+
+    #[test]
+    fn test_roles_for_order() {
+        let roles = AgentRole::roles_for(3);
+        assert_eq!(roles[0].label(), "skeptic");
+        assert_eq!(roles[1].label(), "catalyst");
+        assert_eq!(roles[2].label(), "base_rate");
+    }
+
+    // --- aggregate_assessments ---
+
+    fn make_assessment(role: AgentRole, prob: f64, conf: f64) -> (AgentRole, f64, f64, String) {
+        (role, prob, conf, format!("test {}", role.label()))
+    }
+
+    #[test]
+    fn test_single_agent_passthrough() {
+        let a = vec![make_assessment(AgentRole::Skeptic, 0.7, 0.8)];
+        let (prob, conf, reasoning) = aggregate_assessments(&a, 0.15);
+        assert!((prob - 0.7).abs() < 1e-9);
+        assert!((conf - 0.8).abs() < 1e-9);
+        assert!(reasoning.contains("skeptic"));
+    }
+
+    #[test]
+    fn test_two_agents_agree() {
+        let a = vec![
+            make_assessment(AgentRole::Skeptic, 0.70, 0.8),
+            make_assessment(AgentRole::Catalyst, 0.72, 0.9),
+        ];
+        let (prob, conf, reasoning) = aggregate_assessments(&a, 0.15);
+        // Probability should be confidence-weighted average
+        let expected_prob = (0.70 * 0.8 + 0.72 * 0.9) / (0.8 + 0.9);
+        assert!((prob - expected_prob).abs() < 1e-9);
+        // Spread is tiny (0.01), agreement should be high
+        assert!(conf > 0.7, "conf={conf} should be > 0.7 when agents agree");
+        assert!(reasoning.contains("Consensus"));
+    }
+
+    #[test]
+    fn test_two_agents_disagree_kills_confidence() {
+        let a = vec![
+            make_assessment(AgentRole::Skeptic, 0.30, 0.8),
+            make_assessment(AgentRole::Catalyst, 0.80, 0.9),
+        ];
+        let (_prob, conf, _reasoning) = aggregate_assessments(&a, 0.15);
+        // Spread is 0.25 which exceeds max_spread of 0.15 → agreement=0 → conf=0
+        assert!(
+            conf < 0.01,
+            "conf={conf} should be ~0 when agents wildly disagree"
+        );
+    }
+
+    #[test]
+    fn test_zero_confidence_agents() {
+        let a = vec![
+            make_assessment(AgentRole::Skeptic, 0.50, 0.0),
+            make_assessment(AgentRole::Catalyst, 0.60, 0.0),
+        ];
+        let (prob, conf, _) = aggregate_assessments(&a, 0.15);
+        // With 0 total weight, falls back to simple average
+        assert!((prob - 0.55).abs() < 1e-9);
+        // min_conf is 0 → consensus_conf is 0
+        assert!(conf < 1e-9);
+    }
+
+    #[test]
+    fn test_max_spread_zero() {
+        let a = vec![
+            make_assessment(AgentRole::Skeptic, 0.60, 0.8),
+            make_assessment(AgentRole::Catalyst, 0.60, 0.8),
+        ];
+        let (_, conf, _) = aggregate_assessments(&a, 0.0);
+        // Identical probabilities → std_dev ≈ 0 → agreement = 1.0
+        assert!(
+            conf > 0.7,
+            "conf={conf} should be high when agents agree exactly"
+        );
+
+        // Now with disagreement
+        let a2 = vec![
+            make_assessment(AgentRole::Skeptic, 0.40, 0.8),
+            make_assessment(AgentRole::Catalyst, 0.60, 0.8),
+        ];
+        let (_, conf2, _) = aggregate_assessments(&a2, 0.0);
+        assert!(
+            conf2 < 0.01,
+            "conf={conf2} should be 0 when spread>0 and max_spread=0"
+        );
+    }
+
+    #[test]
+    fn test_three_agents_weighted_avg() {
+        let a = vec![
+            make_assessment(AgentRole::Skeptic, 0.50, 0.5),
+            make_assessment(AgentRole::Catalyst, 0.70, 1.0),
+            make_assessment(AgentRole::BaseRate, 0.60, 0.5),
+        ];
+        let (prob, _, _) = aggregate_assessments(&a, 0.15);
+        let expected = (0.50 * 0.5 + 0.70 * 1.0 + 0.60 * 0.5) / (0.5 + 1.0 + 0.5);
+        assert!(
+            (prob - expected).abs() < 1e-9,
+            "prob={prob} expected={expected}"
+        );
+    }
+
+    // --- parse_llm_response ---
+
+    #[test]
+    fn test_parse_clean_json() {
+        let input = r#"{"probability": 0.75, "confidence": 0.8, "reasoning": "strong signal"}"#;
+        let (prob, conf, reason) = parse_llm_response(input).unwrap();
+        assert!((prob - 0.75).abs() < 1e-9);
+        assert!((conf - 0.8).abs() < 1e-9);
+        assert_eq!(reason, "strong signal");
+    }
+
+    #[test]
+    fn test_parse_json_with_surrounding_text() {
+        let input = "Here is my analysis:\n{\"probability\": 0.65, \"confidence\": 0.4, \"reasoning\": \"weak\"}\nThat's all.";
+        let (prob, conf, _) = parse_llm_response(input).unwrap();
+        assert!((prob - 0.65).abs() < 1e-9);
+        assert!((conf - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_clamps_extreme_values() {
+        let input = r#"{"probability": 1.5, "confidence": -0.5, "reasoning": "extreme"}"#;
+        let (prob, conf, _) = parse_llm_response(input).unwrap();
+        assert!((prob - 0.99).abs() < 1e-9);
+        assert!(conf < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_missing_confidence_defaults() {
+        let input = r#"{"probability": 0.6}"#;
+        let (prob, conf, _) = parse_llm_response(input).unwrap();
+        assert!((prob - 0.6).abs() < 1e-9);
+        assert!((conf - 0.5).abs() < 1e-9); // default_confidence
+    }
+
+    #[test]
+    fn test_parse_invalid_json_fails() {
+        assert!(parse_llm_response("not json at all").is_err());
+    }
 }

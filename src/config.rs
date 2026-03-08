@@ -56,8 +56,8 @@ pub struct AppConfig {
     #[config(env = "MAX_DAYS_TO_EXPIRY", default = 14)]
     pub max_days_to_expiry: i64,
 
-    /// Max markets to send to LLM per scan cycle.
-    #[config(env = "MAX_LLM_CANDIDATES", default = 3)]
+    /// Max markets to send to LLM per scan cycle (each costs consensus_agents API calls).
+    #[config(env = "MAX_LLM_CANDIDATES", default = 1)]
     pub max_llm_candidates: usize,
 
     /// Minimum effective edge (edge * confidence) to emit a signal.
@@ -71,6 +71,19 @@ pub struct AppConfig {
     /// Heartbeat interval in minutes (0 to disable).
     #[config(env = "HEARTBEAT_INTERVAL_MINS", default = 60)]
     pub heartbeat_interval_mins: u64,
+
+    // --- Multi-agent consensus ---
+    /// Number of LLM agents for consensus (1=single, 2-3=multi-agent).
+    #[config(env = "CONSENSUS_AGENTS", default = 2)]
+    pub consensus_agents: usize,
+
+    /// Max probability spread between agents before killing signal.
+    #[config(env = "CONSENSUS_MAX_SPREAD", default = 0.15)]
+    pub consensus_max_spread: f64,
+
+    /// Min resolved estimates before applying calibration correction.
+    #[config(env = "CALIBRATION_MIN_SAMPLES", default = 20)]
+    pub calibration_min_samples: usize,
 }
 
 impl AppConfig {

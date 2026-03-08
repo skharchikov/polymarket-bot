@@ -31,11 +31,29 @@ impl PgPortfolio {
     }
 
     pub async fn run_migrations(&self) -> Result<()> {
-        let sql = include_str!("../../migrations/001_init.sql");
-        sqlx::raw_sql(sql)
+        let init = include_str!("../../migrations/001_init.sql");
+        sqlx::raw_sql(init)
             .execute(&self.pool)
             .await
-            .context("failed to run migrations")?;
+            .context("failed to run init migration")?;
+        let calibration = include_str!("../../migrations/002_calibration.sql");
+        sqlx::raw_sql(calibration)
+            .execute(&self.pool)
+            .await
+            .context("failed to run calibration migration")?;
+        Ok(())
+    }
+
+    /// Resolve LLM estimates when a market resolves (for calibration tracking).
+    pub async fn resolve_estimates(&self, market_id: &str, yes_won: bool) -> Result<()> {
+        sqlx::query(
+            "UPDATE llm_estimates SET resolved = true, outcome = $1, resolved_at = NOW() \
+             WHERE market_id = $2 AND resolved = false",
+        )
+        .bind(yes_won)
+        .bind(market_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
