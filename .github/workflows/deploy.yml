@@ -2,7 +2,7 @@ name: Deploy
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
   workflow_dispatch:
 
 env:
