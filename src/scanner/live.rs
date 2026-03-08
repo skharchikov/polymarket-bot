@@ -722,7 +722,8 @@ impl LiveScanner {
                 continue;
             };
 
-            let kelly_size = fractional_kelly(bet_prob, bet_price, self.cfg.kelly_fraction);
+            // Use full Kelly here; each strategy will scale by its own fraction
+            let kelly_size = fractional_kelly(bet_prob, bet_price, 1.0);
             let effective_edge = edge * confidence;
 
             let news_titles: Vec<&str> = nm.news.iter().map(|n| n.title.as_str()).collect();
@@ -738,10 +739,8 @@ impl LiveScanner {
                 "Signal candidate"
             );
 
-            if effective_edge >= self.cfg.min_effective_edge
-                && kelly_size > 0.01
-                && confidence >= 0.5
-            {
+            // Use permissive gate; individual strategies apply their own thresholds
+            if effective_edge >= 0.03 && kelly_size > 0.005 && confidence >= 0.30 {
                 let news_headlines: Vec<String> = nm.news.iter().map(|n| n.title.clone()).collect();
 
                 signals.push(Signal {

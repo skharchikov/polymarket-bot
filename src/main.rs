@@ -5,6 +5,7 @@ mod data;
 mod pricing;
 mod scanner;
 mod storage;
+mod strategy;
 mod telegram;
 
 use anyhow::Result;
@@ -15,6 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use storage::portfolio::NewBet;
 use storage::postgres::PgPortfolio;
+use strategy::StrategyProfile;
 
 /// Shared scan stats for heartbeat reporting.
 struct ScanStats {
@@ -229,6 +231,11 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             .expect("failed to init scanner"),
     );
 
+    let strategies = Arc::new(StrategyProfile::from_config(&cfg.strategies));
+    portfolio.init_strategy_bankrolls(&strategies).await?;
+    let strat_names: Vec<&str> = strategies.iter().map(|s| s.name.as_str()).collect();
+    tracing::info!(strategies = ?strat_names, "Strategies loaded");
+
     let bankroll = portfolio.bankroll().await?;
     let open_count = portfolio.open_bets().await?.len();
 
@@ -248,7 +255,8 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
              ⏱ News: every {news_min}min | Housekeeping: every {hk_min}min\n\
              🎯 Max {max_sig} signals/day | Kelly: {kelly:.0}%\n\
              🔍 Min edge: {edge:.0}% | Min volume: ${vol:.0}\n\
-             🧠 Model: `{model}` ({agents}-agent consensus)",
+             🧠 Model: `{model}` ({agents}-agent consensus)\n\
+             🎭 Strategies: {strat_info}",
             news_min = cfg.news_scan_interval_mins,
             hk_min = cfg.scan_interval_mins,
             max_sig = cfg.max_signals_per_day,
@@ -257,6 +265,11 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             vol = cfg.min_volume,
             model = cfg.llm_model,
             agents = cfg.consensus_agents,
+            strat_info = strategies
+                .iter()
+                .map(|s| format!("{} {}", s.label(), s.name))
+                .collect::<Vec<_>>()
+                .join(", "),
         ))
         .await;
 
@@ -288,6 +301,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     let ns_scanner = Arc::clone(&scanner);
     let ns_cfg = Arc::clone(&cfg);
     let ns_stats = Arc::clone(&stats);
+    let ns_strategies = Arc::clone(&strategies);
     let news_scan = tokio::spawn(async move {
         let mut seen_headlines: std::collections::HashSet<String> =
             std::collections::HashSet::new();
@@ -299,6 +313,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                 &ns_scanner,
                 &ns_cfg,
                 &ns_stats,
+                &ns_strategies,
                 &mut seen_headlines,
             )
             .await
@@ -428,27 +443,23 @@ async fn housekeeping_cycle(
     Ok(())
 }
 
-/// News scanning: fetch news, match to markets, assess with LLM, place bets.
+/// News scanning: fetch news, match to markets, assess with LLM, place bets per strategy.
 async fn news_scan_cycle(
     portfolio: &PgPortfolio,
     notifier: &telegram::notifier::TelegramNotifier,
     scanner: &scanner::live::LiveScanner,
     cfg: &AppConfig,
     stats: &ScanStats,
+    strategies: &[StrategyProfile],
     seen_headlines: &mut std::collections::HashSet<String>,
 ) -> Result<()> {
     portfolio.reset_daily_if_needed().await?;
-
-    let signals_today = portfolio.signals_sent_today().await?;
-    let remaining = cfg.max_signals_per_day.saturating_sub(signals_today);
-    if remaining == 0 {
-        tracing::info!("Daily signal limit reached, skipping news scan");
-        return Ok(());
+    for s in strategies {
+        portfolio.reset_strategy_daily_if_needed(&s.name).await?;
     }
 
     let bankroll = portfolio.bankroll().await?;
     tracing::info!(
-        remaining = remaining,
         bankroll = format_args!("€{bankroll:.2}"),
         "Starting news scan..."
     );
@@ -472,98 +483,122 @@ async fn news_scan_cycle(
                 .signals_found
                 .fetch_add(result.signals.len() as u64, Ordering::Relaxed);
 
-            for signal in result.signals.into_iter().take(remaining) {
-                let bankroll = portfolio.bankroll().await?;
-
-                let raw_bet = bankroll * signal.kelly_size;
-                let bet_amount = raw_bet.max(cfg.min_bet);
-                let slipped_price = (signal.current_price * (1.0 + cfg.slippage_pct)).min(0.99);
-                let shares = bet_amount / slipped_price;
-                let fee = bet_amount * cfg.fee_pct;
-                let total_cost = bet_amount + fee;
-
-                if total_cost > bankroll {
-                    tracing::warn!(
-                        bankroll = format_args!("€{bankroll:.2}"),
-                        cost = format_args!("€{total_cost:.2}"),
-                        "Insufficient bankroll"
-                    );
-                    continue;
-                }
-
-                let new_bet = NewBet {
-                    market_id: signal.market_id.clone(),
-                    question: signal.question.clone(),
-                    side: signal.side.clone(),
-                    entry_price: signal.current_price,
-                    slipped_price,
-                    shares,
-                    cost: bet_amount,
-                    fee,
-                    estimated_prob: signal.estimated_prob,
-                    confidence: signal.confidence,
-                    edge: signal.edge,
-                    kelly_size: signal.kelly_size,
-                    reasoning: signal.reasoning.clone(),
-                    end_date: signal.end_date.clone(),
-                    context: Some(signal.context.clone()),
-                };
-
-                match portfolio.place_bet(&new_bet).await {
-                    Ok(_bet_id) => {
-                        let new_bankroll = portfolio.bankroll().await?;
-                        let open_count = portfolio.open_bets().await?.len();
-                        let signals_today = portfolio.signals_sent_today().await?;
-                        tracing::info!(
-                            market = %signal.question,
-                            side = %signal.side,
-                            cost = format_args!("€{bet_amount:.2}"),
-                            price = format_args!("{:.1}¢", slipped_price * 100.0),
-                            edge = format_args!("+{:.1}%", signal.edge * 100.0),
-                            bankroll = format_args!("€{new_bankroll:.2}"),
-                            "Bet placed"
-                        );
-
-                        let news_section = if !signal.context.news_headlines.is_empty() {
-                            let headlines: Vec<String> = signal
-                                .context
-                                .news_headlines
-                                .iter()
-                                .take(3)
-                                .map(|h| format!("  • _{}_", truncate_str(h, 80)))
-                                .collect();
-                            format!("\n📰 *Triggered by:*\n{}\n", headlines.join("\n"))
-                        } else {
-                            String::new()
-                        };
-
-                        let msg = format!(
-                            "{signal}\n\
-                             {news}\n\
-                             💸 *Paper bet placed*\n\
-                             💵 Stake: `€{cost:.2}` ({shares:.1} shares @ `{price:.1}¢`)\n\
-                             🏷 Fees: `€{fee:.2}` (slippage + trading)\n\
-                             💰 Bankroll: `€{bankroll:.2}`\n\
-                             📊 Open bets: {open} | Signals today: {today}/{max}",
-                            signal = signal.to_telegram_message(),
-                            news = news_section,
-                            cost = bet_amount,
-                            shares = shares,
-                            price = slipped_price * 100.0,
-                            fee = fee,
-                            bankroll = new_bankroll,
-                            open = open_count,
-                            today = signals_today,
-                            max = cfg.max_signals_per_day,
-                        );
-                        let _ = notifier.send(&msg).await;
+            for signal in &result.signals {
+                for strat in strategies {
+                    let remaining = strat
+                        .max_signals_per_day
+                        .saturating_sub(portfolio.strategy_signals_today(&strat.name).await?);
+                    if remaining == 0 {
+                        continue;
                     }
-                    Err(e) => {
-                        tracing::error!(err = %e, "Failed to place bet in DB");
-                    }
-                }
 
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                    let accepted = match strat.evaluate(signal) {
+                        Some(a) => a,
+                        None => continue,
+                    };
+
+                    let strat_bankroll = portfolio.strategy_bankroll(&strat.name).await?;
+                    let raw_bet = strat_bankroll * accepted.kelly_size;
+                    let bet_amount = raw_bet.max(strat.min_bet);
+                    let slipped_price = (signal.current_price * (1.0 + cfg.slippage_pct)).min(0.99);
+                    let shares = bet_amount / slipped_price;
+                    let fee = bet_amount * cfg.fee_pct;
+                    let total_cost = bet_amount + fee;
+
+                    if total_cost > strat_bankroll {
+                        tracing::warn!(
+                            strategy = %strat.name,
+                            bankroll = format_args!("€{strat_bankroll:.2}"),
+                            cost = format_args!("€{total_cost:.2}"),
+                            "Insufficient strategy bankroll"
+                        );
+                        continue;
+                    }
+
+                    let new_bet = NewBet {
+                        market_id: signal.market_id.clone(),
+                        question: signal.question.clone(),
+                        side: signal.side.clone(),
+                        entry_price: signal.current_price,
+                        slipped_price,
+                        shares,
+                        cost: bet_amount,
+                        fee,
+                        estimated_prob: signal.estimated_prob,
+                        confidence: signal.confidence,
+                        edge: signal.edge,
+                        kelly_size: accepted.kelly_size,
+                        reasoning: signal.reasoning.clone(),
+                        end_date: signal.end_date.clone(),
+                        context: Some(signal.context.clone()),
+                        strategy: strat.name.clone(),
+                    };
+
+                    match portfolio.place_bet(&new_bet).await {
+                        Ok(_bet_id) => {
+                            let new_strat_bankroll =
+                                portfolio.strategy_bankroll(&strat.name).await?;
+                            let open_count = portfolio.open_bets().await?.len();
+                            let strat_signals =
+                                portfolio.strategy_signals_today(&strat.name).await?;
+                            tracing::info!(
+                                strategy = %strat.name,
+                                market = %signal.question,
+                                side = %signal.side,
+                                cost = format_args!("€{bet_amount:.2}"),
+                                edge = format_args!("+{:.1}%", signal.edge * 100.0),
+                                bankroll = format_args!("€{new_strat_bankroll:.2}"),
+                                "Bet placed"
+                            );
+
+                            let news_section = if !signal.context.news_headlines.is_empty() {
+                                let headlines: Vec<String> = signal
+                                    .context
+                                    .news_headlines
+                                    .iter()
+                                    .take(3)
+                                    .map(|h| format!("  • _{}_", truncate_str(h, 80)))
+                                    .collect();
+                                format!("\n📰 *Triggered by:*\n{}\n", headlines.join("\n"))
+                            } else {
+                                String::new()
+                            };
+
+                            let msg = format!(
+                                "{label} *{strat_name}*\n\
+                                 {signal}\n\
+                                 {news}\n\
+                                 💸 *Paper bet placed*\n\
+                                 💵 Stake: `€{cost:.2}` ({shares:.1} shares @ `{price:.1}¢`)\n\
+                                 🏷 Fees: `€{fee:.2}` (slippage + trading)\n\
+                                 💰 Strategy bankroll: `€{bankroll:.2}`\n\
+                                 📊 Open bets: {open} | Strategy signals: {today}/{max}",
+                                label = strat.label(),
+                                strat_name = strat.name,
+                                signal = signal.to_telegram_message(),
+                                news = news_section,
+                                cost = bet_amount,
+                                shares = shares,
+                                price = slipped_price * 100.0,
+                                fee = fee,
+                                bankroll = new_strat_bankroll,
+                                open = open_count,
+                                today = strat_signals,
+                                max = strat.max_signals_per_day,
+                            );
+                            let _ = notifier.send(&msg).await;
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                strategy = %strat.name,
+                                err = %e,
+                                "Failed to place bet in DB"
+                            );
+                        }
+                    }
+
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
             }
         }
         Err(e) => {

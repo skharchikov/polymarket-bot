@@ -47,6 +47,7 @@ pub struct NewBet {
     pub reasoning: String,
     pub end_date: Option<String>,
     pub context: Option<BetContext>,
+    pub strategy: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,11 +69,17 @@ pub struct Bet {
     pub end_date: Option<String>,
     #[serde(default)]
     pub context: Option<BetContext>,
+    #[serde(default = "default_strategy")]
+    pub strategy: String,
     pub placed_at: DateTime<Utc>,
     pub resolved: bool,
     pub won: Option<bool>,
     pub pnl: Option<f64>,
     pub resolved_at: Option<DateTime<Utc>>,
+}
+
+fn default_strategy() -> String {
+    "balanced".into()
 }
 
 fn default_side() -> BetSide {

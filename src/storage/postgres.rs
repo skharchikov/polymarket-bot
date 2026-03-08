@@ -41,6 +41,11 @@ impl PgPortfolio {
             .execute(&self.pool)
             .await
             .context("failed to run calibration migration")?;
+        let strategies = include_str!("../../migrations/003_strategies.sql");
+        sqlx::raw_sql(strategies)
+            .execute(&self.pool)
+            .await
+            .context("failed to run strategies migration")?;
         Ok(())
     }
 
@@ -94,6 +99,30 @@ impl PgPortfolio {
         Ok(())
     }
 
+    async fn upsert_f64(&self, key: &str, val: f64) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO portfolio (key, value_f64) VALUES ($1, $2) \
+             ON CONFLICT (key) DO UPDATE SET value_f64 = EXCLUDED.value_f64",
+        )
+        .bind(key)
+        .bind(val)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn upsert_text(&self, key: &str, val: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO portfolio (key, value_text) VALUES ($1, $2) \
+             ON CONFLICT (key) DO UPDATE SET value_text = EXCLUDED.value_text",
+        )
+        .bind(key)
+        .bind(val)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     // --- public API matching PortfolioState ---
 
     pub async fn starting_bankroll(&self) -> Result<f64> {
@@ -108,8 +137,56 @@ impl PgPortfolio {
         self.set_f64("bankroll", val).await
     }
 
+    /// Get bankroll for a specific strategy.
+    pub async fn strategy_bankroll(&self, strategy: &str) -> Result<f64> {
+        self.get_f64(&format!("bankroll:{strategy}")).await
+    }
+
+    pub async fn set_strategy_bankroll(&self, strategy: &str, val: f64) -> Result<()> {
+        self.set_f64(&format!("bankroll:{strategy}"), val).await
+    }
+
+    /// Initialize per-strategy bankroll keys if they don't exist.
+    pub async fn init_strategy_bankrolls(
+        &self,
+        strategies: &[crate::strategy::StrategyProfile],
+    ) -> Result<()> {
+        let total = self.bankroll().await?;
+
+        for s in strategies {
+            let key = format!("bankroll:{}", s.name);
+            // Only init if key doesn't exist (value is 0.0 means not set yet)
+            let existing = self.get_f64(&key).await?;
+            if existing == 0.0 {
+                let amount = total * s.bankroll_share;
+                self.upsert_f64(&key, amount).await?;
+                tracing::info!(
+                    strategy = %s.name,
+                    bankroll = format_args!("€{amount:.2}"),
+                    "Initialized strategy bankroll"
+                );
+            }
+        }
+
+        // Init signal counters
+        for s in strategies {
+            let key = format!("signals_sent_today:{}", s.name);
+            self.upsert_f64(&key, 0.0).await?;
+            let key = format!("last_signal_date:{}", s.name);
+            self.upsert_text(&key, "").await?;
+        }
+
+        Ok(())
+    }
+
     pub async fn signals_sent_today(&self) -> Result<usize> {
         Ok(self.get_f64("signals_sent_today").await? as usize)
+    }
+
+    pub async fn strategy_signals_today(&self, strategy: &str) -> Result<usize> {
+        Ok(self
+            .get_f64(&format!("signals_sent_today:{strategy}"))
+            .await? as usize)
     }
 
     pub async fn reset_daily_if_needed(&self) -> Result<()> {
@@ -122,9 +199,31 @@ impl PgPortfolio {
         Ok(())
     }
 
+    pub async fn reset_strategy_daily_if_needed(&self, strategy: &str) -> Result<()> {
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let last = self
+            .get_text(&format!("last_signal_date:{strategy}"))
+            .await?;
+        if last != today {
+            self.set_f64(&format!("signals_sent_today:{strategy}"), 0.0)
+                .await?;
+            self.set_text(&format!("last_signal_date:{strategy}"), &today)
+                .await?;
+        }
+        Ok(())
+    }
+
     pub async fn increment_signals(&self) -> Result<()> {
         let cur = self.get_f64("signals_sent_today").await?;
         self.set_f64("signals_sent_today", cur + 1.0).await
+    }
+
+    pub async fn increment_strategy_signals(&self, strategy: &str) -> Result<()> {
+        let cur = self
+            .get_f64(&format!("signals_sent_today:{strategy}"))
+            .await?;
+        self.set_f64(&format!("signals_sent_today:{strategy}"), cur + 1.0)
+            .await
     }
 
     pub async fn place_bet(&self, bet: &NewBet) -> Result<i32> {
@@ -139,8 +238,8 @@ impl PgPortfolio {
 
         let row: (i32,) = sqlx::query_as(
             "INSERT INTO bets (market_id, question, side, entry_price, slipped_price, shares, cost, fee_paid, \
-             estimated_prob, confidence, edge, kelly_size, reasoning, end_date, context) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id",
+             estimated_prob, confidence, edge, kelly_size, reasoning, end_date, context, strategy) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id",
         )
         .bind(&bet.market_id)
         .bind(&bet.question)
@@ -157,9 +256,17 @@ impl PgPortfolio {
         .bind(&bet.reasoning)
         .bind(bet.end_date.as_deref())
         .bind(ctx_json)
+        .bind(&bet.strategy)
         .fetch_one(&self.pool)
         .await?;
 
+        // Deduct from strategy bankroll
+        let strat_bankroll = self.strategy_bankroll(&bet.strategy).await?;
+        self.set_strategy_bankroll(&bet.strategy, strat_bankroll - bet.cost - bet.fee)
+            .await?;
+        self.increment_strategy_signals(&bet.strategy).await?;
+
+        // Also update global bankroll
         let bankroll = self.bankroll().await?;
         self.set_bankroll(bankroll - bet.cost - bet.fee).await?;
         self.increment_signals().await?;
@@ -179,10 +286,11 @@ impl PgPortfolio {
             entry_price: f64,
             edge: f64,
             confidence: f64,
+            strategy: String,
         }
 
         let row: Option<OpenBetRow> = sqlx::query_as(
-            "SELECT id, side, shares, cost, question, entry_price, edge, confidence \
+            "SELECT id, side, shares, cost, question, entry_price, edge, confidence, strategy \
              FROM bets WHERE market_id = $1 AND resolved = false LIMIT 1",
         )
         .bind(market_id)
@@ -192,7 +300,7 @@ impl PgPortfolio {
         let Some(r) = row else {
             return Ok(None);
         };
-        let (bet_id, side_str, shares, cost, question, entry_price, edge, confidence) = (
+        let (bet_id, side_str, shares, cost, question, entry_price, edge, confidence, strategy) = (
             r.id,
             r.side,
             r.shares,
@@ -201,6 +309,7 @@ impl PgPortfolio {
             r.entry_price,
             r.edge,
             r.confidence,
+            r.strategy,
         );
 
         let side = if side_str == "Yes" {
@@ -230,6 +339,12 @@ impl PgPortfolio {
         .execute(&self.pool)
         .await?;
 
+        // Credit strategy bankroll
+        let strat_bankroll = self.strategy_bankroll(&strategy).await?;
+        self.set_strategy_bankroll(&strategy, strat_bankroll + net_payout)
+            .await?;
+
+        // Also update global bankroll
         let bankroll = self.bankroll().await?;
         self.set_bankroll(bankroll + net_payout).await?;
 
@@ -429,6 +544,7 @@ struct BetRow {
     reasoning: String,
     end_date: Option<String>,
     context: Option<serde_json::Value>,
+    strategy: String,
     placed_at: DateTime<Utc>,
     resolved: bool,
     won: Option<bool>,
@@ -461,6 +577,7 @@ impl BetRow {
             reasoning: self.reasoning,
             end_date: self.end_date,
             context,
+            strategy: self.strategy,
             placed_at: self.placed_at,
             resolved: self.resolved,
             won: self.won,

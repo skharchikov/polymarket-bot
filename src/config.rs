@@ -97,6 +97,10 @@ pub struct AppConfig {
     /// Maximum YES price to consider (filters out near-certain YES).
     #[config(env = "MAX_PRICE", default = 0.97)]
     pub max_price: f64,
+
+    /// Active strategies (comma-separated: aggressive,balanced,conservative).
+    #[config(env = "STRATEGIES", default = "aggressive,balanced,conservative")]
+    pub strategies: String,
 }
 
 impl AppConfig {
