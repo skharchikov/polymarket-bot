@@ -1,4 +1,5 @@
 mod backtest;
+mod config;
 mod data;
 mod pricing;
 mod scanner;
@@ -6,18 +7,12 @@ mod storage;
 mod telegram;
 
 use anyhow::Result;
+use config::AppConfig;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
 use storage::portfolio::NewBet;
 use storage::postgres::PgPortfolio;
-
-const MAX_SIGNALS_PER_DAY: usize = 3;
-const SCAN_INTERVAL_MINS: u64 = 30;
-const NEWS_SCAN_INTERVAL_MINS: u64 = 10;
-const SLIPPAGE_PCT: f64 = 0.01;
-const FEE_PCT: f64 = 0.02;
-const MIN_BET: f64 = 10.0;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -33,8 +28,14 @@ async fn main() -> Result<()> {
     let cmd = std::env::args().nth(1).unwrap_or_default();
     match cmd.as_str() {
         "backtest" => run_backtest().await,
-        "test" => run_live_with_interval(2).await, // scan every 2 minutes
-        _ => run_live_with_interval(SCAN_INTERVAL_MINS).await,
+        "test" | _ => {
+            let mut cfg = AppConfig::load()?;
+            if cmd == "test" {
+                cfg.scan_interval_mins = 2;
+                cfg.news_scan_interval_mins = 2;
+            }
+            run_live(Arc::new(cfg)).await
+        }
     }
 }
 
@@ -193,28 +194,23 @@ fn log_result(
     );
 }
 
-async fn run_live_with_interval(scan_interval_mins: u64) -> Result<()> {
-    let news_interval = if scan_interval_mins <= 2 {
-        scan_interval_mins
-    } else {
-        NEWS_SCAN_INTERVAL_MINS
-    };
-
+async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     tracing::info!(
-        news_interval_mins = news_interval,
-        housekeeping_interval_mins = scan_interval_mins,
+        news_interval_mins = cfg.news_scan_interval_mins,
+        housekeeping_interval_mins = cfg.scan_interval_mins,
         "Polymarket Signal Bot starting (dual-loop)..."
     );
 
-    let database_url =
-        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for live mode");
-    let pool = PgPool::connect(&database_url).await?;
+    let pool = PgPool::connect(&cfg.database_url).await?;
     let portfolio = Arc::new(PgPortfolio::new(pool).await?);
     portfolio.run_migrations().await?;
     tracing::info!("Database connected and migrations applied");
 
-    let notifier = Arc::new(telegram::notifier::TelegramNotifier::from_env()?);
-    let scanner = Arc::new(scanner::live::LiveScanner::new());
+    let notifier = Arc::new(telegram::notifier::TelegramNotifier::new(
+        &cfg.telegram_bot_token,
+        &cfg.telegram_chat_id,
+    ));
+    let scanner = Arc::new(scanner::live::LiveScanner::new(&cfg));
 
     let bankroll = portfolio.bankroll().await?;
     let open_count = portfolio.open_bets().await?.len();
@@ -224,7 +220,8 @@ async fn run_live_with_interval(scan_interval_mins: u64) -> Result<()> {
             "🤖 *Polymarket Signal Bot started*\n\
              💰 Bankroll: `€{bankroll:.2}`\n\
              📊 Open bets: {open_count}\n\
-             ⏱ News scan: every {news_interval}min | Housekeeping: every {scan_interval_mins}min",
+             ⏱ News scan: every {}min | Housekeeping: every {}min",
+            cfg.news_scan_interval_mins, cfg.scan_interval_mins,
         ))
         .await;
 
@@ -232,6 +229,7 @@ async fn run_live_with_interval(scan_interval_mins: u64) -> Result<()> {
     let hk_portfolio = Arc::clone(&portfolio);
     let hk_notifier = Arc::clone(&notifier);
     let hk_scanner = Arc::clone(&scanner);
+    let hk_interval = cfg.scan_interval_mins;
     let housekeeping = tokio::spawn(async move {
         loop {
             if let Err(e) =
@@ -239,7 +237,7 @@ async fn run_live_with_interval(scan_interval_mins: u64) -> Result<()> {
             {
                 tracing::error!(err = %e, "Housekeeping cycle failed");
             }
-            tokio::time::sleep(Duration::from_secs(scan_interval_mins * 60)).await;
+            tokio::time::sleep(Duration::from_secs(hk_interval * 60)).await;
         }
     });
 
@@ -247,23 +245,22 @@ async fn run_live_with_interval(scan_interval_mins: u64) -> Result<()> {
     let ns_portfolio = Arc::clone(&portfolio);
     let ns_notifier = Arc::clone(&notifier);
     let ns_scanner = Arc::clone(&scanner);
+    let ns_cfg = Arc::clone(&cfg);
     let news_scan = tokio::spawn(async move {
-        // Seen news titles to avoid re-processing across cycles
         let mut seen_headlines: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
         loop {
             if let Err(e) =
-                news_scan_cycle(&ns_portfolio, &ns_notifier, &ns_scanner, &mut seen_headlines)
+                news_scan_cycle(&ns_portfolio, &ns_notifier, &ns_scanner, &ns_cfg, &mut seen_headlines)
                     .await
             {
                 tracing::error!(err = %e, "News scan cycle failed");
             }
-            tokio::time::sleep(Duration::from_secs(news_interval * 60)).await;
+            tokio::time::sleep(Duration::from_secs(ns_cfg.news_scan_interval_mins * 60)).await;
         }
     });
 
-    // If either task panics, exit
     tokio::select! {
         r = housekeeping => {
             tracing::error!("Housekeeping loop exited: {:?}", r);
@@ -337,12 +334,13 @@ async fn news_scan_cycle(
     portfolio: &PgPortfolio,
     notifier: &telegram::notifier::TelegramNotifier,
     scanner: &scanner::live::LiveScanner,
+    cfg: &AppConfig,
     seen_headlines: &mut std::collections::HashSet<String>,
 ) -> Result<()> {
     portfolio.reset_daily_if_needed().await?;
 
     let signals_today = portfolio.signals_sent_today().await?;
-    let remaining = MAX_SIGNALS_PER_DAY.saturating_sub(signals_today);
+    let remaining = cfg.max_signals_per_day.saturating_sub(signals_today);
     if remaining == 0 {
         tracing::info!("Daily signal limit reached, skipping news scan");
         return Ok(());
@@ -364,10 +362,10 @@ async fn news_scan_cycle(
                 let bankroll = portfolio.bankroll().await?;
 
                 let raw_bet = bankroll * signal.kelly_size;
-                let bet_amount = raw_bet.max(MIN_BET);
-                let slipped_price = (signal.current_price * (1.0 + SLIPPAGE_PCT)).min(0.99);
+                let bet_amount = raw_bet.max(cfg.min_bet);
+                let slipped_price = (signal.current_price * (1.0 + cfg.slippage_pct)).min(0.99);
                 let shares = bet_amount / slipped_price;
-                let fee = bet_amount * FEE_PCT;
+                let fee = bet_amount * cfg.fee_pct;
                 let total_cost = bet_amount + fee;
 
                 if total_cost > bankroll {

@@ -4,8 +4,10 @@ use reqwest::Client;
 use rig::client::{CompletionClient, ProviderClient};
 use rig::completion::Chat;
 use rig::providers::openai;
+use std::sync::Arc;
 use std::time::Duration;
 
+use crate::config::AppConfig;
 use crate::data::models::{GammaMarket, PriceTick};
 use crate::pricing::kelly::fractional_kelly;
 use crate::storage::portfolio::{BetContext, BetSide};
@@ -14,15 +16,6 @@ use super::news::{NewsAggregator, NewsItem, NewsMatch};
 
 const GAMMA_API: &str = "https://gamma-api.polymarket.com";
 const CLOB_API: &str = "https://clob.polymarket.com";
-
-const MIN_VOLUME: f64 = 5000.0;
-const MIN_BOOK_DEPTH: f64 = 200.0;
-const KELLY_FRACTION: f64 = 0.25;
-const MAX_DAYS_TO_EXPIRY: i64 = 14;
-/// Max markets to send to LLM per scan cycle.
-const MAX_LLM_CANDIDATES: usize = 3;
-/// Minimum edge (prob delta * confidence) to emit a signal.
-const MIN_EFFECTIVE_EDGE: f64 = 0.08;
 
 #[derive(Debug, Clone)]
 pub struct Signal {
@@ -78,10 +71,11 @@ pub struct LiveScanner {
     http: Client,
     openai_client: openai::Client,
     news: NewsAggregator,
+    cfg: Arc<AppConfig>,
 }
 
 impl LiveScanner {
-    pub fn new() -> Self {
+    pub fn new(cfg: &Arc<AppConfig>) -> Self {
         let http = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -90,13 +84,14 @@ impl LiveScanner {
             news: NewsAggregator::new(http.clone()),
             http,
             openai_client: openai::Client::from_env(),
+            cfg: Arc::clone(cfg),
         }
     }
 
     /// Build an LLM agent for news-impact assessment.
     fn build_agent(&self, temperature: f64) -> rig::agent::Agent<openai::responses_api::ResponsesCompletionModel> {
         self.openai_client
-            .agent("gpt-4o-mini")
+            .agent(&self.cfg.llm_model)
             .preamble(
                 "You are an expert prediction market analyst.\n\n\
                  Your job: Given a Polymarket prediction market and RECENT NEWS, assess whether \
@@ -198,7 +193,7 @@ impl LiveScanner {
         Ok(resp.history)
     }
 
-    fn expires_within_window(end_date: Option<&str>) -> bool {
+    fn expires_within_window(&self, end_date: Option<&str>) -> bool {
         let Some(date_str) = end_date else {
             return false;
         };
@@ -206,7 +201,7 @@ impl LiveScanner {
             return false;
         };
         let now = Utc::now();
-        let deadline = now + ChronoDuration::days(MAX_DAYS_TO_EXPIRY);
+        let deadline = now + ChronoDuration::days(self.cfg.max_days_to_expiry);
         end > now && end <= deadline
     }
 
@@ -307,9 +302,9 @@ impl LiveScanner {
 
         let eligible: Vec<GammaMarket> = markets
             .into_iter()
-            .filter(|m| m.volume_num >= MIN_VOLUME)
+            .filter(|m| m.volume_num >= self.cfg.min_volume)
             .filter(|m| m.yes_token_id().is_some())
-            .filter(|m| Self::expires_within_window(m.end_date.as_deref()))
+            .filter(|m| self.expires_within_window(m.end_date.as_deref()))
             .filter(|m| !skip_market_ids.contains(&m.market_id))
             .filter(|m| {
                 let price = Self::get_yes_price(m).unwrap_or(0.0);
@@ -320,8 +315,8 @@ impl LiveScanner {
         tracing::info!(
             eligible = eligible.len(),
             "Eligible markets (vol>${}, ≤{}d expiry)",
-            MIN_VOLUME,
-            MAX_DAYS_TO_EXPIRY,
+            self.cfg.min_volume,
+            self.cfg.max_days_to_expiry,
         );
 
         // Step 2: Fetch breaking news from all sources
@@ -389,7 +384,7 @@ impl LiveScanner {
         // Step 4: For top matches, check book depth and get price history
         let mut candidates: Vec<(NewsMatch, f64, String, f64)> = Vec::new();
 
-        for nm in matches.iter().take(MAX_LLM_CANDIDATES * 2) {
+        for nm in matches.iter().take(self.cfg.max_llm_candidates * 2) {
             let token_id = nm.market.yes_token_id().unwrap();
             let current_price = Self::get_yes_price(&nm.market).unwrap_or(0.0);
 
@@ -397,7 +392,7 @@ impl LiveScanner {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let book_depth = self.fetch_book_depth(&token_id).await.unwrap_or(0.0);
 
-            if book_depth < MIN_BOOK_DEPTH {
+            if book_depth < self.cfg.min_book_depth {
                 tracing::debug!(
                     market = %nm.market.question,
                     depth = format_args!("${book_depth:.0}"),
@@ -416,7 +411,7 @@ impl LiveScanner {
 
             candidates.push((nm.clone(), current_price, history_summary, book_depth));
 
-            if candidates.len() >= MAX_LLM_CANDIDATES {
+            if candidates.len() >= self.cfg.max_llm_candidates {
                 break;
             }
         }
@@ -478,7 +473,7 @@ impl LiveScanner {
                 continue;
             };
 
-            let kelly_size = fractional_kelly(bet_prob, bet_price, KELLY_FRACTION);
+            let kelly_size = fractional_kelly(bet_prob, bet_price, self.cfg.kelly_fraction);
             let effective_edge = edge * confidence;
 
             let news_titles: Vec<&str> = nm.news.iter().map(|n| n.title.as_str()).collect();
@@ -494,7 +489,7 @@ impl LiveScanner {
                 "Signal candidate"
             );
 
-            if effective_edge >= MIN_EFFECTIVE_EDGE && kelly_size > 0.01 && confidence >= 0.5 {
+            if effective_edge >= self.cfg.min_effective_edge && kelly_size > 0.01 && confidence >= 0.5 {
                 let news_headlines: Vec<String> = nm.news.iter().map(|n| n.title.clone()).collect();
 
                 signals.push(Signal {

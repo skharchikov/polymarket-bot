@@ -38,3 +38,6 @@ sqlx = { version = "0.8.6", features = [
 
 # Environment variables
 dotenvy = "0.15"
+
+# Configuration
+confique = "0.2"

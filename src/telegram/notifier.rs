@@ -8,16 +8,12 @@ pub struct TelegramNotifier {
 }
 
 impl TelegramNotifier {
-    pub fn from_env() -> Result<Self> {
-        let bot_token =
-            std::env::var("TELEGRAM_BOT_TOKEN").context("TELEGRAM_BOT_TOKEN not set")?;
-        let chat_id = std::env::var("TELEGRAM_CHAT_ID").context("TELEGRAM_CHAT_ID not set")?;
-
-        Ok(Self {
+    pub fn new(bot_token: &str, chat_id: &str) -> Self {
+        Self {
             client: Client::new(),
-            bot_token,
-            chat_id,
-        })
+            bot_token: bot_token.to_string(),
+            chat_id: chat_id.to_string(),
+        }
     }
 
     pub async fn send(&self, message: &str) -> Result<()> {
