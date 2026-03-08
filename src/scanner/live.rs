@@ -725,14 +725,21 @@ impl LiveScanner {
             } else if no_edge > 0.0 {
                 (BetSide::No, no_edge, no_price, no_prob)
             } else {
-                let reason = format!("no edge (prob {:.0}% ~ price {:.0}%)", prob * 100.0, current_price * 100.0);
+                let reason = format!(
+                    "no edge (prob {:.0}% ~ price {:.0}%)",
+                    prob * 100.0,
+                    current_price * 100.0
+                );
                 tracing::info!(
                     market = %nm.market.question,
                     prob = format_args!("{:.1}%", prob * 100.0),
                     price = format_args!("{:.1}%", current_price * 100.0),
                     "No edge on either side"
                 );
-                rejections.push(RejectedSignal { question: nm.market.question.clone(), reason });
+                rejections.push(RejectedSignal {
+                    question: nm.market.question.clone(),
+                    reason,
+                });
                 continue;
             };
 
@@ -761,7 +768,10 @@ impl LiveScanner {
                     eff_edge = format_args!("+{:.1}%", effective_edge * 100.0),
                     "REJECTED: effective edge below 3% gate"
                 );
-                rejections.push(RejectedSignal { question: nm.market.question.clone(), reason });
+                rejections.push(RejectedSignal {
+                    question: nm.market.question.clone(),
+                    reason,
+                });
                 continue;
             }
             if kelly_size <= 0.005 {
@@ -771,7 +781,10 @@ impl LiveScanner {
                     kelly = format_args!("{:.3}", kelly_size),
                     "REJECTED: full Kelly too small"
                 );
-                rejections.push(RejectedSignal { question: nm.market.question.clone(), reason });
+                rejections.push(RejectedSignal {
+                    question: nm.market.question.clone(),
+                    reason,
+                });
                 continue;
             }
             if confidence < 0.30 {
@@ -781,7 +794,10 @@ impl LiveScanner {
                     conf = format_args!("{:.0}%", confidence * 100.0),
                     "REJECTED: confidence below 30% gate"
                 );
-                rejections.push(RejectedSignal { question: nm.market.question.clone(), reason });
+                rejections.push(RejectedSignal {
+                    question: nm.market.question.clone(),
+                    reason,
+                });
                 continue;
             }
 
@@ -823,7 +839,11 @@ impl LiveScanner {
 
         signals.sort_by(|a, b| b.score().partial_cmp(&a.score()).unwrap());
 
-        tracing::info!(signals = signals.len(), rejections = rejections.len(), "Final news-driven signals");
+        tracing::info!(
+            signals = signals.len(),
+            rejections = rejections.len(),
+            "Final news-driven signals"
+        );
         Ok(ScanResult {
             signals,
             rejections,

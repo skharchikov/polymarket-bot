@@ -714,7 +714,8 @@ async fn news_scan_cycle(
                         ));
                     }
                     if result.rejections.len() > 5 {
-                        summary.push_str(&format!("\n  ...and {} more", result.rejections.len() - 5));
+                        summary
+                            .push_str(&format!("\n  ...and {} more", result.rejections.len() - 5));
                     }
                 }
 
@@ -724,7 +725,10 @@ async fn news_scan_cycle(
                         summary.push_str(&format!("\n  {r}"));
                     }
                     if strategy_rejections.len() > 5 {
-                        summary.push_str(&format!("\n  ...and {} more", strategy_rejections.len() - 5));
+                        summary.push_str(&format!(
+                            "\n  ...and {} more",
+                            strategy_rejections.len() - 5
+                        ));
                     }
                 }
 
