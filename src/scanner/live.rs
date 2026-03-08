@@ -715,8 +715,8 @@ impl LiveScanner {
             });
         }
 
-        // Step 3: Match news to markets by keyword relevance
-        let matches = NewsAggregator::match_to_markets(&news, &eligible);
+        // Step 3: Match news to markets by semantic similarity (OpenAI embeddings)
+        let matches = self.news.match_to_markets(&news, &eligible).await?;
 
         tracing::info!(
             matched = matches.len(),

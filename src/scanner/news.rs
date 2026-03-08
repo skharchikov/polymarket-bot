@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use reqwest::Client;
 use std::time::Duration;
@@ -24,13 +24,21 @@ pub struct NewsMatch {
     pub relevance_score: f64,
 }
 
+/// Minimum cosine similarity to consider a news item relevant to a market.
+const EMBEDDING_MIN_SIMILARITY: f64 = 0.35;
+
 pub struct NewsAggregator {
     http: Client,
+    openai_api_key: Option<String>,
 }
 
 impl NewsAggregator {
     pub fn new(http: Client) -> Self {
-        Self { http }
+        let openai_api_key = std::env::var("OPENAI_API_KEY").ok();
+        Self {
+            http,
+            openai_api_key,
+        }
     }
 
     /// Fetch recent news from all free sources.
@@ -40,10 +48,9 @@ impl NewsAggregator {
         let mut source_counts = Vec::new();
 
         // Parallel fetch from multiple sources
-        let (google, reddit, polymarket_blog, crypto, reuters) = tokio::join!(
+        let (google, reddit, crypto, reuters) = tokio::join!(
             self.google_news_top(),
             self.reddit_news(),
-            self.polymarket_activity(),
             self.crypto_news(),
             self.reuters_news(),
         );
@@ -51,7 +58,6 @@ impl NewsAggregator {
         for (name, result) in [
             ("Google News", google),
             ("Reddit", reddit),
-            ("Polymarket", polymarket_blog),
             ("Crypto", crypto),
             ("Reuters", reuters),
         ] {
@@ -198,56 +204,47 @@ impl NewsAggregator {
         Ok(items)
     }
 
-    /// Polymarket's own API — check for recently active/trending markets.
-    async fn polymarket_activity(&self) -> Result<Vec<NewsItem>> {
-        // Use Gamma API to find markets with recent large volume spikes
-        // These often indicate news-driven activity
-        let url = "https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=20&order=volumeNum&ascending=false";
-        let resp: Vec<serde_json::Value> = self.http.get(url).send().await?.json().await?;
-
-        let mut items = Vec::new();
-        for market in resp.iter().take(10) {
-            let question = market["question"].as_str().unwrap_or_default();
-            let volume = market["volumeNum"]
-                .as_f64()
-                .or_else(|| market["volumeNum"].as_str().and_then(|s| s.parse().ok()))
-                .unwrap_or(0.0);
-
-            if volume > 100_000.0 && !question.is_empty() {
-                items.push(NewsItem {
-                    title: question.to_string(),
-                    source: "Polymarket".to_string(),
-                    url: String::new(),
-                    published: Some(Utc::now()),
-                    summary: format!("Volume: ${volume:.0}"),
-                });
-            }
+    /// Match news to markets using OpenAI embeddings (cosine similarity).
+    pub async fn match_to_markets(
+        &self,
+        news: &[NewsItem],
+        markets: &[GammaMarket],
+    ) -> Result<Vec<NewsMatch>> {
+        let api_key = self
+            .openai_api_key
+            .as_deref()
+            .context("OPENAI_API_KEY required for embedding-based news matching")?;
+        if news.is_empty() || markets.is_empty() {
+            return Ok(Vec::new());
         }
 
-        Ok(items)
-    }
+        // Build all texts to embed in a single batch
+        let news_texts: Vec<String> = news.iter().map(|n| n.title.clone()).collect();
+        let market_texts: Vec<String> = markets.iter().map(|m| m.question.clone()).collect();
 
-    /// Match news items to markets using BM25 relevance scoring.
-    /// Returns markets with matched news, sorted by relevance.
-    pub fn match_to_markets(news: &[NewsItem], markets: &[GammaMarket]) -> Vec<NewsMatch> {
-        let index = Bm25Index::build(news);
+        let mut all_texts = news_texts.clone();
+        all_texts.extend(market_texts.clone());
+
+        let embeddings = self.embed_texts(&all_texts, api_key).await?;
+
+        let news_embeddings = &embeddings[..news.len()];
+        let market_embeddings = &embeddings[news.len()..];
 
         let mut matches: Vec<NewsMatch> = Vec::new();
 
-        for market in markets {
-            let query_terms = extract_keywords(&market.question);
-            if query_terms.is_empty() {
-                continue;
-            }
+        for (mi, market) in markets.iter().enumerate() {
+            let market_emb = &market_embeddings[mi];
 
             let mut scored_news: Vec<(f64, &NewsItem)> = news
                 .iter()
                 .enumerate()
-                .map(|(i, item)| (index.score(&query_terms, i), item))
-                .filter(|(score, _)| *score > BM25_MIN_SCORE)
+                .map(|(ni, item)| {
+                    let sim = cosine_similarity(market_emb, &news_embeddings[ni]);
+                    (sim, item)
+                })
+                .filter(|(sim, _)| *sim > EMBEDDING_MIN_SIMILARITY)
                 .collect();
 
-            // Sort by score descending
             scored_news.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
             if !scored_news.is_empty() {
@@ -266,93 +263,74 @@ impl NewsAggregator {
             }
         }
 
-        // Sort by relevance score (best matches first)
-        matches.sort_by(|a, b| b.relevance_score.partial_cmp(&a.relevance_score).unwrap());
-        matches
+        matches.sort_by(|a, b| {
+            b.relevance_score
+                .partial_cmp(&a.relevance_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        tracing::info!(
+            matched = matches.len(),
+            total_markets = markets.len(),
+            total_news = news.len(),
+            "Embedding-based matching complete"
+        );
+
+        Ok(matches)
+    }
+
+    /// Call OpenAI embeddings API. Returns one vector per input text.
+    async fn embed_texts(&self, texts: &[String], api_key: &str) -> Result<Vec<Vec<f64>>> {
+        let resp = self
+            .http
+            .post("https://api.openai.com/v1/embeddings")
+            .header("Authorization", format!("Bearer {api_key}"))
+            .json(&serde_json::json!({
+                "model": "text-embedding-3-small",
+                "input": texts,
+            }))
+            .send()
+            .await
+            .context("embeddings request failed")?;
+
+        if !resp.status().is_success() {
+            let body: String = resp.text().await.unwrap_or_default();
+            anyhow::bail!("OpenAI embeddings API error: {body}");
+        }
+
+        let json: serde_json::Value = resp.json().await.context("parsing embeddings response")?;
+
+        let empty_vec = vec![];
+        let mut embeddings: Vec<(usize, Vec<f64>)> = json["data"]
+            .as_array()
+            .context("no data array in response")?
+            .iter()
+            .map(|item| {
+                let idx = item["index"].as_u64().unwrap_or(0) as usize;
+                let emb: Vec<f64> = item["embedding"]
+                    .as_array()
+                    .unwrap_or(&empty_vec)
+                    .iter()
+                    .filter_map(|v| v.as_f64())
+                    .collect();
+                (idx, emb)
+            })
+            .collect();
+
+        // Sort by index to match input order
+        embeddings.sort_by_key(|(idx, _)| *idx);
+        Ok(embeddings.into_iter().map(|(_, emb)| emb).collect())
     }
 }
 
-// --- BM25 scoring ---
-
-/// Minimum BM25 score to consider a news item relevant to a market.
-const BM25_MIN_SCORE: f64 = 1.5;
-
-/// BM25 parameters — standard values from the literature.
-const BM25_K1: f64 = 1.2;
-const BM25_B: f64 = 0.75;
-
-/// In-memory BM25 index over a set of news items.
-struct Bm25Index {
-    /// Tokenized documents: doc_idx → terms
-    docs: Vec<Vec<String>>,
-    /// Document frequency: term → number of docs containing it
-    df: std::collections::HashMap<String, usize>,
-    /// Average document length
-    avgdl: f64,
-    /// Total number of documents
-    n: usize,
-}
-
-impl Bm25Index {
-    /// Build an index from news items. Combines title (2× weight) + summary.
-    fn build(news: &[NewsItem]) -> Self {
-        let mut df: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        let mut docs = Vec::with_capacity(news.len());
-        let mut total_len = 0usize;
-
-        for item in news {
-            // Title terms appear twice for boosted weight
-            let mut terms = extract_keywords(&item.title);
-            terms.extend(extract_keywords(&item.title));
-            terms.extend(extract_keywords(&item.summary));
-
-            // Count unique terms for DF
-            let unique: std::collections::HashSet<&str> =
-                terms.iter().map(|s| s.as_str()).collect();
-            for term in &unique {
-                *df.entry((*term).to_string()).or_insert(0) += 1;
-            }
-
-            total_len += terms.len();
-            docs.push(terms);
-        }
-
-        let n = docs.len();
-        let avgdl = if n > 0 {
-            total_len as f64 / n as f64
-        } else {
-            1.0
-        };
-
-        Self { docs, df, avgdl, n }
+fn cosine_similarity(a: &[f64], b: &[f64]) -> f64 {
+    let dot: f64 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let norm_a: f64 = a.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let norm_b: f64 = b.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
     }
-
-    /// Compute BM25 score for a query against document at index `doc_idx`.
-    fn score(&self, query_terms: &[String], doc_idx: usize) -> f64 {
-        let doc = &self.docs[doc_idx];
-        let dl = doc.len() as f64;
-        let mut score = 0.0;
-
-        for term in query_terms {
-            // Term frequency in this document
-            let tf = doc.iter().filter(|t| *t == term).count() as f64;
-            if tf == 0.0 {
-                continue;
-            }
-
-            // Inverse document frequency: log((N - df + 0.5) / (df + 0.5) + 1)
-            let df = *self.df.get(term).unwrap_or(&0) as f64;
-            let idf = ((self.n as f64 - df + 0.5) / (df + 0.5) + 1.0).ln();
-
-            // BM25 TF component
-            let tf_norm =
-                (tf * (BM25_K1 + 1.0)) / (tf + BM25_K1 * (1.0 - BM25_B + BM25_B * dl / self.avgdl));
-
-            score += idf * tf_norm;
-        }
-
-        score
-    }
+    dot / (norm_a * norm_b)
 }
 
 // --- HTTP helpers ---
@@ -404,137 +382,6 @@ async fn fetch_with_retry(http: &Client, url: &str, user_agent: &str) -> Result<
 }
 
 // --- Text helpers ---
-
-const STOP_WORDS: &[&str] = &[
-    // English stop words
-    "the",
-    "a",
-    "an",
-    "in",
-    "on",
-    "at",
-    "to",
-    "by",
-    "for",
-    "of",
-    "be",
-    "is",
-    "it",
-    "or",
-    "and",
-    "with",
-    "will",
-    "this",
-    "that",
-    "has",
-    "have",
-    "had",
-    "was",
-    "were",
-    "are",
-    "been",
-    "its",
-    "not",
-    "but",
-    "from",
-    "they",
-    "their",
-    "can",
-    "do",
-    "does",
-    "did",
-    "would",
-    "could",
-    "should",
-    "may",
-    "might",
-    "shall",
-    "about",
-    "above",
-    "below",
-    "between",
-    "before",
-    "after",
-    "than",
-    "more",
-    "most",
-    "very",
-    "just",
-    "also",
-    "how",
-    "what",
-    "when",
-    "where",
-    "who",
-    "which",
-    "if",
-    "then",
-    "so",
-    "up",
-    "out",
-    "all",
-    "over",
-    "into",
-    "says",
-    "said",
-    // Domain-generic terms (appear everywhere, zero discriminative value)
-    "yes",
-    "no",
-    "new",
-    "price",
-    "market",
-    "markets",
-    "polymarket",
-    "trending",
-    "prediction",
-    "odds",
-    "bet",
-    "bets",
-    "betting",
-    "win",
-    "won",
-    "winning",
-    "best",
-    "week",
-    "month",
-    "year",
-    "day",
-    "today",
-    "first",
-    "last",
-    "next",
-    "back",
-    "take",
-    "takes",
-    "lead",
-    "could",
-    "per",
-    "get",
-    "make",
-    "going",
-    "still",
-    "why",
-    "despite",
-    "according",
-    "report",
-    "reports",
-    "news",
-    "breaking",
-    "update",
-    "latest",
-    "hold",
-    "like",
-    "way",
-];
-
-fn extract_keywords(text: &str) -> Vec<String> {
-    text.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() >= 3)
-        .filter(|w| !STOP_WORDS.contains(w))
-        .map(|w| w.to_string())
-        .collect()
-}
 
 fn extract_tag(xml: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
@@ -603,7 +450,6 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::models::GammaMarket;
 
     fn news(title: &str, summary: &str) -> NewsItem {
         NewsItem {
@@ -615,323 +461,44 @@ mod tests {
         }
     }
 
-    fn market(question: &str) -> GammaMarket {
-        GammaMarket {
-            market_id: "test".into(),
-            question: question.into(),
-            outcomes: None,
-            outcome_prices: None,
-            volume_num: 0.0,
-            liquidity_num: 0.0,
-            clob_token_ids: None,
-            end_date: None,
-            slug: None,
-            category: None,
-        }
+    #[test]
+    fn test_cosine_similarity_identical() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![1.0, 0.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - 1.0).abs() < 1e-10, "Identical vectors: {sim}");
     }
 
     #[test]
-    fn test_bm25_exact_match_scores_high() {
-        let items = vec![
-            news("Federal Reserve cuts interest rates by 50 basis points", ""),
-            news("New iPhone released by Apple", ""),
-        ];
-        let index = Bm25Index::build(&items);
-        let query = extract_keywords("Will the Federal Reserve cut interest rates?");
-
-        let score_fed = index.score(&query, 0);
-        let score_iphone = index.score(&query, 1);
-
-        assert!(
-            score_fed > score_iphone,
-            "Fed news should score higher: {score_fed} vs {score_iphone}"
-        );
-        assert!(
-            score_fed > BM25_MIN_SCORE,
-            "Fed news should pass threshold: {score_fed}"
-        );
+    fn test_cosine_similarity_orthogonal() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![0.0, 1.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!(sim.abs() < 1e-10, "Orthogonal vectors: {sim}");
     }
 
     #[test]
-    fn test_bm25_semantic_near_miss_keyword_overlap_would_miss() {
-        // "rates" appears in both but old keyword overlap needed ≥2 exact matches
-        let items = vec![news(
-            "Fed cuts rates in surprise move",
-            "Economy responds to monetary policy shift",
-        )];
-        let index = Bm25Index::build(&items);
-        let query = extract_keywords("Will interest rates decrease this quarter?");
-
-        let score = index.score(&query, 0);
-        assert!(
-            score > 0.0,
-            "Should find partial match via 'rates': {score}"
-        );
+    fn test_cosine_similarity_opposite() {
+        let a = vec![1.0, 0.0];
+        let b = vec![-1.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - (-1.0)).abs() < 1e-10, "Opposite vectors: {sim}");
     }
 
     #[test]
-    fn test_bm25_title_boost() {
-        // Same word in title vs summary should score differently (title is 2x)
-        let items = vec![
-            news("Bitcoin crashes below 50k", "crypto market turmoil"),
-            news(
-                "Market update today",
-                "Bitcoin crashes below 50k in crypto turmoil",
-            ),
-        ];
-        let index = Bm25Index::build(&items);
-        let query = extract_keywords("Will Bitcoin crash?");
-
-        let score_title = index.score(&query, 0);
-        let score_summary = index.score(&query, 1);
-
-        assert!(
-            score_title > score_summary,
-            "Title match should score higher: {score_title} vs {score_summary}"
-        );
+    fn test_cosine_similarity_zero_vector() {
+        let a = vec![0.0, 0.0, 0.0];
+        let b = vec![1.0, 2.0, 3.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - 0.0).abs() < 1e-10, "Zero vector: {sim}");
     }
 
     #[test]
-    fn test_bm25_idf_rewards_rare_terms() {
-        // "quantum" is rare, "technology" is common → "quantum" match should contribute more
-        let items = vec![
-            news("Quantum computing breakthrough announced", ""),
-            news("Technology stocks rise", ""),
-            news("Technology companies report earnings", ""),
-            news("New technology regulation proposed", ""),
-        ];
-        let index = Bm25Index::build(&items);
-        let query = extract_keywords("quantum technology");
-
-        let score_quantum = index.score(&query, 0);
-        let score_tech1 = index.score(&query, 1);
-
-        assert!(
-            score_quantum > score_tech1,
-            "Rare 'quantum' match should outscore common 'technology': {score_quantum} vs {score_tech1}"
-        );
-    }
-
-    #[test]
-    fn test_bm25_no_match_scores_zero() {
-        let items = vec![news("Apple releases new MacBook", "")];
-        let index = Bm25Index::build(&items);
-        let query = extract_keywords("Will Bitcoin reach 100k?");
-
-        let score = index.score(&query, 0);
-        assert!(
-            (score - 0.0).abs() < f64::EPSILON,
-            "No overlap should score 0: {score}"
-        );
-    }
-
-    #[test]
-    fn test_bm25_empty_corpus() {
-        let items: Vec<NewsItem> = vec![];
-        let index = Bm25Index::build(&items);
-        assert_eq!(index.n, 0);
-        assert!((index.avgdl - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_match_to_markets_uses_bm25() {
-        let items = vec![
-            news(
-                "Federal Reserve raises interest rates",
-                "Inflation concerns drive policy",
-            ),
-            news("SpaceX launches Starship successfully", ""),
-            news("Bitcoin ETF approved by SEC", "Crypto markets rally"),
-        ];
-
-        let markets = vec![
-            market("Will the Federal Reserve raise interest rates in March?"),
-            market("Will SpaceX launch Starship in Q1?"),
-        ];
-
-        let matches = NewsAggregator::match_to_markets(&items, &markets);
-
-        assert!(!matches.is_empty(), "Should find matches");
-
-        // Fed market should match Fed news
-        let fed_match = matches
-            .iter()
-            .find(|m| m.market.question.contains("Federal"))
-            .unwrap();
-        assert!(fed_match.news.iter().any(|n| n.title.contains("Federal")));
-
-        // SpaceX market should match SpaceX news
-        let spacex_match = matches
-            .iter()
-            .find(|m| m.market.question.contains("SpaceX"))
-            .unwrap();
-        assert!(spacex_match.news.iter().any(|n| n.title.contains("SpaceX")));
-    }
-
-    #[test]
-    fn test_match_to_markets_sorted_by_relevance() {
-        let items = vec![
-            news(
-                "Bitcoin surges past 100k as ETF inflows accelerate",
-                "Record institutional buying",
-            ),
-            news(
-                "Bitcoin mining difficulty reaches all-time high",
-                "Hash rate climbs",
-            ),
-            news("Weather forecast for tomorrow", ""),
-        ];
-
-        let markets = vec![
-            market("Will Bitcoin reach 150k by end of year?"),
-            market("Will it rain tomorrow in New York?"),
-        ];
-
-        let matches = NewsAggregator::match_to_markets(&items, &markets);
-
-        // Bitcoin market should have higher relevance (2 matching articles)
-        if matches.len() >= 2 {
-            assert!(
-                matches[0].relevance_score >= matches[1].relevance_score,
-                "Should be sorted by relevance"
-            );
-        }
-    }
-
-    #[test]
-    fn test_bm25_score_values_single_doc() {
-        // Single doc, single query term → verify formula by hand.
-        // Doc: "bitcoin" (title doubled → tf=2, dl=2)
-        // N=1, df=1, avgdl=2
-        // IDF = ln((1 - 1 + 0.5) / (1 + 0.5) + 1) = ln(4/3)
-        // TF  = (2 * 2.2) / (2 + 1.2 * (1 - 0.75 + 0.75 * 2/2)) = 4.4 / 3.2
-        // Score = ln(4/3) * 4.4/3.2
-        let items = vec![news("bitcoin", "")];
-        let index = Bm25Index::build(&items);
-        let query = vec!["bitcoin".to_string()];
-
-        let score = index.score(&query, 0);
-        let expected = (4.0_f64 / 3.0).ln() * (4.4 / 3.2);
-        assert!(
-            (score - expected).abs() < 1e-10,
-            "score {score} != expected {expected}"
-        );
-    }
-
-    #[test]
-    fn test_bm25_score_increases_with_more_query_terms() {
-        // More matching query terms → higher score
-        let items = vec![news(
-            "Federal Reserve cuts interest rates",
-            "Economy slows down",
-        )];
-        let index = Bm25Index::build(&items);
-
-        let one_term = vec!["federal".to_string()];
-        let two_terms = vec!["federal".to_string(), "reserve".to_string()];
-        let three_terms = vec![
-            "federal".to_string(),
-            "reserve".to_string(),
-            "rates".to_string(),
-        ];
-
-        let s1 = index.score(&one_term, 0);
-        let s2 = index.score(&two_terms, 0);
-        let s3 = index.score(&three_terms, 0);
-
-        assert!(s2 > s1, "2 terms ({s2}) should score > 1 term ({s1})");
-        assert!(s3 > s2, "3 terms ({s3}) should score > 2 terms ({s2})");
-    }
-
-    #[test]
-    fn test_bm25_idf_values() {
-        // Term in 1/10 docs should have higher IDF than term in 9/10 docs
-        let mut items: Vec<NewsItem> = (0..9)
-            .map(|i| news(&format!("common topic number {i}"), ""))
-            .collect();
-        items.push(news("rare unique unicorn", ""));
-
-        let index = Bm25Index::build(&items);
-
-        // "rare" appears in 1/10 docs, "common" in 9/10
-        let df_rare = *index.df.get("rare").unwrap_or(&0) as f64;
-        let df_common = *index.df.get("common").unwrap_or(&0) as f64;
-        let n = index.n as f64;
-
-        let idf_rare = ((n - df_rare + 0.5) / (df_rare + 0.5) + 1.0).ln();
-        let idf_common = ((n - df_common + 0.5) / (df_common + 0.5) + 1.0).ln();
-
-        assert!(
-            idf_rare > idf_common,
-            "rare IDF ({idf_rare}) should > common IDF ({idf_common})"
-        );
-        assert!(idf_rare > 1.0, "rare IDF should be significant: {idf_rare}");
-        assert!(idf_common < 0.5, "common IDF should be low: {idf_common}");
-    }
-
-    #[test]
-    fn test_bm25_score_threshold_calibration() {
-        // Verify BM25_MIN_SCORE separates good from poor matches
-        let items = vec![
-            news("Federal Reserve raises interest rates", "Inflation data"),
-            news("Cat video goes viral on TikTok", "Funny animals"),
-        ];
-        let index = Bm25Index::build(&items);
-        let query = extract_keywords("Will Federal Reserve raise rates?");
-
-        let good = index.score(&query, 0);
-        let bad = index.score(&query, 1);
-
-        assert!(
-            good > BM25_MIN_SCORE,
-            "Relevant match should exceed threshold: {good} > {BM25_MIN_SCORE}"
-        );
-        assert!(
-            bad < BM25_MIN_SCORE,
-            "Irrelevant match should be below threshold: {bad} < {BM25_MIN_SCORE}"
-        );
-    }
-
-    #[test]
-    fn test_cross_topic_noise_filtered() {
-        // Oscars market should NOT match bitcoin or NBA news
-        let items = vec![
-            news(
-                "Michael B. Jordan takes the lead on Polymarket for Oscars Best Actor",
-                "",
-            ),
-            news(
-                "Why bitcoin couldn't hold $70,000 despite its best week of Wall Street news",
-                "",
-            ),
-            news("Will the Indiana Pacers win the 2026 NBA Finals?", ""),
-        ];
-        let m = market("Will Michael B. Jordan win the Oscar for Best Actor?");
-        let matches = NewsAggregator::match_to_markets(&items, &[m]);
-
-        assert_eq!(matches.len(), 1);
-        let matched_titles: Vec<&str> = matches[0].news.iter().map(|n| n.title.as_str()).collect();
-        assert!(
-            matched_titles.iter().any(|t| t.contains("Michael")),
-            "Should match the relevant Oscars headline"
-        );
-        assert!(
-            !matched_titles.iter().any(|t| t.contains("bitcoin")),
-            "Should NOT match bitcoin news: {matched_titles:?}"
-        );
-        assert!(
-            !matched_titles.iter().any(|t| t.contains("Pacers")),
-            "Should NOT match NBA news: {matched_titles:?}"
-        );
-    }
-
-    #[test]
-    fn test_extract_keywords_filters_stop_words() {
-        let words = extract_keywords("Will the Federal Reserve cut interest rates?");
-        assert!(words.contains(&"federal".to_string()));
-        assert!(words.contains(&"reserve".to_string()));
-        assert!(!words.contains(&"will".to_string()));
-        assert!(!words.contains(&"the".to_string()));
+    fn test_cosine_similarity_similar_direction() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![2.0, 4.0, 6.0]; // same direction, different magnitude
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - 1.0).abs() < 1e-10, "Parallel vectors: {sim}");
     }
 
     #[test]
@@ -943,5 +510,25 @@ mod tests {
         ];
         dedup_news(&mut items);
         assert_eq!(items.len(), 2, "Near-duplicate should be removed");
+    }
+
+    #[test]
+    fn test_dedup_preserves_distinct() {
+        let mut items = vec![
+            news("Bitcoin surges past 100k", ""),
+            news("Ethereum hits new all-time high", ""),
+            news("Federal Reserve cuts rates", ""),
+        ];
+        dedup_news(&mut items);
+        assert_eq!(items.len(), 3, "All distinct — nothing removed");
+    }
+
+    #[test]
+    fn test_embedding_min_similarity_threshold() {
+        // Verify the threshold constant is in a reasonable range
+        assert!(
+            EMBEDDING_MIN_SIMILARITY > 0.0 && EMBEDDING_MIN_SIMILARITY < 1.0,
+            "Threshold should be between 0 and 1: {EMBEDDING_MIN_SIMILARITY}"
+        );
     }
 }
