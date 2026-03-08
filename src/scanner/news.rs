@@ -162,7 +162,10 @@ impl NewsAggregator {
         let resp: serde_json::Value = self
             .http
             .get(url)
-            .header("User-Agent", "polymarket-bot/0.1")
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (compatible; NewsAggregator/1.0)",
+            )
             .send()
             .await?
             .json()
@@ -179,7 +182,7 @@ impl NewsAggregator {
                 let score = data["score"].as_i64().unwrap_or(0);
 
                 // Only high-engagement posts
-                if score < 100 || title.is_empty() {
+                if score < 20 || title.is_empty() {
                     continue;
                 }
 
