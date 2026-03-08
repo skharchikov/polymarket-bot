@@ -38,20 +38,30 @@ impl NewsAggregator {
         let mut all = Vec::new();
 
         // Parallel fetch from multiple sources
-        let (google, reddit, polymarket_blog) = tokio::join!(
+        let (google, reddit, polymarket_blog, coindesk, reuters) = tokio::join!(
             self.google_news_top(),
             self.reddit_news(),
             self.polymarket_activity(),
+            self.coindesk_news(),
+            self.reuters_news(),
         );
 
-        if let Ok(items) = google {
-            all.extend(items);
-        }
-        if let Ok(items) = reddit {
-            all.extend(items);
-        }
-        if let Ok(items) = polymarket_blog {
-            all.extend(items);
+        for (name, result) in [
+            ("Google News", google),
+            ("Reddit", reddit),
+            ("Polymarket", polymarket_blog),
+            ("CoinDesk", coindesk),
+            ("Reuters", reuters),
+        ] {
+            match result {
+                Ok(items) => {
+                    tracing::info!(source = name, count = items.len(), "Fetched news");
+                    all.extend(items);
+                }
+                Err(e) => {
+                    tracing::warn!(source = name, err = %e, "News fetch failed");
+                }
+            }
         }
 
         // Deduplicate by title similarity
@@ -181,6 +191,55 @@ impl NewsAggregator {
             }
         }
 
+        Ok(items)
+    }
+
+    /// CoinDesk RSS — crypto news. Free, no key.
+    async fn coindesk_news(&self) -> Result<Vec<NewsItem>> {
+        let feeds = [
+            "https://www.coindesk.com/arc/outboundfeeds/rss/",
+            "https://cointelegraph.com/rss",
+        ];
+
+        let mut items = Vec::new();
+        for url in feeds {
+            match self.fetch_rss(url).await {
+                Ok(feed_items) => items.extend(feed_items),
+                Err(e) => tracing::debug!(url = url, err = %e, "CoinDesk/CT RSS failed"),
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Re-tag source
+        for item in &mut items {
+            if item.source == "Google News" {
+                item.source = "CoinDesk".to_string();
+            }
+        }
+        Ok(items)
+    }
+
+    /// Reuters RSS — global breaking news. Free, no key.
+    async fn reuters_news(&self) -> Result<Vec<NewsItem>> {
+        let feeds = [
+            "https://www.reutersagency.com/feed/?taxonomy=best-sectors&post_type=best",
+            "https://news.google.com/rss/search?q=site:reuters.com&hl=en-US",
+        ];
+
+        let mut items = Vec::new();
+        for url in feeds {
+            match self.fetch_rss(url).await {
+                Ok(feed_items) => items.extend(feed_items),
+                Err(e) => tracing::debug!(url = url, err = %e, "Reuters RSS failed"),
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        for item in &mut items {
+            if item.source == "Google News" {
+                item.source = "Reuters".to_string();
+            }
+        }
         Ok(items)
     }
 
@@ -345,9 +404,10 @@ fn dedup_news(items: &mut Vec<NewsItem>) {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        let truncated: String = s.chars().take(max).collect();
+        format!("{truncated}...")
     }
 }

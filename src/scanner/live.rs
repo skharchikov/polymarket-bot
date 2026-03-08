@@ -740,34 +740,65 @@ impl LiveScanner {
             );
 
             // Use permissive gate; individual strategies apply their own thresholds
-            if effective_edge >= 0.03 && kelly_size > 0.005 && confidence >= 0.30 {
-                let news_headlines: Vec<String> = nm.news.iter().map(|n| n.title.clone()).collect();
-
-                signals.push(Signal {
-                    market_id: nm.market.market_id.clone(),
-                    question: nm.market.question.clone(),
-                    side,
-                    current_price: bet_price,
-                    estimated_prob: bet_prob,
-                    confidence,
-                    edge,
-                    kelly_size,
-                    reasoning,
-                    end_date: nm.market.end_date.clone(),
-                    volume: nm.market.volume_num,
-                    context: BetContext {
-                        btc_price: 0.0,
-                        eth_price: 0.0,
-                        sol_price: 0.0,
-                        btc_24h_change: 0.0,
-                        btc_funding_rate: 0.0,
-                        btc_open_interest: 0.0,
-                        fear_greed: String::new(),
-                        book_depth: *book_depth,
-                        news_headlines,
-                    },
-                });
+            if effective_edge < 0.03 {
+                tracing::info!(
+                    market = %nm.market.question,
+                    eff_edge = format_args!("+{:.1}%", effective_edge * 100.0),
+                    "REJECTED: effective edge below 3% gate"
+                );
+                continue;
             }
+            if kelly_size <= 0.005 {
+                tracing::info!(
+                    market = %nm.market.question,
+                    kelly = format_args!("{:.3}", kelly_size),
+                    "REJECTED: full Kelly too small"
+                );
+                continue;
+            }
+            if confidence < 0.30 {
+                tracing::info!(
+                    market = %nm.market.question,
+                    conf = format_args!("{:.0}%", confidence * 100.0),
+                    "REJECTED: confidence below 30% gate"
+                );
+                continue;
+            }
+
+            tracing::info!(
+                market = %nm.market.question,
+                side = %side,
+                eff_edge = format_args!("+{:.1}%", effective_edge * 100.0),
+                kelly = format_args!("{:.1}%", kelly_size * 100.0),
+                conf = format_args!("{:.0}%", confidence * 100.0),
+                "ACCEPTED as signal — passing to strategies"
+            );
+
+            let news_headlines: Vec<String> = nm.news.iter().map(|n| n.title.clone()).collect();
+            signals.push(Signal {
+                market_id: nm.market.market_id.clone(),
+                question: nm.market.question.clone(),
+                side,
+                current_price: bet_price,
+                estimated_prob: bet_prob,
+                confidence,
+                edge,
+                kelly_size,
+                reasoning,
+                end_date: nm.market.end_date.clone(),
+                volume: nm.market.volume_num,
+                context: BetContext {
+                    btc_price: 0.0,
+                    eth_price: 0.0,
+                    sol_price: 0.0,
+                    btc_24h_change: 0.0,
+                    btc_funding_rate: 0.0,
+                    btc_open_interest: 0.0,
+                    fear_greed: String::new(),
+                    book_depth: *book_depth,
+                    news_headlines,
+                },
+            });
         }
 
         signals.sort_by(|a, b| b.score().partial_cmp(&a.score()).unwrap());

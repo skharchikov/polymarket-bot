@@ -505,16 +505,34 @@ async fn news_scan_cycle(
 
             for signal in &result.signals {
                 for strat in strategies {
-                    let remaining = strat
-                        .max_signals_per_day
-                        .saturating_sub(portfolio.strategy_signals_today(&strat.name).await?);
+                    let sent = portfolio.strategy_signals_today(&strat.name).await?;
+                    let remaining = strat.max_signals_per_day.saturating_sub(sent);
                     if remaining == 0 {
+                        tracing::info!(
+                            strategy = %strat.name,
+                            market = %signal.question,
+                            sent = sent,
+                            max = strat.max_signals_per_day,
+                            "Strategy daily limit reached, skipping"
+                        );
                         continue;
                     }
 
                     let accepted = match strat.evaluate(signal) {
                         Some(a) => a,
-                        None => continue,
+                        None => {
+                            let eff_edge = signal.edge * signal.confidence;
+                            tracing::info!(
+                                strategy = %strat.name,
+                                market = %signal.question,
+                                eff_edge = format_args!("+{:.1}%", eff_edge * 100.0),
+                                conf = format_args!("{:.0}%", signal.confidence * 100.0),
+                                min_edge = format_args!("{:.0}%", strat.min_effective_edge * 100.0),
+                                min_conf = format_args!("{:.0}%", strat.min_confidence * 100.0),
+                                "Strategy rejected signal (below thresholds)"
+                            );
+                            continue;
+                        }
                     };
 
                     let strat_bankroll = portfolio.strategy_bankroll(&strat.name).await?;
