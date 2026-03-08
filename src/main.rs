@@ -219,7 +219,22 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         "Polymarket Signal Bot starting (dual-loop)..."
     );
 
-    let pool = PgPool::connect(&cfg.database_url).await?;
+    let pool = {
+        let mut attempts = 0;
+        loop {
+            match PgPool::connect(&cfg.database_url).await {
+                Ok(p) => break p,
+                Err(e) => {
+                    attempts += 1;
+                    if attempts >= 10 {
+                        return Err(e.into());
+                    }
+                    tracing::warn!(attempt = attempts, err = %e, "DB connect failed, retrying in 3s...");
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+            }
+        }
+    };
     let portfolio = Arc::new(PgPortfolio::new(pool.clone()).await?);
     portfolio.run_migrations().await?;
     tracing::info!("Database connected and migrations applied");
