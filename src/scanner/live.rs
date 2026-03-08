@@ -67,6 +67,13 @@ impl Signal {
     }
 }
 
+pub struct ScanResult {
+    pub signals: Vec<Signal>,
+    pub markets_scanned: usize,
+    pub news_total: usize,
+    pub news_new: usize,
+}
+
 pub struct LiveScanner {
     http: Client,
     openai_client: openai::Client,
@@ -298,7 +305,7 @@ impl LiveScanner {
         skip_market_ids: &[String],
         past_bets_summary: &str,
         seen_headlines: &mut std::collections::HashSet<String>,
-    ) -> Result<Vec<Signal>> {
+    ) -> Result<ScanResult> {
         // Step 1: Fetch all active markets (ALL categories, not just crypto)
         let markets = self.fetch_active_markets().await?;
         tracing::info!(total = markets.len(), "Fetched active markets");
@@ -322,8 +329,11 @@ impl LiveScanner {
             self.cfg.max_days_to_expiry,
         );
 
+        let markets_scanned = eligible.len();
+
         // Step 2: Fetch breaking news from all sources
         let mut news = self.news.fetch_all().await;
+        let news_total = news.len();
 
         // Filter out headlines we've already processed in previous cycles
         let before = news.len();
@@ -367,9 +377,16 @@ impl LiveScanner {
             }
         }
 
+        let news_new = news.len();
+
         if news.is_empty() {
             tracing::warn!("No news fetched — check network/API access");
-            return Ok(Vec::new());
+            return Ok(ScanResult {
+                signals: Vec::new(),
+                markets_scanned,
+                news_total,
+                news_new: 0,
+            });
         }
 
         // Step 3: Match news to markets by keyword relevance
@@ -381,7 +398,12 @@ impl LiveScanner {
         );
 
         if matches.is_empty() {
-            return Ok(Vec::new());
+            return Ok(ScanResult {
+                signals: Vec::new(),
+                markets_scanned,
+                news_total,
+                news_new,
+            });
         }
 
         // Step 4: For top matches, check book depth and get price history
@@ -421,7 +443,12 @@ impl LiveScanner {
 
         if candidates.is_empty() {
             tracing::info!("No news-matched markets passed liquidity filter");
-            return Ok(Vec::new());
+            return Ok(ScanResult {
+                signals: Vec::new(),
+                markets_scanned,
+                news_total,
+                news_new,
+            });
         }
 
         tracing::info!(
@@ -528,7 +555,12 @@ impl LiveScanner {
         signals.sort_by(|a, b| b.score().partial_cmp(&a.score()).unwrap());
 
         tracing::info!(signals = signals.len(), "Final news-driven signals");
-        Ok(signals)
+        Ok(ScanResult {
+            signals,
+            markets_scanned,
+            news_total,
+            news_new,
+        })
     }
 }
 

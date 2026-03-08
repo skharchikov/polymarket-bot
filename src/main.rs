@@ -10,9 +10,19 @@ use anyhow::Result;
 use config::AppConfig;
 use sqlx::PgPool;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use storage::portfolio::NewBet;
 use storage::postgres::PgPortfolio;
+
+/// Shared scan stats for heartbeat reporting.
+struct ScanStats {
+    scans_completed: AtomicU64,
+    markets_scanned: AtomicU64,
+    news_total: AtomicU64,
+    news_new: AtomicU64,
+    signals_found: AtomicU64,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -244,6 +254,14 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         ))
         .await;
 
+    let stats = Arc::new(ScanStats {
+        scans_completed: AtomicU64::new(0),
+        markets_scanned: AtomicU64::new(0),
+        news_total: AtomicU64::new(0),
+        news_new: AtomicU64::new(0),
+        signals_found: AtomicU64::new(0),
+    });
+
     // Spawn housekeeping loop (resolution checks, daily reports)
     let hk_portfolio = Arc::clone(&portfolio);
     let hk_notifier = Arc::clone(&notifier);
@@ -263,6 +281,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     let ns_notifier = Arc::clone(&notifier);
     let ns_scanner = Arc::clone(&scanner);
     let ns_cfg = Arc::clone(&cfg);
+    let ns_stats = Arc::clone(&stats);
     let news_scan = tokio::spawn(async move {
         let mut seen_headlines: std::collections::HashSet<String> =
             std::collections::HashSet::new();
@@ -273,6 +292,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                 &ns_notifier,
                 &ns_scanner,
                 &ns_cfg,
+                &ns_stats,
                 &mut seen_headlines,
             )
             .await
@@ -283,12 +303,35 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         }
     });
 
+    // Spawn heartbeat loop
+    let hb_interval = cfg.heartbeat_interval_mins;
+    let hb_portfolio = Arc::clone(&portfolio);
+    let hb_notifier = Arc::clone(&notifier);
+    let hb_cfg = Arc::clone(&cfg);
+    let hb_stats = Arc::clone(&stats);
+    let heartbeat = tokio::spawn(async move {
+        if hb_interval == 0 {
+            // Disabled — park forever
+            std::future::pending::<()>().await;
+            return;
+        }
+        loop {
+            tokio::time::sleep(Duration::from_secs(hb_interval * 60)).await;
+            if let Err(e) = heartbeat_cycle(&hb_portfolio, &hb_notifier, &hb_cfg, &hb_stats).await {
+                tracing::error!(err = %e, "Heartbeat failed");
+            }
+        }
+    });
+
     tokio::select! {
         r = housekeeping => {
             tracing::error!("Housekeeping loop exited: {:?}", r);
         }
         r = news_scan => {
             tracing::error!("News scan loop exited: {:?}", r);
+        }
+        r = heartbeat => {
+            tracing::error!("Heartbeat loop exited: {:?}", r);
         }
     }
 
@@ -376,6 +419,7 @@ async fn news_scan_cycle(
     notifier: &telegram::notifier::TelegramNotifier,
     scanner: &scanner::live::LiveScanner,
     cfg: &AppConfig,
+    stats: &ScanStats,
     seen_headlines: &mut std::collections::HashSet<String>,
 ) -> Result<()> {
     portfolio.reset_daily_if_needed().await?;
@@ -398,8 +442,22 @@ async fn news_scan_cycle(
     let past_bets = portfolio.learning_summary().await?;
 
     match scanner.scan(&skip_ids, &past_bets, seen_headlines).await {
-        Ok(signals) => {
-            for signal in signals.into_iter().take(remaining) {
+        Ok(result) => {
+            stats.scans_completed.fetch_add(1, Ordering::Relaxed);
+            stats
+                .markets_scanned
+                .fetch_add(result.markets_scanned as u64, Ordering::Relaxed);
+            stats
+                .news_total
+                .fetch_add(result.news_total as u64, Ordering::Relaxed);
+            stats
+                .news_new
+                .fetch_add(result.news_new as u64, Ordering::Relaxed);
+            stats
+                .signals_found
+                .fetch_add(result.signals.len() as u64, Ordering::Relaxed);
+
+            for signal in result.signals.into_iter().take(remaining) {
                 let bankroll = portfolio.bankroll().await?;
 
                 let raw_bet = bankroll * signal.kelly_size;
@@ -505,6 +563,43 @@ async fn news_scan_cycle(
         open_bets = open_count,
         "News scan cycle complete"
     );
+    Ok(())
+}
+
+/// Periodic heartbeat — lets you know the bot is alive.
+async fn heartbeat_cycle(
+    portfolio: &PgPortfolio,
+    notifier: &telegram::notifier::TelegramNotifier,
+    cfg: &AppConfig,
+    stats: &ScanStats,
+) -> Result<()> {
+    let bankroll = portfolio.bankroll().await?;
+    let open_count = portfolio.open_bets().await?.len();
+    let signals_today = portfolio.signals_sent_today().await?;
+
+    // Read and reset counters
+    let scans = stats.scans_completed.swap(0, Ordering::Relaxed);
+    let markets = stats.markets_scanned.swap(0, Ordering::Relaxed);
+    let news_total = stats.news_total.swap(0, Ordering::Relaxed);
+    let news_new = stats.news_new.swap(0, Ordering::Relaxed);
+    let signals = stats.signals_found.swap(0, Ordering::Relaxed);
+
+    let msg = format!(
+        "💓 *Heartbeat*\n\n\
+         ⏱ {scans} scans in the last {interval}min\n\
+         🔍 {markets} markets scanned\n\
+         📰 {news_total} news items ({news_new} new)\n\
+         🎯 {signals} signals found\n\n\
+         💰 Bankroll: `€{bankroll:.2}`\n\
+         📊 Open bets: {open} | Signals today: {today}/{max}",
+        interval = cfg.heartbeat_interval_mins,
+        open = open_count,
+        today = signals_today,
+        max = cfg.max_signals_per_day,
+    );
+
+    let _ = notifier.send(&msg).await;
+    tracing::info!("Heartbeat sent");
     Ok(())
 }
 

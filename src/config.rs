@@ -67,6 +67,10 @@ pub struct AppConfig {
     /// LLM model to use for news impact assessment.
     #[config(env = "LLM_MODEL", default = "gpt-4o")]
     pub llm_model: String,
+
+    /// Heartbeat interval in minutes (0 to disable).
+    #[config(env = "HEARTBEAT_INTERVAL_MINS", default = 60)]
+    pub heartbeat_interval_mins: u64,
 }
 
 impl AppConfig {
