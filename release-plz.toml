@@ -5,3 +5,5 @@ publish = false
 git_release_enable = true
 # Include all commits in changelog (not just conventional commits)
 release_commits = "^.*"
+# Skip semver check (binary crate, no public API)
+semver_check = false
