@@ -679,6 +679,100 @@ mod tests {
     }
 
     #[test]
+    fn test_bm25_score_values_single_doc() {
+        // Single doc, single query term → verify formula by hand.
+        // Doc: "bitcoin" (title doubled → tf=2, dl=2)
+        // N=1, df=1, avgdl=2
+        // IDF = ln((1 - 1 + 0.5) / (1 + 0.5) + 1) = ln(4/3)
+        // TF  = (2 * 2.2) / (2 + 1.2 * (1 - 0.75 + 0.75 * 2/2)) = 4.4 / 3.2
+        // Score = ln(4/3) * 4.4/3.2
+        let items = vec![news("bitcoin", "")];
+        let index = Bm25Index::build(&items);
+        let query = vec!["bitcoin".to_string()];
+
+        let score = index.score(&query, 0);
+        let expected = (4.0_f64 / 3.0).ln() * (4.4 / 3.2);
+        assert!(
+            (score - expected).abs() < 1e-10,
+            "score {score} != expected {expected}"
+        );
+    }
+
+    #[test]
+    fn test_bm25_score_increases_with_more_query_terms() {
+        // More matching query terms → higher score
+        let items = vec![news(
+            "Federal Reserve cuts interest rates",
+            "Economy slows down",
+        )];
+        let index = Bm25Index::build(&items);
+
+        let one_term = vec!["federal".to_string()];
+        let two_terms = vec!["federal".to_string(), "reserve".to_string()];
+        let three_terms = vec![
+            "federal".to_string(),
+            "reserve".to_string(),
+            "rates".to_string(),
+        ];
+
+        let s1 = index.score(&one_term, 0);
+        let s2 = index.score(&two_terms, 0);
+        let s3 = index.score(&three_terms, 0);
+
+        assert!(s2 > s1, "2 terms ({s2}) should score > 1 term ({s1})");
+        assert!(s3 > s2, "3 terms ({s3}) should score > 2 terms ({s2})");
+    }
+
+    #[test]
+    fn test_bm25_idf_values() {
+        // Term in 1/10 docs should have higher IDF than term in 9/10 docs
+        let mut items: Vec<NewsItem> = (0..9)
+            .map(|i| news(&format!("common topic number {i}"), ""))
+            .collect();
+        items.push(news("rare unique unicorn", ""));
+
+        let index = Bm25Index::build(&items);
+
+        // "rare" appears in 1/10 docs, "common" in 9/10
+        let df_rare = *index.df.get("rare").unwrap_or(&0) as f64;
+        let df_common = *index.df.get("common").unwrap_or(&0) as f64;
+        let n = index.n as f64;
+
+        let idf_rare = ((n - df_rare + 0.5) / (df_rare + 0.5) + 1.0).ln();
+        let idf_common = ((n - df_common + 0.5) / (df_common + 0.5) + 1.0).ln();
+
+        assert!(
+            idf_rare > idf_common,
+            "rare IDF ({idf_rare}) should > common IDF ({idf_common})"
+        );
+        assert!(idf_rare > 1.0, "rare IDF should be significant: {idf_rare}");
+        assert!(idf_common < 0.5, "common IDF should be low: {idf_common}");
+    }
+
+    #[test]
+    fn test_bm25_score_threshold_calibration() {
+        // Verify BM25_MIN_SCORE separates good from poor matches
+        let items = vec![
+            news("Federal Reserve raises interest rates", "Inflation data"),
+            news("Cat video goes viral on TikTok", "Funny animals"),
+        ];
+        let index = Bm25Index::build(&items);
+        let query = extract_keywords("Will Federal Reserve raise rates?");
+
+        let good = index.score(&query, 0);
+        let bad = index.score(&query, 1);
+
+        assert!(
+            good > BM25_MIN_SCORE,
+            "Relevant match should exceed threshold: {good} > {BM25_MIN_SCORE}"
+        );
+        assert!(
+            bad < BM25_MIN_SCORE,
+            "Irrelevant match should be below threshold: {bad} < {BM25_MIN_SCORE}"
+        );
+    }
+
+    #[test]
     fn test_extract_keywords_filters_stop_words() {
         let words = extract_keywords("Will the Federal Reserve cut interest rates?");
         assert!(words.contains(&"federal".to_string()));
