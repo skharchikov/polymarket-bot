@@ -505,6 +505,9 @@ async fn news_scan_cycle(
                 .signals_found
                 .fetch_add(result.signals.len() as u64, Ordering::Relaxed);
 
+            let mut bets_placed: Vec<String> = Vec::new();
+            let mut strategy_rejections: Vec<String> = Vec::new();
+
             for signal in &result.signals {
                 for strat in strategies {
                     let sent = portfolio.strategy_signals_today(&strat.name).await?;
@@ -533,6 +536,13 @@ async fn news_scan_cycle(
                                 min_conf = format_args!("{:.0}%", strat.min_confidence * 100.0),
                                 "Strategy rejected signal (below thresholds)"
                             );
+                            strategy_rejections.push(format!(
+                                "{} {}: edge {:.1}%/conf {:.0}%",
+                                strat.label(),
+                                truncate_str(&signal.question, 40),
+                                eff_edge * 100.0,
+                                signal.confidence * 100.0,
+                            ));
                             continue;
                         }
                     };
@@ -546,6 +556,13 @@ async fn news_scan_cycle(
                             min_bet = format_args!("€{:.2}", strat.min_bet),
                             "Kelly bet below minimum, skipping"
                         );
+                        strategy_rejections.push(format!(
+                            "{} {}: kelly €{:.2} < min €{:.2}",
+                            strat.label(),
+                            truncate_str(&signal.question, 40),
+                            raw_bet,
+                            strat.min_bet,
+                        ));
                         continue;
                     }
                     let bet_amount = raw_bet;
@@ -561,6 +578,13 @@ async fn news_scan_cycle(
                             cost = format_args!("€{total_cost:.2}"),
                             "Insufficient strategy bankroll"
                         );
+                        strategy_rejections.push(format!(
+                            "{} {}: cost €{:.2} > bankroll €{:.2}",
+                            strat.label(),
+                            truncate_str(&signal.question, 40),
+                            total_cost,
+                            strat_bankroll,
+                        ));
                         continue;
                     }
 
@@ -599,6 +623,13 @@ async fn news_scan_cycle(
                                 bankroll = format_args!("€{new_strat_bankroll:.2}"),
                                 "Bet placed"
                             );
+
+                            bets_placed.push(format!(
+                                "{} {} €{:.2}",
+                                strat.label(),
+                                truncate_str(&signal.question, 40),
+                                bet_amount,
+                            ));
 
                             let news_section = if !signal.context.news_headlines.is_empty() {
                                 let headlines: Vec<String> = signal
@@ -648,6 +679,56 @@ async fn news_scan_cycle(
 
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
+            }
+
+            // Send scan cycle summary to Telegram
+            let has_activity = !result.rejections.is_empty()
+                || !strategy_rejections.is_empty()
+                || !bets_placed.is_empty();
+
+            if has_activity {
+                let mut summary = format!(
+                    "🔍 *Scan complete*\n\
+                     📰 News: {} fetched, {} new\n\
+                     📊 Markets: {} eligible, {} signals",
+                    result.news_total,
+                    result.news_new,
+                    result.markets_scanned,
+                    result.signals.len(),
+                );
+
+                if !bets_placed.is_empty() {
+                    summary.push_str("\n\n✅ *Bets placed:*");
+                    for b in &bets_placed {
+                        summary.push_str(&format!("\n  {b}"));
+                    }
+                }
+
+                if !result.rejections.is_empty() {
+                    summary.push_str("\n\n❌ *Scanner gate rejected:*");
+                    for r in result.rejections.iter().take(5) {
+                        summary.push_str(&format!(
+                            "\n  {} — {}",
+                            truncate_str(&r.question, 40),
+                            r.reason,
+                        ));
+                    }
+                    if result.rejections.len() > 5 {
+                        summary.push_str(&format!("\n  ...and {} more", result.rejections.len() - 5));
+                    }
+                }
+
+                if !strategy_rejections.is_empty() {
+                    summary.push_str("\n\n⚠️ *Strategy rejected:*");
+                    for r in strategy_rejections.iter().take(5) {
+                        summary.push_str(&format!("\n  {r}"));
+                    }
+                    if strategy_rejections.len() > 5 {
+                        summary.push_str(&format!("\n  ...and {} more", strategy_rejections.len() - 5));
+                    }
+                }
+
+                let _ = notifier.send(&summary).await;
             }
         }
         Err(e) => {
