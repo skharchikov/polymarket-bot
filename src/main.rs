@@ -37,6 +37,8 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("polymarket_bot=info".parse()?),
         )
+        .with_ansi(true)
+        .with_target(true)
         .init();
 
     dotenvy::dotenv().ok();
@@ -508,7 +510,7 @@ async fn news_scan_cycle(
                     let sent = portfolio.strategy_signals_today(&strat.name).await?;
                     let remaining = strat.max_signals_per_day.saturating_sub(sent);
                     if remaining == 0 {
-                        tracing::info!(
+                        tracing::debug!(
                             strategy = %strat.name,
                             market = %signal.question,
                             sent = sent,
