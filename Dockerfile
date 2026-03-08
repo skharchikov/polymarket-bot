@@ -21,34 +21,21 @@ RUN touch src/main.rs && cargo build --release
 RUN upx --best --lzma /app/target/release/polymarket-bot
 
 ####################################################################################################
-## Minimal CA certs + timezone data
+## Final image
 ####################################################################################################
-FROM alpine:latest AS files
+FROM alpine:latest
 
 RUN apk update && apk upgrade --no-cache && \
-    apk add --no-cache ca-certificates tzdata
-
-RUN update-ca-certificates
-
-ENV USER=bot
-ENV UID=10001
-RUN adduser \
-    --disabled-password \
-    --gecos "" \
-    --home "/nonexistent" \
-    --shell "/sbin/nologin" \
-    --no-create-home \
-    --uid "${UID}" \
-    "${USER}"
-
-####################################################################################################
-## Final scratch image
-####################################################################################################
-FROM scratch
-
-COPY --from=files --chmod=444 /etc/passwd /etc/group /etc/nsswitch.conf /etc/
-COPY --from=files --chmod=444 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=files --chmod=444 /usr/share/zoneinfo /usr/share/zoneinfo
+    apk add --no-cache ca-certificates tzdata && \
+    update-ca-certificates && \
+    adduser \
+      --disabled-password \
+      --gecos "" \
+      --home "/nonexistent" \
+      --shell "/sbin/nologin" \
+      --no-create-home \
+      --uid 10001 \
+      bot
 
 COPY --from=builder /app/target/release/polymarket-bot /bin/polymarket-bot
 
