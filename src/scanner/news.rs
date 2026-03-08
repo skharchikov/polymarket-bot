@@ -175,10 +175,7 @@ impl NewsAggregator {
         let resp = self
             .http
             .get(url)
-            .header(
-                "User-Agent",
-                "Mozilla/5.0 (compatible; NewsAggregator/1.0)",
-            )
+            .header("User-Agent", "Mozilla/5.0 (compatible; NewsAggregator/1.0)")
             .send()
             .await?;
 
