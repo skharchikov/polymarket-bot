@@ -694,33 +694,23 @@ async fn news_scan_cycle(
                 || result.llm_assessed > 0;
 
             if has_activity {
-                // Source breakdown: "Google(120) Reddit(45) CoinDesk(30)"
+                // Source breakdown — show all sources including zeros
                 let sources: String = result
                     .source_counts
                     .iter()
-                    .filter(|(_, c)| *c > 0)
-                    .map(|(name, count)| format!("{}({})", name, count))
+                    .map(|(name, count)| format!("{name}(`{count}`)"))
                     .collect::<Vec<_>>()
-                    .join(" ");
+                    .join(" · ");
 
                 let mut summary = format!(
-                    "🔍 *Scan complete*\n\n\
-                     📰 *News:* {} fetched, {} new\n\
-                     📡 *Sources:* {}\n\
-                     📊 *Markets:* {} eligible, {} matched news\n\
-                     🧠 *LLM assessed:* {} markets, {} signals, {} rejected",
-                    result.news_total,
-                    result.news_new,
-                    if sources.is_empty() {
-                        "none".to_string()
-                    } else {
-                        sources
-                    },
-                    result.markets_scanned,
-                    result.news_matched,
-                    result.llm_assessed,
-                    result.signals.len(),
-                    result.rejections.len(),
+                    "📡 {sources}\n\
+                     📊 `{eligible}` markets, `{matched}` matched → `{assessed}` assessed\n\
+                     🎯 `{signals}` signals, `{gate_rej}` gate rejected",
+                    eligible = result.markets_scanned,
+                    matched = result.news_matched,
+                    assessed = result.llm_assessed,
+                    signals = result.signals.len(),
+                    gate_rej = result.rejections.len(),
                 );
 
                 if !bets_placed.is_empty() {
@@ -732,29 +722,45 @@ async fn news_scan_cycle(
 
                 if !result.rejections.is_empty() {
                     summary.push_str("\n\n❌ *Gate rejected:*");
-                    for r in result.rejections.iter().take(5) {
+                    for r in result.rejections.iter().take(3) {
                         summary.push_str(&format!(
                             "\n  {} — {}",
                             truncate_str(&r.question, 40),
                             r.reason,
                         ));
                     }
-                    if result.rejections.len() > 5 {
-                        summary
-                            .push_str(&format!("\n  ...and {} more", result.rejections.len() - 5));
+                    if result.rejections.len() > 3 {
+                        summary.push_str(&format!("\n  _+{} more_", result.rejections.len() - 3));
                     }
                 }
 
+                // Group strategy rejections by market to avoid repetition
                 if !strategy_rejections.is_empty() {
-                    summary.push_str("\n\n⚠️ *Strategy rejected:*");
-                    for r in strategy_rejections.iter().take(5) {
-                        summary.push_str(&format!("\n  {r}"));
+                    let mut by_market: std::collections::BTreeMap<String, Vec<String>> =
+                        std::collections::BTreeMap::new();
+                    for r in &strategy_rejections {
+                        // Format is "🔥 Question...: reason"
+                        // Extract the emoji+label prefix and group by the rest
+                        if let Some((label, rest)) = r.split_once(' ') {
+                            let market_key =
+                                rest.split(':').next().unwrap_or(rest).trim().to_string();
+                            by_market
+                                .entry(market_key)
+                                .or_default()
+                                .push(label.to_string());
+                        }
                     }
-                    if strategy_rejections.len() > 5 {
-                        summary.push_str(&format!(
-                            "\n  ...and {} more",
-                            strategy_rejections.len() - 5
-                        ));
+
+                    summary.push_str(&format!(
+                        "\n\n⚠️ *Strategy rejected ({} signals):*",
+                        by_market.len()
+                    ));
+                    for (market, labels) in by_market.iter().take(3) {
+                        let strats = labels.join("");
+                        summary.push_str(&format!("\n  {strats} {market}"));
+                    }
+                    if by_market.len() > 3 {
+                        summary.push_str(&format!("\n  _+{} more_", by_market.len() - 3));
                     }
                 }
 

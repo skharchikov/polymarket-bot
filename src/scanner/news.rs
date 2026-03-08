@@ -129,24 +129,23 @@ impl NewsAggregator {
         Ok(items)
     }
 
-    /// Reddit via RSS — no rate limits, no auth needed.
+    /// Reddit content via Google News search (Reddit blocks server IPs directly).
     async fn reddit_news(&self) -> Result<Vec<NewsItem>> {
         let mut items = Vec::new();
-        let subreddits = [
-            "news",
-            "worldnews",
-            "politics",
-            "technology",
-            "CryptoCurrency",
+        let queries = [
+            "site:reddit.com+news",
+            "site:reddit.com+politics",
+            "site:reddit.com+crypto",
         ];
 
-        for sub in &subreddits {
-            let url = format!("https://www.reddit.com/r/{sub}/hot.rss?limit=15");
-            match self.fetch_rss(&url, &format!("r/{sub}")).await {
-                Ok(posts) => items.extend(posts),
-                Err(e) => tracing::debug!(sub = sub, err = %e, "Reddit RSS failed"),
+        for query in &queries {
+            let url =
+                format!("https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en");
+            match self.fetch_rss(&url, "Reddit").await {
+                Ok(feed_items) => items.extend(feed_items),
+                Err(e) => tracing::debug!(query = query, err = %e, "Reddit via Google failed"),
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
         Ok(items)
@@ -171,11 +170,12 @@ impl NewsAggregator {
         Ok(items)
     }
 
-    /// Reuters RSS — global breaking news. Free, no key.
+    /// Reuters + AP + BBC via Google News RSS proxies.
     async fn reuters_news(&self) -> Result<Vec<NewsItem>> {
         let feeds = [
-            "https://www.reutersagency.com/feed/?taxonomy=best-sectors&post_type=best",
-            "https://news.google.com/rss/search?q=site:reuters.com&hl=en-US",
+            "https://news.google.com/rss/search?q=site:reuters.com&hl=en-US&gl=US&ceid=US:en",
+            "https://news.google.com/rss/search?q=site:apnews.com&hl=en-US&gl=US&ceid=US:en",
+            "https://feeds.bbci.co.uk/news/world/rss.xml",
         ];
 
         let mut items = Vec::new();
