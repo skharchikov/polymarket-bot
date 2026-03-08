@@ -3,3 +3,5 @@
 publish = false
 # Create GitHub releases with changelog
 git_release_enable = true
+# Include all commits in changelog (not just conventional commits)
+release_commits = "^.*"
