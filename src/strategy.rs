@@ -124,6 +124,9 @@ mod tests {
             end_date: None,
             volume: 1000.0,
             polymarket_url: String::new(),
+            prior: price,
+            combined_lr: 1.0,
+            news_matched_count: 0,
             context: BetContext::default(),
         }
     }

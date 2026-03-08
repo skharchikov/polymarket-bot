@@ -35,6 +35,12 @@ pub struct Signal {
     pub end_date: Option<String>,
     pub volume: f64,
     pub polymarket_url: String,
+    /// Bayesian prior (market price) before update
+    pub prior: f64,
+    /// Combined likelihood ratio from all agents
+    pub combined_lr: f64,
+    /// Number of news items matched to this market
+    pub news_matched_count: usize,
     pub context: BetContext,
 }
 
@@ -48,7 +54,7 @@ impl Signal {
         // Format multi-agent reasoning as separate lines
         let reasoning_lines: Vec<&str> = self.reasoning.split(" | ").collect();
         let reasoning_block = if reasoning_lines.len() > 1 {
-            let mut block = String::from("\n\u{1f9e0} *Agent Consensus:*\n");
+            let mut block = String::from("\n\u{1f9e0} *Bayesian Agents:*\n");
             for line in &reasoning_lines {
                 let safe = sanitize_markdown(line);
                 block.push_str(&format!("  \u{2022} _{safe}_\n"));
@@ -61,22 +67,26 @@ impl Signal {
         format!(
             "{emoji} *{side_label} Signal*\n\n\
              \u{1f4cb} [{question}]({url})\n\n\
-             \u{1f4b0} Current price: `{price:.1}\u{00a2}`\n\
-             \u{1f3af} Our estimate: `{est:.1}%`\n\
+             \u{1f4b0} Market price: `{price:.1}\u{00a2}`\n\
+             \u{1f9ea} Bayes: `{prior:.1}%` → `{posterior:.1}%` (LR=`{lr:.2}`)\n\
              \u{1f4ca} Edge: `+{edge:.1}%`\n\
              \u{1f512} Confidence: `{conf:.0}%`\n\
              \u{1f4d0} Kelly size: `{kelly:.1}%` of bankroll\n\
              \u{1f4a7} Volume: `${vol:.0}`\n\
+             \u{1f4f0} News matched: {news_count} articles\n\
              \u{23f0} Expires: {end}\
              {reasoning}",
             question = self.question,
             url = self.polymarket_url,
             price = self.current_price * 100.0,
-            est = self.estimated_prob * 100.0,
+            prior = self.prior * 100.0,
+            posterior = self.estimated_prob * 100.0,
+            lr = self.combined_lr,
             edge = self.edge * 100.0,
             conf = self.confidence * 100.0,
             kelly = self.kelly_size * 100.0,
             vol = self.volume,
+            news_count = self.news_matched_count,
             end = self.end_date.as_deref().unwrap_or("N/A"),
             reasoning = reasoning_block,
         )
@@ -452,7 +462,7 @@ impl LiveScanner {
         news: &[NewsItem],
         history_summary: &str,
         past_bets: &str,
-    ) -> Result<(f64, f64, String)> {
+    ) -> Result<(f64, f64, f64, String)> {
         let cal_summary = self.calibration.read().await.summary();
         let prompt = Self::build_market_prompt(
             market,
@@ -572,7 +582,12 @@ impl LiveScanner {
             "Bayesian assessment"
         );
 
-        Ok((calibrated_prob, estimate.confidence, estimate.reasoning))
+        Ok((
+            calibrated_prob,
+            estimate.confidence,
+            estimate.combined_lr,
+            estimate.reasoning,
+        ))
     }
 
     /// Main scan: fetch news → match to markets → LLM assesses impact → signals.
@@ -761,7 +776,7 @@ impl LiveScanner {
                 tokio::time::sleep(Duration::from_secs(21)).await;
             }
 
-            let (prob, confidence, reasoning) = match self
+            let (prob, confidence, combined_lr, reasoning) = match self
                 .assess_news_impact(
                     &nm.market,
                     *current_price,
@@ -891,6 +906,9 @@ impl LiveScanner {
                 end_date: nm.market.end_date.clone(),
                 volume: nm.market.volume_num,
                 polymarket_url: nm.market.polymarket_url(),
+                prior: *current_price,
+                combined_lr,
+                news_matched_count: nm.news.len(),
                 context: BetContext {
                     btc_price: 0.0,
                     eth_price: 0.0,
@@ -1221,6 +1239,9 @@ mod tests {
             end_date: None,
             volume: 1000.0,
             polymarket_url: String::new(),
+            prior: 0.50,
+            combined_lr: 2.33,
+            news_matched_count: 3,
             context: BetContext::default(),
         };
         let expected = 0.20 * 0.80 * 0.10;
