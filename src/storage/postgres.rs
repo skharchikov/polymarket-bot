@@ -4,6 +4,20 @@ use sqlx::PgPool;
 
 use super::portfolio::{Bet, BetContext, BetSide, NewBet};
 
+/// Returned from resolve_bet with all context needed for a rich Telegram message.
+pub struct ResolvedBet {
+    pub question: String,
+    pub side: BetSide,
+    pub won: bool,
+    pub entry_price: f64,
+    pub cost: f64,
+    pub pnl: f64,
+    pub bankroll: f64,
+    pub total_wins: usize,
+    pub total_losses: usize,
+    pub total_pnl: f64,
+}
+
 /// Postgres-backed portfolio state.
 pub struct PgPortfolio {
     pool: PgPool,
@@ -133,16 +147,17 @@ impl PgPortfolio {
         Ok(row.0)
     }
 
-    pub async fn resolve_bet(&self, market_id: &str, yes_won: bool) -> Result<Option<f64>> {
+    pub async fn resolve_bet(&self, market_id: &str, yes_won: bool) -> Result<Option<ResolvedBet>> {
         // Find unresolved bet for this market
-        let row: Option<(i32, String, f64, f64)> = sqlx::query_as(
-            "SELECT id, side, shares, cost FROM bets WHERE market_id = $1 AND resolved = false LIMIT 1",
+        let row: Option<(i32, String, f64, f64, String, f64)> = sqlx::query_as(
+            "SELECT id, side, shares, cost, question, entry_price \
+             FROM bets WHERE market_id = $1 AND resolved = false LIMIT 1",
         )
         .bind(market_id)
         .fetch_optional(&self.pool)
         .await?;
 
-        let Some((bet_id, side_str, shares, cost)) = row else {
+        let Some((bet_id, side_str, shares, cost, question, entry_price)) = row else {
             return Ok(None);
         };
 
@@ -176,7 +191,24 @@ impl PgPortfolio {
         let bankroll = self.bankroll().await?;
         self.set_bankroll(bankroll + net_payout).await?;
 
-        Ok(Some(pnl))
+        // Gather cumulative stats for the message
+        let resolved = self.resolved_bets().await?;
+        let wins = resolved.iter().filter(|b| b.won == Some(true)).count();
+        let losses = resolved.iter().filter(|b| b.won == Some(false)).count();
+        let total_pnl: f64 = resolved.iter().filter_map(|b| b.pnl).sum();
+
+        Ok(Some(ResolvedBet {
+            question,
+            side,
+            won: bet_won,
+            entry_price,
+            cost,
+            pnl,
+            bankroll: bankroll + net_payout,
+            total_wins: wins,
+            total_losses: losses,
+            total_pnl,
+        }))
     }
 
     pub async fn open_bet_market_ids(&self) -> Result<Vec<String>> {

@@ -217,13 +217,30 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     let bankroll = portfolio.bankroll().await?;
     let open_count = portfolio.open_bets().await?.len();
 
+    let starting = portfolio.starting_bankroll().await?;
+    let resolved = portfolio.resolved_bets().await?;
+    let wins = resolved.iter().filter(|b| b.won == Some(true)).count();
+    let losses = resolved.iter().filter(|b| b.won == Some(false)).count();
+    let total_pnl: f64 = resolved.iter().filter_map(|b| b.pnl).sum();
+
     let _ = notifier
         .send(&format!(
-            "🤖 *Polymarket Signal Bot started*\n\
-             💰 Bankroll: `€{bankroll:.2}`\n\
-             📊 Open bets: {open_count}\n\
-             ⏱ News scan: every {}min | Housekeeping: every {}min",
-            cfg.news_scan_interval_mins, cfg.scan_interval_mins,
+            "🤖 *Polymarket Signal Bot started*\n\n\
+             💰 Bankroll: `€{bankroll:.2}` (started: `€{starting:.2}`)\n\
+             📊 Open bets: {open_count} | Record: {wins}W/{losses}L\n\
+             💵 Total PnL: `€{total_pnl:+.2}`\n\n\
+             ⚙️ *Config:*\n\
+             ⏱ News: every {news_min}min | Housekeeping: every {hk_min}min\n\
+             🎯 Max {max_sig} signals/day | Kelly: {kelly:.0}%\n\
+             🔍 Min edge: {edge:.0}% | Min volume: ${vol:.0}\n\
+             🧠 Model: `{model}`",
+            news_min = cfg.news_scan_interval_mins,
+            hk_min = cfg.scan_interval_mins,
+            max_sig = cfg.max_signals_per_day,
+            kelly = cfg.kelly_fraction * 100.0,
+            edge = cfg.min_effective_edge * 100.0,
+            vol = cfg.min_volume,
+            model = cfg.llm_model,
         ))
         .await;
 
@@ -293,21 +310,37 @@ async fn housekeeping_cycle(
         tokio::time::sleep(Duration::from_millis(200)).await;
         match scanner.check_market_resolution(market_id).await {
             Ok(Some(yes_won)) => {
-                if let Some(pnl) = portfolio.resolve_bet(market_id, yes_won).await? {
-                    let bankroll = portfolio.bankroll().await?;
-                    let emoji = if pnl > 0.0 { "✅" } else { "❌" };
-                    let outcome = if yes_won { "YES" } else { "NO" };
+                if let Some(r) = portfolio.resolve_bet(market_id, yes_won).await? {
+                    let emoji = if r.won { "✅" } else { "❌" };
+                    let result_label = if r.won { "WON" } else { "LOST" };
+                    let roi = if r.cost > 0.0 {
+                        r.pnl / r.cost * 100.0
+                    } else {
+                        0.0
+                    };
                     let msg = format!(
-                        "{emoji} *Bet resolved: {outcome}*\n\
-                         💵 PnL: `€{pnl:+.2}`\n\
-                         💰 Bankroll: `€{bankroll:.2}`",
+                        "{emoji} *Bet {result_label}*\n\n\
+                         📋 _{question}_\n\
+                         🎲 Side: *{side}* @ `{price:.1}¢`\n\
+                         💵 Stake: `€{cost:.2}` → PnL: `€{pnl:+.2}` ({roi:+.0}%)\n\n\
+                         💰 Bankroll: `€{bankroll:.2}`\n\
+                         📊 Record: {wins}W / {losses}L | Total PnL: `€{total_pnl:+.2}`",
+                        question = r.question,
+                        side = r.side,
+                        price = r.entry_price * 100.0,
+                        cost = r.cost,
+                        pnl = r.pnl,
+                        bankroll = r.bankroll,
+                        wins = r.total_wins,
+                        losses = r.total_losses,
+                        total_pnl = r.total_pnl,
                     );
                     let _ = notifier.send(&msg).await;
                     tracing::info!(
                         market = %market_id,
-                        outcome = outcome,
-                        pnl = format_args!("€{pnl:+.2}"),
-                        bankroll = format_args!("€{bankroll:.2}"),
+                        result = result_label,
+                        pnl = format_args!("€{:+.2}", r.pnl),
+                        bankroll = format_args!("€{:.2}", r.bankroll),
                         "Bet resolved"
                     );
                 }
@@ -403,6 +436,8 @@ async fn news_scan_cycle(
                 match portfolio.place_bet(&new_bet).await {
                     Ok(_bet_id) => {
                         let new_bankroll = portfolio.bankroll().await?;
+                        let open_count = portfolio.open_bets().await?.len();
+                        let signals_today = portfolio.signals_sent_today().await?;
                         tracing::info!(
                             market = %signal.question,
                             side = %signal.side,
@@ -413,11 +448,37 @@ async fn news_scan_cycle(
                             "Bet placed"
                         );
 
+                        let news_section = if !signal.context.news_headlines.is_empty() {
+                            let headlines: Vec<String> = signal
+                                .context
+                                .news_headlines
+                                .iter()
+                                .take(3)
+                                .map(|h| format!("  • _{}_", truncate_str(h, 80)))
+                                .collect();
+                            format!("\n📰 *Triggered by:*\n{}\n", headlines.join("\n"))
+                        } else {
+                            String::new()
+                        };
+
                         let msg = format!(
-                            "{}\n\n💸 *Paper bet placed:* `€{bet_amount:.2}` @ `{:.1}¢` (incl. 1% slippage + 2% fee)\n\
-                             💰 Remaining bankroll: `€{new_bankroll:.2}`",
-                            signal.to_telegram_message(),
-                            slipped_price * 100.0,
+                            "{signal}\n\
+                             {news}\n\
+                             💸 *Paper bet placed*\n\
+                             💵 Stake: `€{cost:.2}` ({shares:.1} shares @ `{price:.1}¢`)\n\
+                             🏷 Fees: `€{fee:.2}` (slippage + trading)\n\
+                             💰 Bankroll: `€{bankroll:.2}`\n\
+                             📊 Open bets: {open} | Signals today: {today}/{max}",
+                            signal = signal.to_telegram_message(),
+                            news = news_section,
+                            cost = bet_amount,
+                            shares = shares,
+                            price = slipped_price * 100.0,
+                            fee = fee,
+                            bankroll = new_bankroll,
+                            open = open_count,
+                            today = signals_today,
+                            max = cfg.max_signals_per_day,
                         );
                         let _ = notifier.send(&msg).await;
                     }
@@ -442,4 +503,12 @@ async fn news_scan_cycle(
         "News scan cycle complete"
     );
     Ok(())
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max])
+    }
 }
