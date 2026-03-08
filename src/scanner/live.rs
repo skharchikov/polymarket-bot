@@ -435,8 +435,9 @@ impl LiveScanner {
 
         for (i, &role) in roles.iter().enumerate() {
             if i > 0 {
-                tracing::info!("Waiting 25s for rate limit...");
-                tokio::time::sleep(Duration::from_secs(25)).await;
+                // 3 RPM = 1 call per 20s, add 1s safety margin
+                tracing::info!("Waiting 21s for rate limit...");
+                tokio::time::sleep(Duration::from_secs(21)).await;
             }
 
             let agent = self.build_agent(role);
@@ -676,13 +677,12 @@ impl LiveScanner {
         let mut signals = Vec::new();
 
         for (i, (nm, current_price, history_summary, book_depth)) in candidates.iter().enumerate() {
-            // Rate limit between candidates — must account for 3 RPM limit
-            // Each candidate uses consensus_agents calls internally (with 25s spacing),
-            // so we need extra spacing between candidates to stay under the limit.
+            // Rate limit between candidates: just need 21s since last LLM call.
+            // The previous candidate's last agent call already waited, so only
+            // the gap between that call finishing and the next one starting matters.
             if i > 0 {
-                let wait_secs = 25 * self.cfg.consensus_agents as u64;
-                tracing::info!(wait_secs, "Waiting for rate limit between candidates...");
-                tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+                tracing::info!("Waiting 21s for rate limit between candidates...");
+                tokio::time::sleep(Duration::from_secs(21)).await;
             }
 
             let (prob, confidence, reasoning) = match self
