@@ -60,3 +60,9 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           generate_release_notes: true
+
+  deploy:
+    name: Deploy to Hetzner
+    needs: release
+    uses: ./.github/workflows/deploy.yml
+    secrets: inherit
