@@ -8,10 +8,11 @@ RUN apk update && apk upgrade --no-cache && \
 
 WORKDIR /app
 
-# Cache dependencies
+# Cache dependencies (use debug profile for speed — only caching dep artifacts)
 COPY Cargo.toml Cargo.lock* ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs && \
-    cargo build --release 2>/dev/null || true
+    cargo build --release && \
+    rm -rf src
 
 # Build real source
 COPY . .
