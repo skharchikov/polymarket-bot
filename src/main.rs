@@ -347,6 +347,45 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         }
     });
 
+    // Spawn Telegram command polling loop
+    let cmd_portfolio = Arc::clone(&portfolio);
+    let cmd_notifier = Arc::clone(&notifier);
+    let command_loop = tokio::spawn(async move {
+        loop {
+            let commands = cmd_notifier.poll_commands().await;
+            for (chat_id, cmd, username, first_name) in &commands {
+                // Track the user
+                if let Err(e) = cmd_portfolio
+                    .upsert_telegram_user(chat_id, username.as_deref(), first_name.as_deref())
+                    .await
+                {
+                    tracing::warn!(err = %e, "Failed to upsert telegram user");
+                }
+
+                let reply = match cmd.as_str() {
+                    "start" => {
+                        let name = first_name.as_deref().unwrap_or("there");
+                        format!("👋 Hi {name}! I'm the Polymarket Signal Bot.\n\nCommands:\n/stats — portfolio statistics\n/help — show commands")
+                    }
+                    "stats" => match cmd_portfolio.stats_summary().await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(err = %e, "Failed to build stats");
+                            "⚠️ Failed to load stats".to_string()
+                        }
+                    },
+                    "help" => "📖 *Commands*\n\n/start — welcome message\n/stats — portfolio statistics\n/help — this message".to_string(),
+                    _ => format!("❓ Unknown command: /{cmd}\nTry /help"),
+                };
+
+                if let Err(e) = cmd_notifier.send_to(chat_id, &reply).await {
+                    tracing::warn!(err = %e, chat_id = chat_id, "Failed to reply to command");
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+    });
+
     // Spawn heartbeat loop
     let hb_interval = cfg.heartbeat_interval_mins;
     let hb_portfolio = Arc::clone(&portfolio);
@@ -376,6 +415,9 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         }
         r = heartbeat => {
             tracing::error!("Heartbeat loop exited: {:?}", r);
+        }
+        r = command_loop => {
+            tracing::error!("Command loop exited: {:?}", r);
         }
     }
 
@@ -429,7 +471,7 @@ async fn housekeeping_cycle(
                         losses = r.total_losses,
                         total_pnl = r.total_pnl,
                     );
-                    let _ = notifier.send(&msg).await;
+                    broadcast(notifier, portfolio, &msg).await;
                     tracing::info!(
                         market = %market_id,
                         result = result_label,
@@ -451,7 +493,7 @@ async fn housekeeping_cycle(
     if portfolio.should_send_daily_report().await? && has_bets {
         portfolio.take_snapshot().await?;
         let report = portfolio.daily_summary().await?;
-        let _ = notifier.send(&report).await;
+        broadcast(notifier, portfolio, &report).await;
         portfolio.mark_daily_report_sent().await?;
         tracing::info!("Daily report sent");
     }
@@ -461,8 +503,73 @@ async fn housekeeping_cycle(
         tracing::warn!(err = %e, "Failed to reload calibration curve");
     }
 
-    let open_count = portfolio.open_bets().await?.len();
-    tracing::info!(open_bets = open_count, "Housekeeping cycle complete");
+    // Report unrealized P&L on open positions
+    let open_bets = portfolio.open_bets().await?;
+    if !open_bets.is_empty() {
+        let mut lines = Vec::new();
+        let mut total_unrealized = 0.0;
+        let mut total_cost = 0.0;
+
+        for bet in &open_bets {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let current = match scanner.fetch_current_price(&bet.market_id).await {
+                Ok(Some(p)) => p,
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::debug!(market = %bet.market_id, err = %e, "Price fetch failed");
+                    continue;
+                }
+            };
+
+            // For YES bets: value = shares * current_price
+            // For NO bets: value = shares * (1 - current_price)
+            let current_value = match bet.side {
+                storage::portfolio::BetSide::Yes => bet.shares * current,
+                storage::portfolio::BetSide::No => bet.shares * (1.0 - current),
+            };
+            let unrealized = current_value - bet.cost;
+            total_unrealized += unrealized;
+            total_cost += bet.cost;
+
+            let price_change = current - bet.entry_price;
+            let arrow = if price_change > 0.01 {
+                "📈"
+            } else if price_change < -0.01 {
+                "📉"
+            } else {
+                "➡️"
+            };
+
+            lines.push(format!(
+                "{arrow} {side} _{q}_ `{entry:.0}¢→{now:.0}¢` `€{pnl:+.2}`",
+                side = bet.side,
+                q = truncate_str(&bet.question, 35),
+                entry = bet.entry_price * 100.0,
+                now = current * 100.0,
+                pnl = unrealized,
+            ));
+        }
+
+        let roi = if total_cost > 0.0 {
+            total_unrealized / total_cost * 100.0
+        } else {
+            0.0
+        };
+
+        let mut msg = format!(
+            "📋 *Open Positions* ({count})\n\n\
+             💰 Unrealized: `€{pnl:+.2}` ({roi:+.1}%)\n",
+            count = open_bets.len(),
+            pnl = total_unrealized,
+        );
+        for line in &lines {
+            msg.push_str(&format!("\n{line}"));
+        }
+
+        broadcast(notifier, portfolio, &msg).await;
+    }
+
+    tracing::info!(open_bets = open_bets.len(), "Housekeeping cycle complete");
     Ok(())
 }
 
@@ -487,7 +594,13 @@ async fn news_scan_cycle(
         "Starting news scan..."
     );
 
-    let skip_ids = portfolio.open_bet_market_ids().await?;
+    let mut skip_ids = portfolio.open_bet_market_ids().await?;
+    // Skip markets rejected in the last 6h (avoid wasting LLM calls)
+    let rejected_ids = portfolio.recently_rejected_market_ids(6).await?;
+    // Skip markets we already bet on and resolved
+    let resolved_ids = portfolio.resolved_bet_market_ids().await?;
+    skip_ids.extend(rejected_ids);
+    skip_ids.extend(resolved_ids);
     let past_bets = portfolio.learning_summary().await?;
 
     match scanner.scan(&skip_ids, &past_bets, seen_headlines).await {
@@ -667,7 +780,7 @@ async fn news_scan_cycle(
                                 today = strat_signals,
                                 max = strat.max_signals_per_day,
                             );
-                            let _ = notifier.send(&msg).await;
+                            broadcast(notifier, portfolio, &msg).await;
                         }
                         Err(e) => {
                             tracing::error!(
@@ -765,7 +878,7 @@ async fn news_scan_cycle(
                     }
                 }
 
-                let _ = notifier.send(&summary).await;
+                broadcast(notifier, portfolio, &summary).await;
             }
         }
         Err(e) => {
@@ -815,9 +928,19 @@ async fn heartbeat_cycle(
         max = cfg.max_signals_per_day,
     );
 
-    let _ = notifier.send(&msg).await;
+    broadcast(notifier, portfolio, &msg).await;
     tracing::info!("Heartbeat sent");
     Ok(())
+}
+
+/// Broadcast a message to the owner and all subscribers.
+async fn broadcast(
+    notifier: &telegram::notifier::TelegramNotifier,
+    portfolio: &PgPortfolio,
+    message: &str,
+) {
+    let subs = portfolio.telegram_chat_ids().await.unwrap_or_default();
+    notifier.broadcast(&subs, message).await;
 }
 
 fn truncate_str(s: &str, max: usize) -> String {

@@ -338,6 +338,16 @@ impl LiveScanner {
         Ok(resp.history)
     }
 
+    /// Fetch current YES price for a market by ID.
+    pub async fn fetch_current_price(&self, market_id: &str) -> Result<Option<f64>> {
+        let url = format!("{GAMMA_API}/markets/{market_id}");
+        let resp = self.http.get(&url).send().await?;
+        let text = resp.text().await?;
+        let market: GammaMarket = serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse market {market_id}"))?;
+        Ok(Self::get_yes_price(&market))
+    }
+
     fn expires_within_window(&self, end_date: Option<&str>) -> bool {
         let Some(date_str) = end_date else {
             return false;
@@ -633,6 +643,19 @@ impl LiveScanner {
         // Step 2: Fetch breaking news from all sources
         let (mut news, source_counts) = self.news.fetch_all().await;
         let news_total = news.len();
+
+        // Drop news older than 4 hours — stale news is already priced in
+        let freshness_cutoff = chrono::Utc::now() - chrono::Duration::hours(4);
+        news.retain(|item| {
+            item.published
+                .map(|p| p >= freshness_cutoff)
+                .unwrap_or(true) // keep items without a date (can't tell age)
+        });
+        tracing::info!(
+            fresh = news.len(),
+            dropped = news_total - news.len(),
+            "Filtered stale news (>4h old)"
+        );
 
         // Filter out headlines we've already processed in previous cycles
         let before = news.len();

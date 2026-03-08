@@ -40,11 +40,11 @@ impl NewsAggregator {
         let mut source_counts = Vec::new();
 
         // Parallel fetch from multiple sources
-        let (google, reddit, polymarket_blog, coindesk, reuters) = tokio::join!(
+        let (google, reddit, polymarket_blog, crypto, reuters) = tokio::join!(
             self.google_news_top(),
             self.reddit_news(),
             self.polymarket_activity(),
-            self.coindesk_news(),
+            self.crypto_news(),
             self.reuters_news(),
         );
 
@@ -52,7 +52,7 @@ impl NewsAggregator {
             ("Google News", google),
             ("Reddit", reddit),
             ("Polymarket", polymarket_blog),
-            ("CoinDesk", coindesk),
+            ("Crypto", crypto),
             ("Reuters", reuters),
         ] {
             match result {
@@ -151,18 +151,26 @@ impl NewsAggregator {
         Ok(items)
     }
 
-    /// CoinDesk RSS — crypto news. Free, no key.
-    async fn coindesk_news(&self) -> Result<Vec<NewsItem>> {
+    /// Crypto news from multiple RSS feeds. Free, no key.
+    async fn crypto_news(&self) -> Result<Vec<NewsItem>> {
         let feeds = [
-            "https://www.coindesk.com/arc/outboundfeeds/rss/",
-            "https://cointelegraph.com/rss",
+            (
+                "https://www.coindesk.com/arc/outboundfeeds/rss/",
+                "CoinDesk",
+            ),
+            ("https://cointelegraph.com/rss", "CoinTelegraph"),
+            ("https://decrypt.co/feed", "Decrypt"),
+            ("https://blockworks.co/feed", "Blockworks"),
+            ("https://www.theblock.co/rss.xml", "The Block"),
+            ("https://bitcoinmagazine.com/feed", "Bitcoin Magazine"),
+            ("https://www.dlnews.com/arc/outboundfeeds/rss/", "DL News"),
         ];
 
         let mut items = Vec::new();
-        for url in feeds {
-            match self.fetch_rss(url, "CoinDesk").await {
+        for (url, source) in feeds {
+            match self.fetch_rss(url, source).await {
                 Ok(feed_items) => items.extend(feed_items),
-                Err(e) => tracing::debug!(url = url, err = %e, "CoinDesk/CT RSS failed"),
+                Err(e) => tracing::debug!(source = source, err = %e, "Crypto RSS failed"),
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -207,7 +215,7 @@ impl NewsAggregator {
 
             if volume > 100_000.0 && !question.is_empty() {
                 items.push(NewsItem {
-                    title: format!("Polymarket trending: {question}"),
+                    title: question.to_string(),
                     source: "Polymarket".to_string(),
                     url: String::new(),
                     published: Some(Utc::now()),
@@ -398,13 +406,125 @@ async fn fetch_with_retry(http: &Client, url: &str, user_agent: &str) -> Result<
 // --- Text helpers ---
 
 const STOP_WORDS: &[&str] = &[
-    "the", "a", "an", "in", "on", "at", "to", "by", "for", "of", "be", "is", "it", "or", "and",
-    "with", "will", "this", "that", "has", "have", "had", "was", "were", "are", "been", "its",
-    "not", "but", "from", "they", "their", "can", "do", "does", "did", "would", "could", "should",
-    "may", "might", "shall", "about", "above", "below", "between", "before", "after", "than",
-    "more", "most", "very", "just", "also", "how", "what", "when", "where", "who", "which", "if",
-    "then", "so", "up", "out", "all", "over", "into", "new", "says", "said", "yes", "no", "price",
-    "market", "markets",
+    // English stop words
+    "the",
+    "a",
+    "an",
+    "in",
+    "on",
+    "at",
+    "to",
+    "by",
+    "for",
+    "of",
+    "be",
+    "is",
+    "it",
+    "or",
+    "and",
+    "with",
+    "will",
+    "this",
+    "that",
+    "has",
+    "have",
+    "had",
+    "was",
+    "were",
+    "are",
+    "been",
+    "its",
+    "not",
+    "but",
+    "from",
+    "they",
+    "their",
+    "can",
+    "do",
+    "does",
+    "did",
+    "would",
+    "could",
+    "should",
+    "may",
+    "might",
+    "shall",
+    "about",
+    "above",
+    "below",
+    "between",
+    "before",
+    "after",
+    "than",
+    "more",
+    "most",
+    "very",
+    "just",
+    "also",
+    "how",
+    "what",
+    "when",
+    "where",
+    "who",
+    "which",
+    "if",
+    "then",
+    "so",
+    "up",
+    "out",
+    "all",
+    "over",
+    "into",
+    "says",
+    "said",
+    // Domain-generic terms (appear everywhere, zero discriminative value)
+    "yes",
+    "no",
+    "new",
+    "price",
+    "market",
+    "markets",
+    "polymarket",
+    "trending",
+    "prediction",
+    "odds",
+    "bet",
+    "bets",
+    "betting",
+    "win",
+    "won",
+    "winning",
+    "best",
+    "week",
+    "month",
+    "year",
+    "day",
+    "today",
+    "first",
+    "last",
+    "next",
+    "back",
+    "take",
+    "takes",
+    "lead",
+    "could",
+    "per",
+    "get",
+    "make",
+    "going",
+    "still",
+    "why",
+    "despite",
+    "according",
+    "report",
+    "reports",
+    "news",
+    "breaking",
+    "update",
+    "latest",
+    "hold",
+    "like",
+    "way",
 ];
 
 fn extract_keywords(text: &str) -> Vec<String> {
@@ -769,6 +889,39 @@ mod tests {
         assert!(
             bad < BM25_MIN_SCORE,
             "Irrelevant match should be below threshold: {bad} < {BM25_MIN_SCORE}"
+        );
+    }
+
+    #[test]
+    fn test_cross_topic_noise_filtered() {
+        // Oscars market should NOT match bitcoin or NBA news
+        let items = vec![
+            news(
+                "Michael B. Jordan takes the lead on Polymarket for Oscars Best Actor",
+                "",
+            ),
+            news(
+                "Why bitcoin couldn't hold $70,000 despite its best week of Wall Street news",
+                "",
+            ),
+            news("Will the Indiana Pacers win the 2026 NBA Finals?", ""),
+        ];
+        let m = market("Will Michael B. Jordan win the Oscar for Best Actor?");
+        let matches = NewsAggregator::match_to_markets(&items, &[m]);
+
+        assert_eq!(matches.len(), 1);
+        let matched_titles: Vec<&str> = matches[0].news.iter().map(|n| n.title.as_str()).collect();
+        assert!(
+            matched_titles.iter().any(|t| t.contains("Michael")),
+            "Should match the relevant Oscars headline"
+        );
+        assert!(
+            !matched_titles.iter().any(|t| t.contains("bitcoin")),
+            "Should NOT match bitcoin news: {matched_titles:?}"
+        );
+        assert!(
+            !matched_titles.iter().any(|t| t.contains("Pacers")),
+            "Should NOT match NBA news: {matched_titles:?}"
         );
     }
 

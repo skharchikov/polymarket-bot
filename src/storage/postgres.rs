@@ -53,6 +53,11 @@ impl PgPortfolio {
             .execute(&self.pool)
             .await
             .context("failed to run rejected_signals migration")?;
+        let tg_users = include_str!("../../migrations/005_telegram_users.sql");
+        sqlx::raw_sql(tg_users)
+            .execute(&self.pool)
+            .await
+            .context("failed to run telegram_users migration")?;
         Ok(())
     }
 
@@ -67,6 +72,27 @@ impl PgPortfolio {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Market IDs rejected in the last `hours` — skip re-assessment.
+    pub async fn recently_rejected_market_ids(&self, hours: i32) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT market_id FROM rejected_signals \
+             WHERE created_at > NOW() - make_interval(hours => $1)",
+        )
+        .bind(hours)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+
+    /// Market IDs that already have resolved bets — avoid re-betting.
+    pub async fn resolved_bet_market_ids(&self) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT DISTINCT market_id FROM bets WHERE resolved = true")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
     /// Persist rejected signals for post-hoc analysis.
@@ -89,6 +115,68 @@ impl PgPortfolio {
             .await?;
         }
         Ok(())
+    }
+
+    /// Upsert a Telegram user (tracks who interacts with the bot).
+    pub async fn upsert_telegram_user(
+        &self,
+        chat_id: &str,
+        username: Option<&str>,
+        first_name: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO telegram_users (chat_id, username, first_name, last_seen) \
+             VALUES ($1, $2, $3, NOW()) \
+             ON CONFLICT (chat_id) DO UPDATE SET \
+               username = COALESCE(EXCLUDED.username, telegram_users.username), \
+               first_name = COALESCE(EXCLUDED.first_name, telegram_users.first_name), \
+               last_seen = NOW()",
+        )
+        .bind(chat_id)
+        .bind(username)
+        .bind(first_name)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Get all tracked Telegram chat IDs (for future broadcast).
+    #[allow(dead_code)]
+    pub async fn telegram_chat_ids(&self) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as("SELECT chat_id FROM telegram_users")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+
+    /// Build a stats summary string for /stats command.
+    pub async fn stats_summary(&self) -> Result<String> {
+        let bankroll = self.bankroll().await?;
+        let starting = self.starting_bankroll().await?;
+        let resolved = self.resolved_bets().await?;
+        let open = self.open_bets().await?;
+        let wins = resolved.iter().filter(|b| b.won == Some(true)).count();
+        let losses = resolved.iter().filter(|b| b.won == Some(false)).count();
+        let total_pnl: f64 = resolved.iter().filter_map(|b| b.pnl).sum();
+        let roi = if starting > 0.0 {
+            total_pnl / starting * 100.0
+        } else {
+            0.0
+        };
+        let win_rate = if wins + losses > 0 {
+            wins as f64 / (wins + losses) as f64 * 100.0
+        } else {
+            0.0
+        };
+
+        Ok(format!(
+            "📊 *Bot Statistics*\n\n\
+             💰 Bankroll: `€{bankroll:.2}` (started: `€{starting:.2}`)\n\
+             💵 Total PnL: `€{total_pnl:+.2}` | ROI: `{roi:+.1}%`\n\
+             📋 Record: {wins}W / {losses}L ({win_rate:.0}%)\n\
+             🔓 Open bets: {open}",
+            open = open.len(),
+        ))
     }
 
     // --- meta helpers ---
