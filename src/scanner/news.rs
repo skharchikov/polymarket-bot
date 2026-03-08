@@ -107,6 +107,19 @@ impl NewsAggregator {
             .header("User-Agent", "Mozilla/5.0")
             .send()
             .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                url = url,
+                status = %status,
+                body_prefix = &body[..body.len().min(200)],
+                "RSS feed returned non-200"
+            );
+            anyhow::bail!("RSS feed returned {status}");
+        }
+
         let text = resp.text().await?;
 
         let mut items = Vec::new();
@@ -159,7 +172,7 @@ impl NewsAggregator {
     }
 
     async fn fetch_reddit(&self, url: &str, subreddit: &str) -> Result<Vec<NewsItem>> {
-        let resp: serde_json::Value = self
+        let resp = self
             .http
             .get(url)
             .header(
@@ -167,9 +180,32 @@ impl NewsAggregator {
                 "Mozilla/5.0 (compatible; NewsAggregator/1.0)",
             )
             .send()
-            .await?
-            .json()
             .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                sub = subreddit,
+                status = %status,
+                body_prefix = &body[..body.len().min(200)],
+                "Reddit returned non-200"
+            );
+            anyhow::bail!("Reddit returned {status}");
+        }
+
+        let text = resp.text().await?;
+        let resp: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    sub = subreddit,
+                    body_prefix = &text[..text.len().min(200)],
+                    "Reddit returned non-JSON response"
+                );
+                return Err(e.into());
+            }
+        };
 
         let mut items = Vec::new();
         if let Some(posts) = resp["data"]["children"].as_array() {
