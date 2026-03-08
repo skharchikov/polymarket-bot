@@ -276,7 +276,7 @@ impl LiveScanner {
             let count = page.len();
             all.extend(page);
 
-            if count < page_size || all.len() >= 500 {
+            if count < page_size || all.len() >= self.cfg.max_markets_fetch {
                 break;
             }
             offset += count;
@@ -534,7 +534,7 @@ impl LiveScanner {
             .filter(|m| !skip_market_ids.contains(&m.market_id))
             .filter(|m| {
                 let price = Self::get_yes_price(m).unwrap_or(0.0);
-                price > 0.05 && price < 0.95
+                price > self.cfg.min_price && price < self.cfg.max_price
             })
             .collect();
 

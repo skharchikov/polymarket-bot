@@ -41,7 +41,7 @@ pub struct AppConfig {
 
     // --- Scanner filters ---
     /// Minimum market volume to consider.
-    #[config(env = "MIN_VOLUME", default = 5000.0)]
+    #[config(env = "MIN_VOLUME", default = 1000.0)]
     pub min_volume: f64,
 
     /// Minimum order book depth (USD) to pass liquidity filter.
@@ -53,7 +53,7 @@ pub struct AppConfig {
     pub kelly_fraction: f64,
 
     /// Max days until market expiry to consider.
-    #[config(env = "MAX_DAYS_TO_EXPIRY", default = 14)]
+    #[config(env = "MAX_DAYS_TO_EXPIRY", default = 30)]
     pub max_days_to_expiry: i64,
 
     /// Max markets to send to LLM per scan cycle (each costs consensus_agents API calls).
@@ -84,6 +84,19 @@ pub struct AppConfig {
     /// Min resolved estimates before applying calibration correction.
     #[config(env = "CALIBRATION_MIN_SAMPLES", default = 20)]
     pub calibration_min_samples: usize,
+
+    // --- Market fetch ---
+    /// Max markets to fetch from Polymarket API per scan.
+    #[config(env = "MAX_MARKETS_FETCH", default = 1000)]
+    pub max_markets_fetch: usize,
+
+    /// Minimum YES price to consider (filters out near-certain NO).
+    #[config(env = "MIN_PRICE", default = 0.03)]
+    pub min_price: f64,
+
+    /// Maximum YES price to consider (filters out near-certain YES).
+    #[config(env = "MAX_PRICE", default = 0.97)]
+    pub max_price: f64,
 }
 
 impl AppConfig {
