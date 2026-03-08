@@ -1,0 +1,5 @@
+[workspace]
+# Don't publish to crates.io (binary, not a library)
+publish = false
+# Create GitHub releases with changelog
+git_release_enable = true
