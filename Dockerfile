@@ -1,25 +1,26 @@
 ####################################################################################################
 ## Build
 ####################################################################################################
-FROM rust:alpine AS builder
-
-RUN apk update && apk upgrade --no-cache && \
-    apk add --no-cache musl-dev pkgconf git lld upx
+FROM rust:alpine AS chef
+RUN apk add --no-cache musl-dev pkgconf git lld
+RUN cargo install cargo-chef --locked
 
 WORKDIR /app
 
-# Cache dependencies (use debug profile for speed — only caching dep artifacts)
+# Plan dependencies (only changes when Cargo.toml/Cargo.lock change)
+FROM chef AS planner
 COPY Cargo.toml Cargo.lock* ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs && \
-    cargo build --release && \
-    rm -rf src
+COPY src/ src/
+RUN cargo chef prepare --recipe-path recipe.json
 
-# Build real source
+# Build dependencies (cached unless Cargo.toml/Cargo.lock change)
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+
+# Build real source (only recompiles our code)
 COPY . .
-RUN touch src/main.rs && cargo build --release
-
-# Compress binary with UPX (~60% smaller)
-RUN upx --best --lzma /app/target/release/polymarket-bot
+RUN cargo build --release
 
 ####################################################################################################
 ## Final image
