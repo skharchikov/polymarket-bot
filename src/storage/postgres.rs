@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
+use crate::scanner::live::RejectedSignal;
+
 use super::portfolio::{Bet, BetContext, BetSide, NewBet};
 
 /// Returned from resolve_bet with all context needed for a rich Telegram message.
@@ -46,6 +48,11 @@ impl PgPortfolio {
             .execute(&self.pool)
             .await
             .context("failed to run strategies migration")?;
+        let rejected = include_str!("../../migrations/004_rejected_signals.sql");
+        sqlx::raw_sql(rejected)
+            .execute(&self.pool)
+            .await
+            .context("failed to run rejected_signals migration")?;
         Ok(())
     }
 
@@ -59,6 +66,28 @@ impl PgPortfolio {
         .bind(market_id)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// Persist rejected signals for post-hoc analysis.
+    pub async fn save_rejected_signals(&self, rejections: &[RejectedSignal]) -> Result<()> {
+        for r in rejections {
+            sqlx::query(
+                "INSERT INTO rejected_signals \
+                 (market_id, question, reason, current_price, estimated_prob, edge, confidence, combined_lr) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            )
+            .bind(&r.market_id)
+            .bind(&r.question)
+            .bind(&r.reason)
+            .bind(r.current_price)
+            .bind(r.estimated_prob)
+            .bind(r.edge)
+            .bind(r.confidence)
+            .bind(r.combined_lr)
+            .execute(&self.pool)
+            .await?;
+        }
         Ok(())
     }
 

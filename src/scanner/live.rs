@@ -112,8 +112,14 @@ pub struct ScanResult {
 /// A signal that was evaluated by the LLM but didn't pass the scanner gate.
 #[derive(Debug, Clone)]
 pub struct RejectedSignal {
+    pub market_id: String,
     pub question: String,
     pub reason: String,
+    pub current_price: Option<f64>,
+    pub estimated_prob: Option<f64>,
+    pub edge: Option<f64>,
+    pub confidence: Option<f64>,
+    pub combined_lr: Option<f64>,
 }
 
 /// Agent roles for multi-agent consensus.
@@ -818,8 +824,14 @@ impl LiveScanner {
                             "No edge on either side"
                         );
                         rejections.push(RejectedSignal {
+                            market_id: nm.market.market_id.clone(),
                             question: nm.market.question.clone(),
                             reason,
+                            current_price: Some(*current_price),
+                            estimated_prob: Some(prob),
+                            edge: None,
+                            confidence: Some(confidence),
+                            combined_lr: Some(combined_lr),
                         });
                         continue;
                     }
@@ -842,6 +854,17 @@ impl LiveScanner {
                 "Signal candidate"
             );
 
+            let reject = |reason: String| RejectedSignal {
+                market_id: nm.market.market_id.clone(),
+                question: nm.market.question.clone(),
+                reason,
+                current_price: Some(*current_price),
+                estimated_prob: Some(prob),
+                edge: Some(edge),
+                confidence: Some(confidence),
+                combined_lr: Some(combined_lr),
+            };
+
             // Use permissive gate; individual strategies apply their own thresholds
             if effective_edge < 0.03 {
                 let reason = format!("edge {:.1}% < 3%", effective_edge * 100.0);
@@ -850,10 +873,7 @@ impl LiveScanner {
                     eff_edge = format_args!("+{:.1}%", effective_edge * 100.0),
                     "REJECTED: effective edge below 3% gate"
                 );
-                rejections.push(RejectedSignal {
-                    question: nm.market.question.clone(),
-                    reason,
-                });
+                rejections.push(reject(reason));
                 continue;
             }
             if kelly_size <= 0.005 {
@@ -863,10 +883,7 @@ impl LiveScanner {
                     kelly = format_args!("{:.3}", kelly_size),
                     "REJECTED: full Kelly too small"
                 );
-                rejections.push(RejectedSignal {
-                    question: nm.market.question.clone(),
-                    reason,
-                });
+                rejections.push(reject(reason));
                 continue;
             }
             if confidence < 0.30 {
@@ -876,10 +893,7 @@ impl LiveScanner {
                     conf = format_args!("{:.0}%", confidence * 100.0),
                     "REJECTED: confidence below 30% gate"
                 );
-                rejections.push(RejectedSignal {
-                    question: nm.market.question.clone(),
-                    reason,
-                });
+                rejections.push(reject(reason));
                 continue;
             }
 

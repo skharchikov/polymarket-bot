@@ -682,6 +682,11 @@ async fn news_scan_cycle(
                 }
             }
 
+            // Persist rejected signals to DB for analysis
+            if let Err(e) = portfolio.save_rejected_signals(&result.rejections).await {
+                tracing::warn!(err = %e, "Failed to save rejected signals");
+            }
+
             // Send scan cycle summary to Telegram
             let has_activity = !result.rejections.is_empty()
                 || !strategy_rejections.is_empty()

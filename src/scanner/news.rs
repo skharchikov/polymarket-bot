@@ -89,7 +89,7 @@ impl NewsAggregator {
         ];
 
         for feed_url in feeds {
-            match self.fetch_rss(feed_url).await {
+            match self.fetch_rss(feed_url, "Google News").await {
                 Ok(feed_items) => items.extend(feed_items),
                 Err(e) => tracing::debug!(url = feed_url, err = %e, "RSS fetch failed"),
             }
@@ -99,28 +99,9 @@ impl NewsAggregator {
         Ok(items)
     }
 
-    /// Parse RSS XML (simple parser, no XML dep needed).
-    async fn fetch_rss(&self, url: &str) -> Result<Vec<NewsItem>> {
-        let resp = self
-            .http
-            .get(url)
-            .header("User-Agent", "Mozilla/5.0")
-            .send()
-            .await?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            tracing::warn!(
-                url = url,
-                status = %status,
-                body_prefix = &body[..body.len().min(200)],
-                "RSS feed returned non-200"
-            );
-            anyhow::bail!("RSS feed returned {status}");
-        }
-
-        let text = resp.text().await?;
+    /// Fetch an RSS feed with retry. Source tag is applied to all items.
+    async fn fetch_rss(&self, url: &str, source: &str) -> Result<Vec<NewsItem>> {
+        let text = fetch_with_retry(&self.http, url, "Mozilla/5.0").await?;
 
         let mut items = Vec::new();
         for item_block in text.split("<item>").skip(1) {
@@ -137,7 +118,7 @@ impl NewsAggregator {
             if !title.is_empty() {
                 items.push(NewsItem {
                     title,
-                    source: "Google News".to_string(),
+                    source: source.to_string(),
                     url: link,
                     published,
                     summary: truncate(&clean_desc, 200),
@@ -148,7 +129,7 @@ impl NewsAggregator {
         Ok(items)
     }
 
-    /// Reddit hot posts from news-heavy subreddits. Free, no key.
+    /// Reddit via RSS — no rate limits, no auth needed.
     async fn reddit_news(&self) -> Result<Vec<NewsItem>> {
         let mut items = Vec::new();
         let subreddits = [
@@ -160,75 +141,12 @@ impl NewsAggregator {
         ];
 
         for sub in &subreddits {
-            let url = format!("https://www.reddit.com/r/{sub}/hot.json?limit=10");
-            match self.fetch_reddit(&url, sub).await {
+            let url = format!("https://www.reddit.com/r/{sub}/hot.rss?limit=15");
+            match self.fetch_rss(&url, &format!("r/{sub}")).await {
                 Ok(posts) => items.extend(posts),
-                Err(e) => tracing::debug!(sub = sub, err = %e, "Reddit fetch failed"),
+                Err(e) => tracing::debug!(sub = sub, err = %e, "Reddit RSS failed"),
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-
-        Ok(items)
-    }
-
-    async fn fetch_reddit(&self, url: &str, subreddit: &str) -> Result<Vec<NewsItem>> {
-        let resp = self
-            .http
-            .get(url)
-            .header("User-Agent", "Mozilla/5.0 (compatible; NewsAggregator/1.0)")
-            .send()
-            .await?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            tracing::warn!(
-                sub = subreddit,
-                status = %status,
-                body_prefix = &body[..body.len().min(200)],
-                "Reddit returned non-200"
-            );
-            anyhow::bail!("Reddit returned {status}");
-        }
-
-        let text = resp.text().await?;
-        let resp: serde_json::Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(
-                    sub = subreddit,
-                    body_prefix = &text[..text.len().min(200)],
-                    "Reddit returned non-JSON response"
-                );
-                return Err(e.into());
-            }
-        };
-
-        let mut items = Vec::new();
-        if let Some(posts) = resp["data"]["children"].as_array() {
-            for post in posts {
-                let data = &post["data"];
-                let title = data["title"].as_str().unwrap_or_default().to_string();
-                let url = data["url"].as_str().unwrap_or_default().to_string();
-                let created = data["created_utc"].as_f64().unwrap_or(0.0) as i64;
-                let selftext = data["selftext"].as_str().unwrap_or_default();
-                let score = data["score"].as_i64().unwrap_or(0);
-
-                // Only high-engagement posts
-                if score < 20 || title.is_empty() {
-                    continue;
-                }
-
-                let published = DateTime::from_timestamp(created, 0);
-
-                items.push(NewsItem {
-                    title,
-                    source: format!("r/{subreddit}"),
-                    url,
-                    published,
-                    summary: truncate(selftext, 200),
-                });
-            }
         }
 
         Ok(items)
@@ -243,19 +161,13 @@ impl NewsAggregator {
 
         let mut items = Vec::new();
         for url in feeds {
-            match self.fetch_rss(url).await {
+            match self.fetch_rss(url, "CoinDesk").await {
                 Ok(feed_items) => items.extend(feed_items),
                 Err(e) => tracing::debug!(url = url, err = %e, "CoinDesk/CT RSS failed"),
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        // Re-tag source
-        for item in &mut items {
-            if item.source == "Google News" {
-                item.source = "CoinDesk".to_string();
-            }
-        }
         Ok(items)
     }
 
@@ -268,18 +180,13 @@ impl NewsAggregator {
 
         let mut items = Vec::new();
         for url in feeds {
-            match self.fetch_rss(url).await {
+            match self.fetch_rss(url, "Reuters").await {
                 Ok(feed_items) => items.extend(feed_items),
                 Err(e) => tracing::debug!(url = url, err = %e, "Reuters RSS failed"),
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        for item in &mut items {
-            if item.source == "Google News" {
-                item.source = "Reuters".to_string();
-            }
-        }
         Ok(items)
     }
 
@@ -367,7 +274,55 @@ impl NewsAggregator {
     }
 }
 
-// --- Helpers ---
+// --- HTTP helpers ---
+
+/// Fetch URL with up to 3 retries and exponential backoff.
+async fn fetch_with_retry(http: &Client, url: &str, user_agent: &str) -> Result<String> {
+    let mut last_err = None;
+
+    for attempt in 0..3 {
+        if attempt > 0 {
+            let delay = Duration::from_secs(2u64.pow(attempt));
+            tokio::time::sleep(delay).await;
+        }
+
+        match http
+            .get(url)
+            .header("User-Agent", user_agent)
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    return resp
+                        .text()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("reading body: {e}"));
+                }
+                let body = resp.text().await.unwrap_or_default();
+                let preview = &body[..body.len().min(200)];
+                tracing::warn!(
+                    url = url,
+                    status = %status,
+                    attempt = attempt + 1,
+                    body_prefix = preview,
+                    "HTTP non-200, retrying"
+                );
+                last_err = Some(anyhow::anyhow!("HTTP {status}"));
+            }
+            Err(e) => {
+                tracing::warn!(url = url, attempt = attempt + 1, err = %e, "HTTP error, retrying");
+                last_err = Some(e.into());
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("fetch failed")))
+}
+
+// --- Text helpers ---
 
 const STOP_WORDS: &[&str] = &[
     "the", "a", "an", "in", "on", "at", "to", "by", "for", "of", "be", "is", "it", "or", "and",
