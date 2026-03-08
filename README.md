@@ -135,7 +135,7 @@ cargo run -- backtest
 
 ## Docker Image
 
-Built with Alpine musl for a static binary, compressed with UPX, running on `scratch`:
+Built with Alpine musl for a static binary, compressed with UPX, running on `alpine`:
 
 - `strip = true`, `lto = true`, `codegen-units = 1`
 - mimalloc allocator (musl's malloc is slow)
@@ -146,5 +146,5 @@ Built with Alpine musl for a static binary, compressed with UPX, running on `scr
 GitHub Actions:
 
 - **CI** (on push/PR): `cargo fmt --check`, `cargo clippy`, `cargo build --release`, `cargo test`
-- **Release** (on push to main): release-plz opens a PR with version bump + changelog
-- **Deploy** (on `v*` tag): auto-deploy to Hetzner via SSH + Docker Compose
+- **Release** (manual `workflow_dispatch`): pick patch/minor/major → bumps version, tags, creates GitHub release → auto-deploys to Hetzner
+- **Deploy**: runs automatically after release, or manually via `workflow_dispatch`
