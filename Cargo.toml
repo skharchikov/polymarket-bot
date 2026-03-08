@@ -41,3 +41,12 @@ dotenvy = "0.15"
 
 # Configuration
 confique = "0.2"
+
+# Allocator (musl's malloc is slow)
+mimalloc = { version = "0.1", default-features = false }
+
+[profile.release]
+opt-level = 3
+strip = true
+lto = true
+codegen-units = 1

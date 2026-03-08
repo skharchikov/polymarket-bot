@@ -1,23 +1,57 @@
-FROM rust:1.93-slim-bookworm AS builder
+####################################################################################################
+## Build
+####################################################################################################
+FROM rust:alpine AS builder
 
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+RUN apk update && apk upgrade --no-cache && \
+    apk add --no-cache musl-dev pkgconf git lld upx
 
 WORKDIR /app
+
+# Cache dependencies
 COPY Cargo.toml Cargo.lock* ./
-# Create dummy main to cache deps
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release 2>/dev/null || true
+RUN mkdir src && echo "fn main() {}" > src/main.rs && \
+    cargo build --release 2>/dev/null || true
 
+# Build real source
 COPY . .
-# Touch main.rs so cargo rebuilds with real source
-RUN touch src/main.rs
-RUN cargo build --release
+RUN touch src/main.rs && cargo build --release
 
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+# Compress binary with UPX (~60% smaller)
+RUN upx --best --lzma /app/target/release/polymarket-bot
 
-COPY --from=builder /app/target/release/polymarket-bot /usr/local/bin/polymarket-bot
-COPY --from=builder /app/migrations /app/migrations
+####################################################################################################
+## Minimal CA certs + timezone data
+####################################################################################################
+FROM alpine:latest AS files
 
+RUN apk update && apk upgrade --no-cache && \
+    apk add --no-cache ca-certificates tzdata
+
+RUN update-ca-certificates
+
+ENV USER=bot
+ENV UID=10001
+RUN adduser \
+    --disabled-password \
+    --gecos "" \
+    --home "/nonexistent" \
+    --shell "/sbin/nologin" \
+    --no-create-home \
+    --uid "${UID}" \
+    "${USER}"
+
+####################################################################################################
+## Final scratch image
+####################################################################################################
+FROM scratch
+
+COPY --from=files --chmod=444 /etc/passwd /etc/group /etc/nsswitch.conf /etc/
+COPY --from=files --chmod=444 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=files --chmod=444 /usr/share/zoneinfo /usr/share/zoneinfo
+
+COPY --from=builder /app/target/release/polymarket-bot /bin/polymarket-bot
+
+USER bot:bot
 WORKDIR /app
-ENTRYPOINT ["polymarket-bot"]
+ENTRYPOINT ["/bin/polymarket-bot"]
