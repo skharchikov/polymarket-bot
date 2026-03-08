@@ -2,13 +2,14 @@
 
 Automated prediction market trading bot that finds alpha by matching breaking news to Polymarket markets that haven't priced it in yet.
 
-Uses multi-agent LLM consensus (Skeptic + Catalyst + BaseRate roles) to assess probability impact, calibration tracking to correct systematic biases, and runs multiple strategy profiles simultaneously with independent bankrolls and Kelly Criterion sizing.
+Uses Bayesian updating with multi-agent LLM likelihood ratios (Skeptic + Catalyst + BaseRate roles) to assess probability impact, calibration tracking to correct systematic biases, and runs multiple strategy profiles simultaneously with independent bankrolls and Kelly Criterion sizing.
 
 ## Architecture
 
 ```
 src/
 ├── main.rs              # Entry point, dual-loop orchestration
+├── bayesian.rs          # Bayesian updating with likelihood ratios
 ├── config.rs            # Env-var configuration (confique)
 ├── strategy.rs          # Strategy profiles (aggressive/balanced/conservative)
 ├── calibration.rs       # Calibration curve from resolved LLM estimates
@@ -33,13 +34,13 @@ src/
 
 ## How It Works
 
-1. **News scan loop** (every 10 min) fetches breaking news from Google News RSS, Reddit, and Polymarket trending
+1. **News scan loop** (every 10 min) fetches breaking news from Google News RSS, Reddit, CoinDesk, Reuters, and Polymarket trending
 2. Matches news to eligible markets by keyword relevance (volume, expiry, price filters)
 3. Checks order book liquidity and price history for top matches
-4. **Multi-agent consensus**: 2-3 LLM agents (Skeptic, Catalyst, BaseRate) independently assess each market, aggregated via confidence-weighted averaging with disagreement penalty
-5. **Calibration correction**: adjusts LLM estimates based on historical accuracy (10-bin curve with Laplace smoothing)
+4. **Bayesian updating**: 2-3 LLM agents (Skeptic, Catalyst, BaseRate) each estimate a likelihood ratio — how much more likely is this news in YES-worlds vs NO-worlds. Starting from the market price as prior, each agent's confidence-dampened LR updates the posterior via Bayes' rule
+5. **Calibration correction**: adjusts posterior estimates based on historical accuracy (10-bin curve with Laplace smoothing)
 6. Each **strategy profile** independently evaluates signals against its own thresholds and Kelly fraction
-7. Places paper bets with per-strategy bankrolls and sends Telegram alerts
+7. Places paper bets with per-strategy bankrolls and sends detailed Telegram summaries (sources, matches, rejections)
 
 A separate **housekeeping loop** (every 30 min) resolves settled bets, updates calibration data, calculates PnL, and sends daily performance reports.
 
@@ -101,7 +102,6 @@ All settings via environment variables with sensible defaults:
 | `STRATEGIES` | `aggressive,balanced,conservative` | Active strategy profiles |
 | `STRATEGY_BANKROLL` | `300.0` | Starting bankroll per strategy (EUR) |
 | `CONSENSUS_AGENTS` | `2` | Number of LLM agents (1-3) |
-| `CONSENSUS_MAX_SPREAD` | `0.15` | Max agent disagreement before penalty |
 | `CALIBRATION_MIN_SAMPLES` | `20` | Min resolved estimates before calibration activates |
 | `SCAN_INTERVAL_MINS` | `30` | Housekeeping loop interval |
 | `NEWS_SCAN_INTERVAL_MINS` | `10` | News scan loop interval |
@@ -143,10 +143,8 @@ Built with Alpine musl for a static binary, compressed with UPX, running on `scr
 
 ## CI/CD
 
-GitHub Actions on push to main:
+GitHub Actions:
 
-- `cargo fmt --check`
-- `cargo clippy --all-targets` (warnings = errors)
-- `cargo build --release`
-- `cargo test`
-- Auto-deploy to Hetzner via SSH + Docker Compose
+- **CI** (on push/PR): `cargo fmt --check`, `cargo clippy`, `cargo build --release`, `cargo test`
+- **Release** (on push to main): release-plz opens a PR with version bump + changelog
+- **Deploy** (on `v*` tag): auto-deploy to Hetzner via SSH + Docker Compose

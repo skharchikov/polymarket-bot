@@ -34,8 +34,10 @@ impl NewsAggregator {
     }
 
     /// Fetch recent news from all free sources.
-    pub async fn fetch_all(&self) -> Vec<NewsItem> {
+    /// Returns (news_items, per_source_counts).
+    pub async fn fetch_all(&self) -> (Vec<NewsItem>, Vec<(String, usize)>) {
         let mut all = Vec::new();
+        let mut source_counts = Vec::new();
 
         // Parallel fetch from multiple sources
         let (google, reddit, polymarket_blog, coindesk, reuters) = tokio::join!(
@@ -56,10 +58,12 @@ impl NewsAggregator {
             match result {
                 Ok(items) => {
                     tracing::info!(source = name, count = items.len(), "Fetched news");
+                    source_counts.push((name.to_string(), items.len()));
                     all.extend(items);
                 }
                 Err(e) => {
                     tracing::warn!(source = name, err = %e, "News fetch failed");
+                    source_counts.push((name.to_string(), 0));
                 }
             }
         }
@@ -68,7 +72,7 @@ impl NewsAggregator {
         dedup_news(&mut all);
 
         tracing::info!(count = all.len(), "News items fetched");
-        all
+        (all, source_counts)
     }
 
     /// Google News RSS — top stories. Free, no key.

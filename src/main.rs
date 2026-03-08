@@ -2,6 +2,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod backtest;
+mod bayesian;
 mod calibration;
 mod config;
 mod data;
@@ -684,17 +685,37 @@ async fn news_scan_cycle(
             // Send scan cycle summary to Telegram
             let has_activity = !result.rejections.is_empty()
                 || !strategy_rejections.is_empty()
-                || !bets_placed.is_empty();
+                || !bets_placed.is_empty()
+                || result.llm_assessed > 0;
 
             if has_activity {
+                // Source breakdown: "Google(120) Reddit(45) CoinDesk(30)"
+                let sources: String = result
+                    .source_counts
+                    .iter()
+                    .filter(|(_, c)| *c > 0)
+                    .map(|(name, count)| format!("{}({})", name, count))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
                 let mut summary = format!(
-                    "🔍 *Scan complete*\n\
-                     📰 News: {} fetched, {} new\n\
-                     📊 Markets: {} eligible, {} signals",
+                    "🔍 *Scan complete*\n\n\
+                     📰 *News:* {} fetched, {} new\n\
+                     📡 *Sources:* {}\n\
+                     📊 *Markets:* {} eligible, {} matched news\n\
+                     🧠 *LLM assessed:* {} markets, {} signals, {} rejected",
                     result.news_total,
                     result.news_new,
+                    if sources.is_empty() {
+                        "none".to_string()
+                    } else {
+                        sources
+                    },
                     result.markets_scanned,
+                    result.news_matched,
+                    result.llm_assessed,
                     result.signals.len(),
+                    result.rejections.len(),
                 );
 
                 if !bets_placed.is_empty() {
@@ -705,7 +726,7 @@ async fn news_scan_cycle(
                 }
 
                 if !result.rejections.is_empty() {
-                    summary.push_str("\n\n❌ *Scanner gate rejected:*");
+                    summary.push_str("\n\n❌ *Gate rejected:*");
                     for r in result.rejections.iter().take(5) {
                         summary.push_str(&format!(
                             "\n  {} — {}",

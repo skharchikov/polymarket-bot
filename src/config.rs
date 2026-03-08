@@ -78,10 +78,6 @@ pub struct AppConfig {
     #[config(env = "CONSENSUS_AGENTS", default = 2)]
     pub consensus_agents: usize,
 
-    /// Max probability spread between agents before killing signal.
-    #[config(env = "CONSENSUS_MAX_SPREAD", default = 0.15)]
-    pub consensus_max_spread: f64,
-
     /// Min resolved estimates before applying calibration correction.
     #[config(env = "CALIBRATION_MIN_SAMPLES", default = 20)]
     pub calibration_min_samples: usize,

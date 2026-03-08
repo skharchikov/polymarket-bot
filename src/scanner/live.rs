@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
+use crate::bayesian::{self, AgentAssessment, BayesianEstimate};
 use crate::calibration::CalibrationCurve;
 use crate::config::AppConfig;
 use crate::data::models::{GammaMarket, PriceTick};
@@ -92,6 +93,10 @@ pub struct ScanResult {
     pub markets_scanned: usize,
     pub news_total: usize,
     pub news_new: usize,
+    pub news_matched: usize,
+    pub llm_assessed: usize,
+    /// Per-source news counts: (source_name, count)
+    pub source_counts: Vec<(String, usize)>,
 }
 
 /// A signal that was evaluated by the LLM but didn't pass the scanner gate.
@@ -132,45 +137,57 @@ impl AgentRole {
     fn preamble(self) -> &'static str {
         match self {
             Self::Skeptic => {
-                "You are a SKEPTICAL prediction market analyst.\n\n\
+                "You are a SKEPTICAL prediction market analyst using Bayesian reasoning.\n\n\
                  Your default assumption: the market price is already correct. News is usually \
                  already priced in. Your job is to find reasons why the current price is RIGHT \
                  and push back against overreaction to headlines.\n\n\
                  Only give high confidence (>0.7) when you find genuinely new, market-moving \
                  information that clearly hasn't been absorbed.\n\n\
                  Respond with ONLY a JSON object:\n\
-                 {\"probability\": 0.XX, \"confidence\": 0.XX, \"reasoning\": \"one sentence\"}\n\n\
-                 - probability: true probability of YES (0.01-0.99)\n\
-                 - confidence: 0.0 (no useful info) to 1.0 (news clearly changes outcome)\n\
+                 {\"likelihood_ratio\": X.XX, \"confidence\": 0.XX, \"reasoning\": \"one sentence\"}\n\n\
+                 - likelihood_ratio: how much more likely is this news in a world where YES happens \
+                   vs a world where NO happens. Examples:\n\
+                   * 1.0 = news is equally likely either way (uninformative)\n\
+                   * 2.0 = news is 2x more likely if YES happens (moderate YES evidence)\n\
+                   * 0.5 = news is 2x more likely if NO happens (moderate NO evidence)\n\
+                   * Range: 0.1 to 10.0\n\
+                 - confidence: 0.0 (no useful info) to 1.0 (highly certain about your LR estimate)\n\
                  - reasoning: explain why the market IS or ISN'T already priced correctly"
             }
             Self::Catalyst => {
-                "You are an AGGRESSIVE prediction market analyst looking for catalysts.\n\n\
+                "You are an AGGRESSIVE prediction market analyst using Bayesian reasoning.\n\n\
                  Your job: find fresh information that the market hasn't absorbed yet. \
                  Look for breaking news, policy changes, data releases, and events that \
                  clearly shift probabilities.\n\n\
-                 You can profit from BOTH sides:\n\
-                 - If news makes YES more likely than the current price suggests -> buy YES\n\
-                 - If news makes YES less likely than the current price suggests -> buy NO\n\n\
-                 Be calibrated, but don't be afraid to express conviction when the evidence is strong.\n\n\
+                 Think in terms of evidence strength:\n\
+                 - Would you expect to see this news MORE in worlds where YES happens, or NO?\n\
+                 - How much more? That ratio is your likelihood ratio.\n\n\
+                 Be calibrated, but don't be afraid to express conviction when evidence is strong.\n\n\
                  Respond with ONLY a JSON object:\n\
-                 {\"probability\": 0.XX, \"confidence\": 0.XX, \"reasoning\": \"one sentence\"}\n\n\
-                 - probability: true probability of YES (0.01-0.99)\n\
-                 - confidence: 0.0 (no useful info) to 1.0 (news clearly changes outcome)\n\
-                 - reasoning: explain what catalyst matters and why price should move"
+                 {\"likelihood_ratio\": X.XX, \"confidence\": 0.XX, \"reasoning\": \"one sentence\"}\n\n\
+                 - likelihood_ratio: P(news | YES) / P(news | NO). Examples:\n\
+                   * 1.0 = uninformative\n\
+                   * 3.0 = strong YES evidence (news 3x more likely in YES-worlds)\n\
+                   * 0.3 = strong NO evidence (news 3x more likely in NO-worlds)\n\
+                   * Range: 0.1 to 10.0\n\
+                 - confidence: 0.0 (no useful info) to 1.0 (highly certain about your LR estimate)\n\
+                 - reasoning: explain what catalyst matters and why"
             }
             Self::BaseRate => {
-                "You are a STATISTICAL prediction market analyst.\n\n\
+                "You are a STATISTICAL prediction market analyst using Bayesian reasoning.\n\n\
                  Ignore narratives and hype. Focus on:\n\
                  1. Historical base rates: how often do events like this happen?\n\
                  2. Price history momentum: is the trend meaningful or noise?\n\
                  3. Time to expiry: how much can the probability realistically move?\n\n\
-                 Anchor to base rates first, then adjust for news only if it provides \
-                 strong statistical evidence.\n\n\
+                 Estimate the likelihood ratio from a purely statistical perspective.\n\n\
                  Respond with ONLY a JSON object:\n\
-                 {\"probability\": 0.XX, \"confidence\": 0.XX, \"reasoning\": \"one sentence\"}\n\n\
-                 - probability: true probability of YES (0.01-0.99)\n\
-                 - confidence: 0.0 (no useful info) to 1.0 (news clearly changes outcome)\n\
+                 {\"likelihood_ratio\": X.XX, \"confidence\": 0.XX, \"reasoning\": \"one sentence\"}\n\n\
+                 - likelihood_ratio: P(news | YES) / P(news | NO) based on base rates. Examples:\n\
+                   * 1.0 = news doesn't statistically change anything\n\
+                   * 1.5 = mild statistical evidence for YES\n\
+                   * 0.7 = mild statistical evidence for NO\n\
+                   * Range: 0.1 to 10.0\n\
+                 - confidence: 0.0 (no useful info) to 1.0 (highly certain about your LR estimate)\n\
                  - reasoning: explain the base rate and any statistical adjustment"
             }
         }
@@ -402,8 +419,10 @@ impl LiveScanner {
              Now: {now}\n\n\
              PRICE HISTORY:\n{history_summary}\n\n\
              RECENT NEWS:\n{news_block}\n\
-             Analyze: Does any of this news change the probability of YES?\n\
-             Is the current price already reflecting this news, or is there an edge?",
+             Analyze: Does any of this news change the likelihood of YES?\n\
+             Think about it as: in worlds where this event resolves YES, how likely \
+             would you be to see this news? Compare to worlds where it resolves NO.\n\
+             The current price reflects the market consensus — is there evidence to update it?",
             question = market.question,
             pct = current_price * 100.0,
         );
@@ -421,7 +440,11 @@ impl LiveScanner {
         prompt
     }
 
-    /// Multi-agent news impact assessment with consensus aggregation.
+    /// Multi-agent Bayesian news impact assessment.
+    ///
+    /// Each agent estimates a likelihood ratio (how much more likely is this news
+    /// in YES-worlds vs NO-worlds). We start from the market price as prior and
+    /// apply Bayes' rule sequentially.
     async fn assess_news_impact(
         &self,
         market: &GammaMarket,
@@ -441,7 +464,7 @@ impl LiveScanner {
         );
 
         let roles = AgentRole::roles_for(self.cfg.consensus_agents);
-        let mut assessments: Vec<(AgentRole, f64, f64, String)> = Vec::new();
+        let mut assessments: Vec<AgentAssessment> = Vec::new();
 
         for (i, &role) in roles.iter().enumerate() {
             if i > 0 {
@@ -458,19 +481,46 @@ impl LiveScanner {
                 .and_then(|resp| parse_llm_response(&resp));
 
             match result {
-                Ok((prob, conf, reasoning)) => {
+                Ok(estimate) => {
+                    let (lr, conf, reasoning) = match estimate {
+                        LlmEstimate::LikelihoodRatio {
+                            lr,
+                            confidence,
+                            reasoning,
+                        } => (lr, confidence, reasoning),
+                        LlmEstimate::RawProbability {
+                            probability,
+                            confidence,
+                            reasoning,
+                        } => {
+                            // Fallback: convert raw probability to LR relative to market price
+                            let lr = bayesian::prob_to_odds(probability)
+                                / bayesian::prob_to_odds(current_price);
+                            tracing::debug!(
+                                agent = role.label(),
+                                "Legacy probability response, converted to LR={lr:.2}"
+                            );
+                            (lr.clamp(0.1, 10.0), confidence, reasoning)
+                        }
+                    };
+
                     tracing::info!(
                         market = %market.question,
                         agent = role.label(),
-                        prob = format_args!("{:.1}%", prob * 100.0),
+                        lr = format_args!("{lr:.2}"),
                         conf = format_args!("{:.0}%", conf * 100.0),
                         "{reasoning}",
                     );
 
-                    self.log_estimate(market, role.label(), prob, conf, None, None, current_price)
+                    self.log_estimate(market, role.label(), lr, conf, None, None, current_price)
                         .await;
 
-                    assessments.push((role, prob, conf, reasoning));
+                    assessments.push(AgentAssessment {
+                        role: role.label().to_string(),
+                        likelihood_ratio: lr,
+                        confidence: conf,
+                        reasoning,
+                    });
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -487,16 +537,15 @@ impl LiveScanner {
             anyhow::bail!("All agents failed for market: {}", market.question);
         }
 
-        // Aggregate consensus
-        let (consensus_prob, consensus_conf, consensus_reasoning) =
-            aggregate_assessments(&assessments, self.cfg.consensus_max_spread);
+        // Bayesian update: market price as prior, agents provide evidence
+        let estimate = bayesian::bayesian_update(current_price, &assessments);
 
-        // Apply calibration correction
-        let calibrated_prob = self.calibration.read().await.correct(consensus_prob);
+        // Apply calibration correction to the posterior
+        let calibrated_prob = self.calibration.read().await.correct(estimate.posterior);
 
-        if (calibrated_prob - consensus_prob).abs() > 0.02 {
+        if (calibrated_prob - estimate.posterior).abs() > 0.02 {
             tracing::info!(
-                raw = format_args!("{:.1}%", consensus_prob * 100.0),
+                raw = format_args!("{:.1}%", estimate.posterior * 100.0),
                 calibrated = format_args!("{:.1}%", calibrated_prob * 100.0),
                 "Calibration correction applied"
             );
@@ -505,23 +554,25 @@ impl LiveScanner {
         // Log consensus estimate
         self.log_estimate(
             market,
-            "consensus",
-            consensus_prob,
-            consensus_conf,
+            "bayesian",
+            estimate.posterior,
+            estimate.confidence,
             Some(calibrated_prob),
-            Some(consensus_conf),
+            Some(estimate.confidence),
             current_price,
         )
         .await;
 
         tracing::info!(
             market = %market.question,
-            prob = format_args!("{:.1}%", calibrated_prob * 100.0),
-            conf = format_args!("{:.0}%", consensus_conf * 100.0),
-            "Consensus assessment"
+            prior = format_args!("{:.1}%", current_price * 100.0),
+            posterior = format_args!("{:.1}%", calibrated_prob * 100.0),
+            lr = format_args!("{:.2}", estimate.combined_lr),
+            conf = format_args!("{:.0}%", estimate.confidence * 100.0),
+            "Bayesian assessment"
         );
 
-        Ok((calibrated_prob, consensus_conf, consensus_reasoning))
+        Ok((calibrated_prob, estimate.confidence, estimate.reasoning))
     }
 
     /// Main scan: fetch news → match to markets → LLM assesses impact → signals.
@@ -559,7 +610,7 @@ impl LiveScanner {
         let markets_scanned = eligible.len();
 
         // Step 2: Fetch breaking news from all sources
-        let mut news = self.news.fetch_all().await;
+        let (mut news, source_counts) = self.news.fetch_all().await;
         let news_total = news.len();
 
         // Filter out headlines we've already processed in previous cycles
@@ -614,6 +665,9 @@ impl LiveScanner {
                 markets_scanned,
                 news_total,
                 news_new: 0,
+                news_matched: 0,
+                llm_assessed: 0,
+                source_counts,
             });
         }
 
@@ -625,6 +679,8 @@ impl LiveScanner {
             "Markets matched with relevant news"
         );
 
+        let news_matched = matches.len();
+
         if matches.is_empty() {
             return Ok(ScanResult {
                 signals: Vec::new(),
@@ -632,6 +688,9 @@ impl LiveScanner {
                 markets_scanned,
                 news_total,
                 news_new,
+                news_matched: 0,
+                llm_assessed: 0,
+                source_counts,
             });
         }
 
@@ -678,6 +737,9 @@ impl LiveScanner {
                 markets_scanned,
                 news_total,
                 news_new,
+                news_matched,
+                llm_assessed: 0,
+                source_counts,
             });
         }
 
@@ -716,34 +778,37 @@ impl LiveScanner {
                 }
             };
 
-            // Determine best side
-            let yes_edge = prob - current_price;
-            let no_price = 1.0 - current_price;
-            let no_prob = 1.0 - prob;
-            let no_edge = no_prob - no_price;
-
-            let (side, edge, bet_price, bet_prob) = if yes_edge >= no_edge && yes_edge > 0.0 {
-                (BetSide::Yes, yes_edge, *current_price, prob)
-            } else if no_edge > 0.0 {
-                (BetSide::No, no_edge, no_price, no_prob)
-            } else {
-                let reason = format!(
-                    "no edge (prob {:.0}% ~ price {:.0}%)",
-                    prob * 100.0,
-                    current_price * 100.0
-                );
-                tracing::info!(
-                    market = %nm.market.question,
-                    prob = format_args!("{:.1}%", prob * 100.0),
-                    price = format_args!("{:.1}%", current_price * 100.0),
-                    "No edge on either side"
-                );
-                rejections.push(RejectedSignal {
-                    question: nm.market.question.clone(),
-                    reason,
-                });
-                continue;
+            // Determine best side using Bayesian edge computation
+            let estimate = BayesianEstimate {
+                prior: *current_price,
+                posterior: prob,
+                combined_lr: 0.0, // not needed for edge calc
+                confidence,
+                reasoning: reasoning.clone(),
             };
+            let (side, edge, bet_price, bet_prob) =
+                match bayesian::compute_edge(&estimate, *current_price) {
+                    Some((true, edge, price, prob)) => (BetSide::Yes, edge, price, prob),
+                    Some((false, edge, price, prob)) => (BetSide::No, edge, price, prob),
+                    None => {
+                        let reason = format!(
+                            "no edge (prob {:.0}% ~ price {:.0}%)",
+                            prob * 100.0,
+                            current_price * 100.0
+                        );
+                        tracing::info!(
+                            market = %nm.market.question,
+                            prob = format_args!("{:.1}%", prob * 100.0),
+                            price = format_args!("{:.1}%", current_price * 100.0),
+                            "No edge on either side"
+                        );
+                        rejections.push(RejectedSignal {
+                            question: nm.market.question.clone(),
+                            reason,
+                        });
+                        continue;
+                    }
+                };
 
             // Use full Kelly here; each strategy will scale by its own fraction
             let kelly_size = fractional_kelly(bet_prob, bet_price, 1.0);
@@ -842,6 +907,8 @@ impl LiveScanner {
 
         signals.sort_by(|a, b| b.score().partial_cmp(&a.score()).unwrap());
 
+        let llm_assessed = candidates.len();
+
         tracing::info!(
             signals = signals.len(),
             rejections = rejections.len(),
@@ -853,76 +920,11 @@ impl LiveScanner {
             markets_scanned,
             news_total,
             news_new,
+            news_matched,
+            llm_assessed,
+            source_counts,
         })
     }
-}
-
-/// Aggregate multi-agent assessments into a consensus probability, confidence, and reasoning.
-fn aggregate_assessments(
-    assessments: &[(AgentRole, f64, f64, String)],
-    max_spread: f64,
-) -> (f64, f64, String) {
-    if assessments.len() == 1 {
-        let (role, prob, conf, reasoning) = &assessments[0];
-        return (*prob, *conf, format!("[{}] {}", role.label(), reasoning));
-    }
-
-    // Confidence-weighted average probability
-    let total_weight: f64 = assessments.iter().map(|(_, _, c, _)| c).sum();
-    let weighted_prob = if total_weight > 0.0 {
-        assessments.iter().map(|(_, p, c, _)| p * c).sum::<f64>() / total_weight
-    } else {
-        assessments.iter().map(|(_, p, _, _)| p).sum::<f64>() / assessments.len() as f64
-    };
-
-    // Measure disagreement: standard deviation of probabilities
-    let mean_prob =
-        assessments.iter().map(|(_, p, _, _)| p).sum::<f64>() / assessments.len() as f64;
-    let variance = assessments
-        .iter()
-        .map(|(_, p, _, _)| (p - mean_prob).powi(2))
-        .sum::<f64>()
-        / assessments.len() as f64;
-    let std_dev = variance.sqrt();
-
-    // Agreement factor: 1.0 when agents agree, drops toward 0 as they diverge
-    let agreement = if max_spread > 0.0 {
-        (1.0 - std_dev / max_spread).max(0.0)
-    } else if std_dev < 0.001 {
-        1.0
-    } else {
-        0.0
-    };
-
-    // Final confidence: minimum confidence * agreement factor
-    let min_conf = assessments
-        .iter()
-        .map(|(_, _, c, _)| *c)
-        .fold(f64::MAX, f64::min);
-    let consensus_conf = (min_conf * agreement).clamp(0.0, 1.0);
-
-    // Build combined reasoning
-    let mut reasoning_parts: Vec<String> = assessments
-        .iter()
-        .map(|(role, prob, conf, reasoning)| {
-            format!(
-                "[{} {:.0}%@{:.0}%] {}",
-                role.label(),
-                prob * 100.0,
-                conf * 100.0,
-                reasoning
-            )
-        })
-        .collect();
-    reasoning_parts.push(format!(
-        "Consensus: {:.1}% (spread={:.1}%, agreement={:.0}%)",
-        weighted_prob * 100.0,
-        std_dev * 100.0,
-        agreement * 100.0,
-    ));
-    let consensus_reasoning = reasoning_parts.join(" | ");
-
-    (weighted_prob, consensus_conf, consensus_reasoning)
 }
 
 fn summarize_history(history: &[PriceTick], current_price: f64) -> String {
@@ -966,7 +968,22 @@ fn summarize_history(history: &[PriceTick], current_price: f64) -> String {
     )
 }
 
-fn parse_llm_response(response: &str) -> Result<(f64, f64, String)> {
+/// Parsed LLM response — either a likelihood ratio (new) or raw probability (legacy).
+enum LlmEstimate {
+    LikelihoodRatio {
+        lr: f64,
+        confidence: f64,
+        reasoning: String,
+    },
+    #[allow(dead_code)]
+    RawProbability {
+        probability: f64,
+        confidence: f64,
+        reasoning: String,
+    },
+}
+
+fn parse_llm_response(response: &str) -> Result<LlmEstimate> {
     let json_str = if let Some(start) = response.find('{') {
         if let Some(end) = response[start..].find('}') {
             &response[start..=start + end]
@@ -979,7 +996,10 @@ fn parse_llm_response(response: &str) -> Result<(f64, f64, String)> {
 
     #[derive(serde::Deserialize)]
     struct Est {
-        probability: f64,
+        #[serde(default)]
+        likelihood_ratio: Option<f64>,
+        #[serde(default)]
+        probability: Option<f64>,
         #[serde(default = "default_confidence")]
         confidence: f64,
         #[serde(default)]
@@ -990,11 +1010,22 @@ fn parse_llm_response(response: &str) -> Result<(f64, f64, String)> {
     }
 
     let est: Est = serde_json::from_str(json_str).context("failed to parse LLM response")?;
-    Ok((
-        est.probability.clamp(0.01, 0.99),
-        est.confidence.clamp(0.0, 1.0),
-        est.reasoning,
-    ))
+
+    if let Some(lr) = est.likelihood_ratio {
+        Ok(LlmEstimate::LikelihoodRatio {
+            lr: lr.clamp(0.1, 10.0),
+            confidence: est.confidence.clamp(0.0, 1.0),
+            reasoning: est.reasoning,
+        })
+    } else if let Some(prob) = est.probability {
+        Ok(LlmEstimate::RawProbability {
+            probability: prob.clamp(0.01, 0.99),
+            confidence: est.confidence.clamp(0.0, 1.0),
+            reasoning: est.reasoning,
+        })
+    } else {
+        anyhow::bail!("LLM response missing both likelihood_ratio and probability")
+    }
 }
 
 /// Strip characters that break Telegram MarkdownV1 inside italic `_..._` blocks.
@@ -1028,136 +1059,103 @@ mod tests {
         assert_eq!(roles[2].label(), "base_rate");
     }
 
-    // --- aggregate_assessments ---
-
-    fn make_assessment(role: AgentRole, prob: f64, conf: f64) -> (AgentRole, f64, f64, String) {
-        (role, prob, conf, format!("test {}", role.label()))
-    }
-
-    #[test]
-    fn test_single_agent_passthrough() {
-        let a = vec![make_assessment(AgentRole::Skeptic, 0.7, 0.8)];
-        let (prob, conf, reasoning) = aggregate_assessments(&a, 0.15);
-        assert!((prob - 0.7).abs() < 1e-9);
-        assert!((conf - 0.8).abs() < 1e-9);
-        assert!(reasoning.contains("skeptic"));
-    }
-
-    #[test]
-    fn test_two_agents_agree() {
-        let a = vec![
-            make_assessment(AgentRole::Skeptic, 0.70, 0.8),
-            make_assessment(AgentRole::Catalyst, 0.72, 0.9),
-        ];
-        let (prob, conf, reasoning) = aggregate_assessments(&a, 0.15);
-        // Probability should be confidence-weighted average
-        let expected_prob = (0.70 * 0.8 + 0.72 * 0.9) / (0.8 + 0.9);
-        assert!((prob - expected_prob).abs() < 1e-9);
-        // Spread is tiny (0.01), agreement should be high
-        assert!(conf > 0.7, "conf={conf} should be > 0.7 when agents agree");
-        assert!(reasoning.contains("Consensus"));
-    }
-
-    #[test]
-    fn test_two_agents_disagree_kills_confidence() {
-        let a = vec![
-            make_assessment(AgentRole::Skeptic, 0.30, 0.8),
-            make_assessment(AgentRole::Catalyst, 0.80, 0.9),
-        ];
-        let (_prob, conf, _reasoning) = aggregate_assessments(&a, 0.15);
-        // Spread is 0.25 which exceeds max_spread of 0.15 → agreement=0 → conf=0
-        assert!(
-            conf < 0.01,
-            "conf={conf} should be ~0 when agents wildly disagree"
-        );
-    }
-
-    #[test]
-    fn test_zero_confidence_agents() {
-        let a = vec![
-            make_assessment(AgentRole::Skeptic, 0.50, 0.0),
-            make_assessment(AgentRole::Catalyst, 0.60, 0.0),
-        ];
-        let (prob, conf, _) = aggregate_assessments(&a, 0.15);
-        // With 0 total weight, falls back to simple average
-        assert!((prob - 0.55).abs() < 1e-9);
-        // min_conf is 0 → consensus_conf is 0
-        assert!(conf < 1e-9);
-    }
-
-    #[test]
-    fn test_max_spread_zero() {
-        let a = vec![
-            make_assessment(AgentRole::Skeptic, 0.60, 0.8),
-            make_assessment(AgentRole::Catalyst, 0.60, 0.8),
-        ];
-        let (_, conf, _) = aggregate_assessments(&a, 0.0);
-        // Identical probabilities → std_dev ≈ 0 → agreement = 1.0
-        assert!(
-            conf > 0.7,
-            "conf={conf} should be high when agents agree exactly"
-        );
-
-        // Now with disagreement
-        let a2 = vec![
-            make_assessment(AgentRole::Skeptic, 0.40, 0.8),
-            make_assessment(AgentRole::Catalyst, 0.60, 0.8),
-        ];
-        let (_, conf2, _) = aggregate_assessments(&a2, 0.0);
-        assert!(
-            conf2 < 0.01,
-            "conf={conf2} should be 0 when spread>0 and max_spread=0"
-        );
-    }
-
-    #[test]
-    fn test_three_agents_weighted_avg() {
-        let a = vec![
-            make_assessment(AgentRole::Skeptic, 0.50, 0.5),
-            make_assessment(AgentRole::Catalyst, 0.70, 1.0),
-            make_assessment(AgentRole::BaseRate, 0.60, 0.5),
-        ];
-        let (prob, _, _) = aggregate_assessments(&a, 0.15);
-        let expected = (0.50 * 0.5 + 0.70 * 1.0 + 0.60 * 0.5) / (0.5 + 1.0 + 0.5);
-        assert!(
-            (prob - expected).abs() < 1e-9,
-            "prob={prob} expected={expected}"
-        );
-    }
-
     // --- parse_llm_response ---
 
     #[test]
-    fn test_parse_clean_json() {
+    fn test_parse_lr_json() {
+        let input = r#"{"likelihood_ratio": 2.5, "confidence": 0.8, "reasoning": "strong signal"}"#;
+        match parse_llm_response(input).unwrap() {
+            LlmEstimate::LikelihoodRatio {
+                lr,
+                confidence,
+                reasoning,
+            } => {
+                assert!((lr - 2.5).abs() < 1e-9);
+                assert!((confidence - 0.8).abs() < 1e-9);
+                assert_eq!(reasoning, "strong signal");
+            }
+            _ => panic!("expected LikelihoodRatio"),
+        }
+    }
+
+    #[test]
+    fn test_parse_lr_clamped() {
+        let input = r#"{"likelihood_ratio": 50.0, "confidence": 0.9, "reasoning": "extreme"}"#;
+        match parse_llm_response(input).unwrap() {
+            LlmEstimate::LikelihoodRatio { lr, .. } => {
+                assert!((lr - 10.0).abs() < 1e-9, "LR should clamp to 10.0");
+            }
+            _ => panic!("expected LikelihoodRatio"),
+        }
+    }
+
+    #[test]
+    fn test_parse_legacy_probability() {
         let input = r#"{"probability": 0.75, "confidence": 0.8, "reasoning": "strong signal"}"#;
-        let (prob, conf, reason) = parse_llm_response(input).unwrap();
-        assert!((prob - 0.75).abs() < 1e-9);
-        assert!((conf - 0.8).abs() < 1e-9);
-        assert_eq!(reason, "strong signal");
+        match parse_llm_response(input).unwrap() {
+            LlmEstimate::RawProbability {
+                probability,
+                confidence,
+                ..
+            } => {
+                assert!((probability - 0.75).abs() < 1e-9);
+                assert!((confidence - 0.8).abs() < 1e-9);
+            }
+            _ => panic!("expected RawProbability"),
+        }
+    }
+
+    #[test]
+    fn test_parse_lr_preferred_over_probability() {
+        // If both are present, LR takes precedence
+        let input = r#"{"likelihood_ratio": 1.5, "probability": 0.75, "confidence": 0.8, "reasoning": "both"}"#;
+        match parse_llm_response(input).unwrap() {
+            LlmEstimate::LikelihoodRatio { lr, .. } => {
+                assert!((lr - 1.5).abs() < 1e-9);
+            }
+            _ => panic!("expected LikelihoodRatio when both present"),
+        }
     }
 
     #[test]
     fn test_parse_json_with_surrounding_text() {
-        let input = "Here is my analysis:\n{\"probability\": 0.65, \"confidence\": 0.4, \"reasoning\": \"weak\"}\nThat's all.";
-        let (prob, conf, _) = parse_llm_response(input).unwrap();
-        assert!((prob - 0.65).abs() < 1e-9);
-        assert!((conf - 0.4).abs() < 1e-9);
+        let input = "Here is my analysis:\n{\"likelihood_ratio\": 1.8, \"confidence\": 0.4, \"reasoning\": \"weak\"}\nThat's all.";
+        match parse_llm_response(input).unwrap() {
+            LlmEstimate::LikelihoodRatio { lr, confidence, .. } => {
+                assert!((lr - 1.8).abs() < 1e-9);
+                assert!((confidence - 0.4).abs() < 1e-9);
+            }
+            _ => panic!("expected LikelihoodRatio"),
+        }
     }
 
     #[test]
     fn test_parse_clamps_extreme_values() {
-        let input = r#"{"probability": 1.5, "confidence": -0.5, "reasoning": "extreme"}"#;
-        let (prob, conf, _) = parse_llm_response(input).unwrap();
-        assert!((prob - 0.99).abs() < 1e-9);
-        assert!(conf < 1e-9);
+        let input = r#"{"likelihood_ratio": 0.01, "confidence": -0.5, "reasoning": "extreme"}"#;
+        match parse_llm_response(input).unwrap() {
+            LlmEstimate::LikelihoodRatio { lr, confidence, .. } => {
+                assert!((lr - 0.1).abs() < 1e-9, "LR should clamp to 0.1");
+                assert!(confidence < 1e-9, "confidence should clamp to 0");
+            }
+            _ => panic!("expected LikelihoodRatio"),
+        }
     }
 
     #[test]
     fn test_parse_missing_confidence_defaults() {
-        let input = r#"{"probability": 0.6}"#;
-        let (prob, conf, _) = parse_llm_response(input).unwrap();
-        assert!((prob - 0.6).abs() < 1e-9);
-        assert!((conf - 0.5).abs() < 1e-9); // default_confidence
+        let input = r#"{"likelihood_ratio": 1.2}"#;
+        match parse_llm_response(input).unwrap() {
+            LlmEstimate::LikelihoodRatio { confidence, .. } => {
+                assert!((confidence - 0.5).abs() < 1e-9); // default_confidence
+            }
+            _ => panic!("expected LikelihoodRatio"),
+        }
+    }
+
+    #[test]
+    fn test_parse_missing_both_fails() {
+        let input = r#"{"confidence": 0.8, "reasoning": "no estimate"}"#;
+        assert!(parse_llm_response(input).is_err());
     }
 
     #[test]
@@ -1234,17 +1232,24 @@ mod tests {
     #[test]
     fn test_parse_nested_json() {
         // LLM sometimes wraps in markdown code blocks
-        let input =
-            "```json\n{\"probability\": 0.55, \"confidence\": 0.6, \"reasoning\": \"test\"}\n```";
-        let (prob, _, _) = parse_llm_response(input).unwrap();
-        assert!((prob - 0.55).abs() < 1e-9);
+        let input = "```json\n{\"likelihood_ratio\": 1.5, \"confidence\": 0.6, \"reasoning\": \"test\"}\n```";
+        match parse_llm_response(input).unwrap() {
+            LlmEstimate::LikelihoodRatio { lr, .. } => {
+                assert!((lr - 1.5).abs() < 1e-9);
+            }
+            _ => panic!("expected LikelihoodRatio"),
+        }
     }
 
     #[test]
-    fn test_parse_probability_boundaries() {
+    fn test_parse_legacy_probability_boundaries() {
         // probability of exactly 0.0 should clamp to 0.01
         let input = r#"{"probability": 0.0, "confidence": 0.5, "reasoning": "no chance"}"#;
-        let (prob, _, _) = parse_llm_response(input).unwrap();
-        assert!((prob - 0.01).abs() < 1e-9);
+        match parse_llm_response(input).unwrap() {
+            LlmEstimate::RawProbability { probability, .. } => {
+                assert!((probability - 0.01).abs() < 1e-9);
+            }
+            _ => panic!("expected RawProbability"),
+        }
     }
 }
