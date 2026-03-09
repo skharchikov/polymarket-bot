@@ -2,6 +2,14 @@
 
 use crate::data::models::{GammaMarket, PriceTick};
 
+/// Order book statistics computed from CLOB book endpoint.
+#[derive(Debug, Clone, Default)]
+pub struct OrderBookStats {
+    pub depth: f64,
+    pub order_imbalance: f64,
+    pub spread: f64,
+}
+
 /// Feature vector matching the Python training pipeline's FEATURE_COLS.
 /// Order must be identical to scripts/train_model.py.
 #[derive(Debug, Clone)]
@@ -17,10 +25,15 @@ pub struct MarketFeatures {
     pub is_crypto: f64,
     pub is_politics: f64,
     pub is_sports: f64,
-    // News features (from BM25/embedding match pipeline)
     pub news_count: f64,
     pub best_news_score: f64,
     pub avg_news_age_hours: f64,
+    // Order book microstructure
+    pub order_imbalance: f64,
+    pub spread: f64,
+    // Gamma API price changes (more reliable than computed momentum)
+    pub price_change_1d: f64,
+    pub price_change_1w: f64,
 }
 
 impl MarketFeatures {
@@ -40,6 +53,10 @@ impl MarketFeatures {
         "news_count",
         "best_news_score",
         "avg_news_age_hours",
+        "order_imbalance",
+        "spread",
+        "price_change_1d",
+        "price_change_1w",
     ];
 
     /// Convert to fixed-order f64 vector for model input.
@@ -59,7 +76,18 @@ impl MarketFeatures {
             self.news_count,
             self.best_news_score,
             self.avg_news_age_hours,
+            self.order_imbalance,
+            self.spread,
+            self.price_change_1d,
+            self.price_change_1w,
         ]
+    }
+
+    /// Set order book features (call after initial construction).
+    pub fn with_order_book(mut self, stats: &OrderBookStats) -> Self {
+        self.order_imbalance = stats.order_imbalance;
+        self.spread = stats.spread;
+        self
     }
 
     /// Build features from a market, price history, and matched news.
@@ -142,6 +170,10 @@ impl MarketFeatures {
             0.0
         };
 
+        // Gamma API price changes (fallback to computed momentum)
+        let price_change_1d = market.one_day_price_change.unwrap_or(momentum_24h);
+        let price_change_1w = market.one_week_price_change.unwrap_or(0.0);
+
         Self {
             yes_price: current_price,
             momentum_1h,
@@ -154,10 +186,13 @@ impl MarketFeatures {
             is_crypto,
             is_politics,
             is_sports,
-            // Default news features to 0 (XGBoost handles missing/zero natively)
             news_count: 0.0,
             best_news_score: 0.0,
             avg_news_age_hours: 0.0,
+            order_imbalance: 0.0,
+            spread: 0.0,
+            price_change_1d,
+            price_change_1w,
         }
     }
 }
@@ -168,7 +203,6 @@ fn price_at_offset(history: &[PriceTick], now_ts: i64, offset_secs: i64) -> Opti
         return None;
     }
     let target = now_ts - offset_secs;
-    // Binary search for closest timestamp
     let idx = history.partition_point(|t| t.t < target);
     if idx < history.len() {
         Some(history[idx].p)
@@ -311,6 +345,10 @@ mod tests {
             news_count: 3.0,
             best_news_score: 0.85,
             avg_news_age_hours: 2.5,
+            order_imbalance: 0.15,
+            spread: 0.02,
+            price_change_1d: 0.03,
+            price_change_1w: -0.05,
         };
         assert_eq!(features.to_vec().len(), MarketFeatures::NAMES.len());
     }
@@ -318,7 +356,6 @@ mod tests {
     #[test]
     fn test_price_at_offset() {
         let ticks = make_ticks(&[0.3, 0.4, 0.5, 0.6, 0.7], 1000, 3600);
-        // Price 2 hours before timestamp 5000 (= ts 3000, closest is tick at 3600=0.4? no tick at 4600)
         let p = price_at_offset(&ticks, 5000, 7200);
         assert!(p.is_some());
     }

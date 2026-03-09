@@ -13,7 +13,7 @@ use crate::bayesian::{self, AgentAssessment, BayesianEstimate};
 use crate::calibration::CalibrationCurve;
 use crate::config::AppConfig;
 use crate::data::models::{GammaMarket, PriceTick};
-use crate::model::features::MarketFeatures;
+use crate::model::features::{MarketFeatures, OrderBookStats};
 use crate::model::sidecar::SidecarClient;
 use crate::pricing::kelly::fractional_kelly;
 use crate::storage::portfolio::{BetContext, BetSide};
@@ -62,6 +62,8 @@ pub struct Signal {
     pub context: BetContext,
     /// Whether this signal came from XGBoost or LLM
     pub source: SignalSource,
+    /// Days until market expiry (for terminal risk scaling)
+    pub days_to_expiry: f64,
 }
 
 impl Signal {
@@ -375,7 +377,7 @@ impl LiveScanner {
         Ok(market.resolved_yes())
     }
 
-    async fn fetch_book_depth(&self, token_id: &str) -> Result<f64> {
+    async fn fetch_order_book_stats(&self, token_id: &str) -> Result<OrderBookStats> {
         let url = format!("{CLOB_API}/book?token_id={token_id}");
         let resp: serde_json::Value = self
             .http
@@ -386,7 +388,8 @@ impl LiveScanner {
             .await
             .context("failed to parse order book")?;
 
-        let mut total_depth = 0.0;
+        let mut bid_volume = 0.0;
+        let mut best_bid = 0.0_f64;
         if let Some(bids) = resp["bids"].as_array() {
             for bid in bids {
                 let price = bid["price"]
@@ -397,10 +400,42 @@ impl LiveScanner {
                     .as_str()
                     .and_then(|s| s.parse::<f64>().ok())
                     .unwrap_or(0.0);
-                total_depth += price * size;
+                bid_volume += price * size;
+                best_bid = best_bid.max(price);
             }
         }
-        Ok(total_depth)
+
+        let mut ask_volume = 0.0;
+        let mut best_ask = 1.0_f64;
+        if let Some(asks) = resp["asks"].as_array() {
+            for ask in asks {
+                let price = ask["price"]
+                    .as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                let size = ask["size"]
+                    .as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                ask_volume += price * size;
+                best_ask = best_ask.min(price);
+            }
+        }
+
+        let total_volume = bid_volume + ask_volume;
+        let order_imbalance = if total_volume > 0.0 {
+            (bid_volume - ask_volume) / total_volume
+        } else {
+            0.0
+        };
+        let spread = (best_ask - best_bid).max(0.0);
+        let depth = bid_volume + ask_volume;
+
+        Ok(OrderBookStats {
+            depth,
+            order_imbalance,
+            spread,
+        })
     }
 
     pub async fn fetch_active_markets(&self) -> Result<Vec<GammaMarket>> {
@@ -789,7 +824,7 @@ impl LiveScanner {
             ml_prob: f64,
             ml_conf: f64,
             history: Vec<PriceTick>,
-            book_depth: f64,
+            book_stats: OrderBookStats,
             /// Model score for ranking: |edge| * confidence
             score: f64,
         }
@@ -838,7 +873,7 @@ impl LiveScanner {
                 ml_prob,
                 ml_conf,
                 history,
-                book_depth: 0.0,
+                book_stats: OrderBookStats::default(),
                 score,
             });
         }
@@ -868,16 +903,19 @@ impl LiveScanner {
             };
 
             tokio::time::sleep(Duration::from_millis(50)).await;
-            let book_depth = self.fetch_book_depth(&token_id).await.unwrap_or(0.0);
-            if book_depth < self.cfg.min_book_depth {
+            let book_stats = self
+                .fetch_order_book_stats(&token_id)
+                .await
+                .unwrap_or_default();
+            if book_stats.depth < self.cfg.min_book_depth {
                 tracing::debug!(
                     market = %c.market.question,
-                    depth = format_args!("${book_depth:.0}"),
+                    depth = format_args!("${:.0}", book_stats.depth),
                     "Skipping — thin book"
                 );
                 continue;
             }
-            c.book_depth = book_depth;
+            c.book_stats = book_stats;
             candidates.push(c);
             if candidates.len() >= top_n {
                 break;
@@ -1002,7 +1040,7 @@ impl LiveScanner {
                     (0, 0.0, 0.0, Vec::new())
                 };
 
-            // Re-run model with news features if news available
+            // Re-run model with news + order book features
             let (ml_prob, ml_conf) = if news_count > 0 {
                 let features = MarketFeatures::from_market_and_news(
                     &c.market,
@@ -1011,14 +1049,23 @@ impl LiveScanner {
                     news_count,
                     best_news_score,
                     avg_news_age_hours,
-                );
+                )
+                .with_order_book(&c.book_stats);
                 let fv = features.to_vec();
                 match self.predict(&fv, c.current_price).await {
                     Some(p) => p,
                     None => (c.ml_prob, c.ml_conf),
                 }
             } else {
-                (c.ml_prob, c.ml_conf)
+                // Re-predict with order book stats even without news
+                let features =
+                    MarketFeatures::from_market_and_history(&c.market, c.current_price, &c.history)
+                        .with_order_book(&c.book_stats);
+                let fv = features.to_vec();
+                match self.predict(&fv, c.current_price).await {
+                    Some(p) => p,
+                    None => (c.ml_prob, c.ml_conf),
+                }
             };
 
             let lr = if c.current_price > 0.01 && c.current_price < 0.99 {
@@ -1142,6 +1189,7 @@ impl LiveScanner {
                 combined_lr: lr,
                 news_matched_count: news_count,
                 source: SignalSource::XgBoost,
+                days_to_expiry: parse_days_to_expiry(&c.market.end_date),
                 context: BetContext {
                     btc_price: 0.0,
                     eth_price: 0.0,
@@ -1150,7 +1198,7 @@ impl LiveScanner {
                     btc_funding_rate: 0.0,
                     btc_open_interest: 0.0,
                     fear_greed: String::new(),
-                    book_depth: c.book_depth,
+                    book_depth: c.book_stats.depth,
                     news_headlines,
                 },
             });
@@ -1256,14 +1304,18 @@ impl LiveScanner {
         }
 
         // Fetch depth + history for top matches
-        let mut candidates: Vec<(NewsMatch, f64, String, Vec<PriceTick>, f64)> = Vec::new();
+        let mut candidates: Vec<(NewsMatch, f64, String, Vec<PriceTick>, OrderBookStats)> =
+            Vec::new();
         for nm in matches.iter().take(self.cfg.max_llm_candidates * 2) {
             let token_id = nm.market.yes_token_id().unwrap();
             let current_price = Self::get_yes_price(&nm.market).unwrap_or(0.0);
 
             tokio::time::sleep(Duration::from_millis(100)).await;
-            let book_depth = self.fetch_book_depth(&token_id).await.unwrap_or(0.0);
-            if book_depth < self.cfg.min_book_depth {
+            let book_stats = self
+                .fetch_order_book_stats(&token_id)
+                .await
+                .unwrap_or_default();
+            if book_stats.depth < self.cfg.min_book_depth {
                 continue;
             }
 
@@ -1279,7 +1331,7 @@ impl LiveScanner {
                 current_price,
                 history_summary,
                 history,
-                book_depth,
+                book_stats,
             ));
             if candidates.len() >= self.cfg.max_llm_candidates {
                 break;
@@ -1305,7 +1357,7 @@ impl LiveScanner {
         let mut signals = Vec::new();
         let mut rejections = Vec::new();
 
-        for (i, (nm, current_price, history_summary, _history, book_depth)) in
+        for (i, (nm, current_price, history_summary, _history, book_stats)) in
             candidates.iter().enumerate()
         {
             if i > 0 {
@@ -1401,6 +1453,7 @@ impl LiveScanner {
                 combined_lr,
                 news_matched_count: nm.news.len(),
                 source: SignalSource::LlmConsensus,
+                days_to_expiry: parse_days_to_expiry(&nm.market.end_date),
                 context: BetContext {
                     btc_price: 0.0,
                     eth_price: 0.0,
@@ -1409,7 +1462,7 @@ impl LiveScanner {
                     btc_funding_rate: 0.0,
                     btc_open_interest: 0.0,
                     fear_greed: String::new(),
-                    book_depth: *book_depth,
+                    book_depth: book_stats.depth,
                     news_headlines,
                 },
             });
@@ -1531,6 +1584,7 @@ impl LiveScanner {
             combined_lr: lr,
             news_matched_count: 0,
             source: SignalSource::XgBoost,
+            days_to_expiry: parse_days_to_expiry(&market.end_date),
             context: BetContext {
                 btc_price: 0.0,
                 eth_price: 0.0,
@@ -1544,6 +1598,17 @@ impl LiveScanner {
             },
         }))
     }
+}
+
+fn parse_days_to_expiry(end_date: &Option<String>) -> f64 {
+    end_date
+        .as_ref()
+        .and_then(|d| chrono::DateTime::parse_from_rfc3339(d).ok())
+        .map(|end| {
+            let remaining = end.timestamp() - chrono::Utc::now().timestamp();
+            (remaining as f64 / 86400.0).max(0.0)
+        })
+        .unwrap_or(30.0)
 }
 
 fn summarize_history(history: &[PriceTick], current_price: f64) -> String {
@@ -1844,6 +1909,7 @@ mod tests {
             combined_lr: 2.33,
             news_matched_count: 3,
             source: SignalSource::LlmConsensus,
+            days_to_expiry: 7.0,
             context: BetContext::default(),
         };
         let expected = 0.20 * 0.80 * 0.10;

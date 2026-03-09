@@ -101,7 +101,14 @@ impl StrategyProfile {
             return None;
         }
 
-        Some(AcceptedSignal { kelly_size: kelly })
+        // Terminal risk scaling: reduce position size as market approaches expiry.
+        // sqrt(days_remaining / 14) — full size at 14d+, scaled down near expiry.
+        let terminal_scale = (signal.days_to_expiry / 14.0).clamp(0.1, 1.0).sqrt();
+        let scaled_kelly = kelly * terminal_scale;
+
+        Some(AcceptedSignal {
+            kelly_size: scaled_kelly,
+        })
     }
 
     pub fn label(&self) -> &str {
@@ -137,6 +144,7 @@ mod tests {
             combined_lr: 1.0,
             news_matched_count: 0,
             source: SignalSource::LlmConsensus,
+            days_to_expiry: 7.0,
             context: BetContext::default(),
         }
     }

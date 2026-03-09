@@ -66,6 +66,10 @@ FEATURE_COLS = [
     "news_count",
     "best_news_score",
     "avg_news_age_hours",
+    "order_imbalance",
+    "spread",
+    "price_change_1d",
+    "price_change_1w",
 ]
 
 N_FEATURES = len(FEATURE_COLS)
@@ -114,6 +118,10 @@ def load_data(path: str) -> pd.DataFrame:
 
 def build_feature_matrix(df: pd.DataFrame) -> np.ndarray:
     """Extract feature matrix in fixed column order."""
+    # Fill missing columns with 0 (backward compat with old training data)
+    for col in FEATURE_COLS:
+        if col not in df.columns:
+            df[col] = 0.0
     X = df[FEATURE_COLS].values.astype(np.float64)
     X = np.nan_to_num(X, nan=0.0, posinf=1.0, neginf=0.0)
     return X

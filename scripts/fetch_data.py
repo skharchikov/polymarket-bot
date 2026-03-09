@@ -114,6 +114,8 @@ class PolymarketScraper:
                     "created_at": m.get("createdAt"),
                     "clob_token_ids": m.get("clobTokenIds", ""),
                     "slug": m.get("slug", ""),
+                    "one_day_price_change": float(m.get("oneDayPriceChange", 0) or 0),
+                    "one_week_price_change": float(m.get("oneWeekPriceChange", 0) or 0),
                 })
 
             offset += batch_size
@@ -276,6 +278,12 @@ def _extract_snapshot(prices: np.ndarray, timestamps: np.ndarray,
         "news_count": 0,
         "best_news_score": 0.0,
         "avg_news_age_hours": 0.0,
+        # Order book features (0 for historical snapshots — not available retroactively)
+        "order_imbalance": 0.0,
+        "spread": 0.0,
+        # Gamma API price changes
+        "price_change_1d": market.get("one_day_price_change", momentum_24h),
+        "price_change_1w": market.get("one_week_price_change", 0.0),
         # Label
         "outcome_yes": market["outcome_yes"],
         # Metadata
