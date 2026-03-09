@@ -594,7 +594,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                         "WS-triggered signal found"
                     );
 
-                    // Process through strategies (same logic as news_scan_cycle)
+                    // Process through strategies — only first matching strategy bets
                     for strat in al_strategies.iter() {
                         let sent = al_portfolio
                             .strategy_signals_today(&strat.name)
@@ -668,6 +668,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                                     bankroll = new_bankroll,
                                 );
                                 broadcast(&al_notifier, &al_portfolio, &msg).await;
+                                break;
                             }
                             Err(e) => {
                                 tracing::error!(err = %e, "Failed to place WS-triggered bet");
@@ -912,8 +913,14 @@ async fn news_scan_cycle(
 
             let mut bets_placed: Vec<String> = Vec::new();
             let mut strategy_rejections: Vec<String> = Vec::new();
+            // One bet per market — first accepting strategy wins
+            let mut bet_market_ids: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
 
             for signal in &result.signals {
+                if bet_market_ids.contains(&signal.market_id) {
+                    continue;
+                }
                 for strat in strategies {
                     let sent = portfolio.strategy_signals_today(&strat.name).await?;
                     let remaining = strat.max_signals_per_day.saturating_sub(sent);
@@ -1072,6 +1079,9 @@ async fn news_scan_cycle(
                                 max = strat.max_signals_per_day,
                             );
                             broadcast(notifier, portfolio, &msg).await;
+                            // One bet per market — stop trying other strategies
+                            bet_market_ids.insert(signal.market_id.clone());
+                            break;
                         }
                         Err(e) => {
                             tracing::error!(
