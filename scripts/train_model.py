@@ -218,16 +218,38 @@ def evaluate_folds(model, X, y, prices, n_splits=5):
         edges = probs - p_test
         avg_edge = float(np.mean(edges))
 
-        # Simulated P&L: buy YES when prob > price, buy NO when prob < price
+        # Simulated P&L using Kelly sizing (matches Rust bot)
+        # Kelly: f = (b*p - q) / b  where b = (1-price)/price
         pnl = 0.0
+        kelly_fraction = 0.25  # quarter-Kelly, same as balanced strategy
+        bankroll = 300.0  # starting bankroll per strategy
         for prob, price, outcome in zip(probs, p_test, y_test):
-            edge = abs(prob - price)
-            if edge < 0.03:  # Skip small edges
+            if price <= 0.01 or price >= 0.99:
                 continue
-            if prob > price:  # Buy YES
-                pnl += (outcome - price) * edge * 10  # Scale by edge
-            else:  # Buy NO
-                pnl += ((1 - outcome) - (1 - price)) * edge * 10
+            # Determine side and compute Kelly
+            if prob > price:
+                # Buy YES
+                b = (1.0 - price) / price
+                q = 1.0 - prob
+                f = (b * prob - q) / b
+                bet_price = price
+                won = outcome == 1
+            else:
+                # Buy NO
+                b = price / (1.0 - price)
+                q = prob
+                f = (b * (1.0 - prob) - q) / b
+                bet_price = 1.0 - price
+                won = outcome == 0
+            f = max(f, 0.0) * kelly_fraction
+            if f < 0.005:  # skip tiny bets
+                continue
+            stake = bankroll * f
+            if won:
+                pnl += stake * (1.0 - bet_price) / bet_price
+            else:
+                pnl -= stake
+            bankroll += pnl * 0.01  # slow bankroll adjustment
 
         results.append({
             "fold": fold,
