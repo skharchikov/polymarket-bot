@@ -30,6 +30,7 @@ pub enum SignalSource {
 }
 
 impl SignalSource {
+    #[allow(dead_code)]
     pub fn label(self) -> &'static str {
         match self {
             Self::XgBoost => "XGBoost Model",
@@ -681,7 +682,7 @@ impl LiveScanner {
         past_bets_summary: &str,
         seen_headlines: &mut std::collections::HashSet<String>,
     ) -> Result<ScanResult> {
-        // Step 1: Fetch all active markets (ALL categories, not just crypto)
+        // Step 1: Fetch all active markets
         let markets = self.fetch_active_markets().await?;
         tracing::info!(total = markets.len(), "Fetched active markets");
 
@@ -707,25 +708,158 @@ impl LiveScanner {
 
         let markets_scanned = eligible.len();
 
-        // Step 2: Fetch breaking news from all sources
+        // If we have a model, use MODEL-FIRST funnel.
+        // Otherwise fall back to NEWS-FIRST funnel (LLM).
+        if self.xgb_model.is_some() {
+            self.scan_model_first(&eligible, skip_market_ids, seen_headlines, markets_scanned)
+                .await
+        } else {
+            self.scan_news_first(
+                &eligible,
+                past_bets_summary,
+                seen_headlines,
+                markets_scanned,
+            )
+            .await
+        }
+    }
+
+    /// MODEL-FIRST funnel: XGBoost on all markets → rank → top N → enrich with news.
+    async fn scan_model_first(
+        &self,
+        eligible: &[GammaMarket],
+        _skip_market_ids: &[String],
+        seen_headlines: &mut std::collections::HashSet<String>,
+        markets_scanned: usize,
+    ) -> Result<ScanResult> {
+        let model = self.xgb_model.as_ref().unwrap();
+        let top_n = self.cfg.max_model_candidates;
+
+        // Step 2: Run XGBoost on ALL eligible markets (instant, free)
+        tracing::info!(
+            count = eligible.len(),
+            "Running XGBoost on all eligible markets"
+        );
+
+        struct ModelCandidate {
+            market: GammaMarket,
+            current_price: f64,
+            xgb_prob: f64,
+            xgb_conf: f64,
+            history: Vec<PriceTick>,
+            book_depth: f64,
+            /// Model score for ranking: |edge| * confidence
+            score: f64,
+        }
+
+        let mut scored: Vec<ModelCandidate> = Vec::new();
+
+        for market in eligible {
+            let current_price = Self::get_yes_price(market).unwrap_or(0.0);
+            let token_id = match market.yes_token_id() {
+                Some(t) => t,
+                None => continue,
+            };
+
+            // Fetch price history (needed for features)
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let history = self
+                .fetch_price_history(&token_id)
+                .await
+                .unwrap_or_default();
+
+            let features = MarketFeatures::from_market_and_history(market, current_price, &history);
+            let feature_vec = features.to_vec();
+            let xgb_prob = model.predict_prob(&feature_vec);
+            let xgb_conf = model.confidence(&feature_vec);
+
+            // Raw edge: how far model disagrees with market
+            let edge = (xgb_prob - current_price).abs();
+            let score = edge * xgb_conf;
+
+            scored.push(ModelCandidate {
+                market: market.clone(),
+                current_price,
+                xgb_prob,
+                xgb_conf,
+                history,
+                book_depth: 0.0, // fetched later for top N
+                score,
+            });
+        }
+
+        // Rank by model score descending
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        tracing::info!(
+            total = scored.len(),
+            top_score = scored
+                .first()
+                .map(|c| format!("{:.3}", c.score))
+                .unwrap_or_default(),
+            "XGBoost scored all markets"
+        );
+
+        // Step 3: Take top N, check liquidity
+        let mut candidates: Vec<ModelCandidate> = Vec::new();
+        for mut c in scored.into_iter().take(top_n * 2) {
+            let token_id = match c.market.yes_token_id() {
+                Some(t) => t,
+                None => continue,
+            };
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let book_depth = self.fetch_book_depth(&token_id).await.unwrap_or(0.0);
+            if book_depth < self.cfg.min_book_depth {
+                tracing::debug!(
+                    market = %c.market.question,
+                    depth = format_args!("${book_depth:.0}"),
+                    "Skipping — thin book"
+                );
+                continue;
+            }
+            c.book_depth = book_depth;
+            candidates.push(c);
+            if candidates.len() >= top_n {
+                break;
+            }
+        }
+
+        if candidates.is_empty() {
+            tracing::info!("No model candidates passed liquidity filter");
+            return Ok(ScanResult {
+                signals: Vec::new(),
+                rejections: Vec::new(),
+                markets_scanned,
+                news_total: 0,
+                news_new: 0,
+                news_matched: 0,
+                llm_assessed: 0,
+                source_counts: Vec::new(),
+            });
+        }
+
+        tracing::info!(
+            count = candidates.len(),
+            "Top model candidates passed liquidity"
+        );
+
+        // Step 4: Fetch news and match to top candidates (boost, not gate)
         let (mut news, source_counts) = self.news.fetch_all().await;
         let news_total = news.len();
 
-        // Drop news older than 4 hours — stale news is already priced in
         let freshness_cutoff = chrono::Utc::now() - chrono::Duration::hours(4);
         news.retain(|item| {
             item.published
                 .map(|p| p >= freshness_cutoff)
-                .unwrap_or(true) // keep items without a date (can't tell age)
+                .unwrap_or(true)
         });
-        tracing::info!(
-            fresh = news.len(),
-            dropped = news_total - news.len(),
-            "Filtered stale news (>4h old)"
-        );
 
-        // Filter out headlines we've already processed in previous cycles
-        let before = news.len();
+        // Dedup seen headlines
         news.retain(|item| {
             let key = item
                 .title
@@ -736,16 +870,6 @@ impl LiveScanner {
                 .collect::<String>();
             !seen_headlines.contains(&key)
         });
-        if before != news.len() {
-            tracing::info!(
-                total = before,
-                new = news.len(),
-                skipped = before - news.len(),
-                "Filtered already-seen headlines"
-            );
-        }
-
-        // Remember these headlines for next cycle
         for item in &news {
             let key = item
                 .title
@@ -756,8 +880,7 @@ impl LiveScanner {
                 .collect::<String>();
             seen_headlines.insert(key);
         }
-
-        // Prune seen set if it grows too large (keep last ~2000)
+        // Prune seen set
         if seen_headlines.len() > 3000 {
             let drain_count = seen_headlines.len() - 2000;
             let keys: Vec<String> = seen_headlines.iter().take(drain_count).cloned().collect();
@@ -765,7 +888,282 @@ impl LiveScanner {
                 seen_headlines.remove(&k);
             }
         }
+        let news_new = news.len();
 
+        // Match news to candidate markets only (not all eligible — saves embedding cost)
+        let candidate_markets: Vec<GammaMarket> =
+            candidates.iter().map(|c| c.market.clone()).collect();
+        let news_matches = if !news.is_empty() {
+            self.news
+                .match_to_markets(&news, &candidate_markets)
+                .await
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        // Build lookup: market_id → matched news
+        let mut news_by_market: std::collections::HashMap<String, &NewsMatch> =
+            std::collections::HashMap::new();
+        for nm in &news_matches {
+            news_by_market.insert(nm.market.market_id.clone(), nm);
+        }
+
+        let news_matched = news_matches.len();
+
+        tracing::info!(
+            news_total,
+            news_new,
+            news_matched,
+            "News fetched and matched to top candidates"
+        );
+
+        // Step 5: Build signals from model candidates + optional news boost
+        let mut signals = Vec::new();
+        let mut rejections = Vec::new();
+
+        for c in &candidates {
+            let now = chrono::Utc::now();
+
+            // Check if we have matched news for this market
+            let (news_count, best_news_score, avg_news_age_hours, matched_news) =
+                if let Some(nm) = news_by_market.get(&c.market.market_id) {
+                    let age = if nm.news.is_empty() {
+                        0.0
+                    } else {
+                        let total: f64 = nm
+                            .news
+                            .iter()
+                            .map(|n| {
+                                n.published
+                                    .map(|p| (now - p).num_minutes() as f64 / 60.0)
+                                    .unwrap_or(4.0)
+                            })
+                            .sum();
+                        total / nm.news.len() as f64
+                    };
+                    (nm.news.len(), nm.relevance_score, age, nm.news.clone())
+                } else {
+                    (0, 0.0, 0.0, Vec::new())
+                };
+
+            // Re-run model with news features if news available
+            let (xgb_prob, xgb_conf) = if news_count > 0 {
+                let features = MarketFeatures::from_market_and_news(
+                    &c.market,
+                    c.current_price,
+                    &c.history,
+                    news_count,
+                    best_news_score,
+                    avg_news_age_hours,
+                );
+                let fv = features.to_vec();
+                (model.predict_prob(&fv), model.confidence(&fv))
+            } else {
+                (c.xgb_prob, c.xgb_conf)
+            };
+
+            let lr = if c.current_price > 0.01 && c.current_price < 0.99 {
+                (xgb_prob / c.current_price) / ((1.0 - xgb_prob) / (1.0 - c.current_price))
+            } else {
+                1.0
+            };
+
+            let reasoning = if news_count > 0 {
+                format!(
+                    "XGBoost: {:.1}% (market {:.1}%, {} news matched)",
+                    xgb_prob * 100.0,
+                    c.current_price * 100.0,
+                    news_count,
+                )
+            } else {
+                format!(
+                    "XGBoost: {:.1}% (market {:.1}%)",
+                    xgb_prob * 100.0,
+                    c.current_price * 100.0,
+                )
+            };
+
+            tracing::info!(
+                market = %c.market.question,
+                xgb_prob = format_args!("{:.1}%", xgb_prob * 100.0),
+                xgb_conf = format_args!("{:.0}%", xgb_conf * 100.0),
+                price = format_args!("{:.1}%", c.current_price * 100.0),
+                news = news_count,
+                "Model candidate"
+            );
+
+            // Compute edge
+            let estimate = BayesianEstimate {
+                prior: c.current_price,
+                posterior: xgb_prob,
+                combined_lr: 0.0,
+                confidence: xgb_conf,
+                reasoning: reasoning.clone(),
+            };
+            let (side, edge, bet_price, bet_prob) =
+                match bayesian::compute_edge(&estimate, c.current_price) {
+                    Some((true, e, p, pr)) => (BetSide::Yes, e, p, pr),
+                    Some((false, e, p, pr)) => (BetSide::No, e, p, pr),
+                    None => {
+                        rejections.push(RejectedSignal {
+                            market_id: c.market.market_id.clone(),
+                            question: c.market.question.clone(),
+                            reason: format!(
+                                "no edge (prob {:.0}% ~ price {:.0}%)",
+                                xgb_prob * 100.0,
+                                c.current_price * 100.0
+                            ),
+                            current_price: Some(c.current_price),
+                            estimated_prob: Some(xgb_prob),
+                            edge: None,
+                            confidence: Some(xgb_conf),
+                            combined_lr: Some(lr),
+                        });
+                        continue;
+                    }
+                };
+
+            let kelly_size = fractional_kelly(bet_prob, bet_price, 1.0);
+            let effective_edge = edge * xgb_conf;
+
+            let reject = |reason: String| RejectedSignal {
+                market_id: c.market.market_id.clone(),
+                question: c.market.question.clone(),
+                reason,
+                current_price: Some(c.current_price),
+                estimated_prob: Some(xgb_prob),
+                edge: Some(edge),
+                confidence: Some(xgb_conf),
+                combined_lr: Some(lr),
+            };
+
+            // Gate thresholds (XGBoost — trusted)
+            if effective_edge < 0.02 {
+                rejections.push(reject(format!(
+                    "edge {:.1}% < 2.0%",
+                    effective_edge * 100.0,
+                )));
+                continue;
+            }
+            if kelly_size <= 0.003 {
+                rejections.push(reject(format!("kelly {:.3} < 0.003", kelly_size)));
+                continue;
+            }
+            if xgb_conf < 0.25 {
+                rejections.push(reject(format!("conf {:.0}% < 25%", xgb_conf * 100.0,)));
+                continue;
+            }
+
+            tracing::info!(
+                market = %c.market.question,
+                side = %side,
+                eff_edge = format_args!("+{:.1}%", effective_edge * 100.0),
+                kelly = format_args!("{:.1}%", kelly_size * 100.0),
+                conf = format_args!("{:.0}%", xgb_conf * 100.0),
+                news = news_count,
+                "ACCEPTED — model signal"
+            );
+
+            let news_headlines: Vec<String> =
+                matched_news.iter().map(|n| n.title.clone()).collect();
+            signals.push(Signal {
+                market_id: c.market.market_id.clone(),
+                question: c.market.question.clone(),
+                side,
+                current_price: bet_price,
+                estimated_prob: bet_prob,
+                confidence: xgb_conf,
+                edge,
+                kelly_size,
+                reasoning,
+                end_date: c.market.end_date.clone(),
+                volume: c.market.volume_num,
+                polymarket_url: c.market.polymarket_url(),
+                prior: c.current_price,
+                combined_lr: lr,
+                news_matched_count: news_count,
+                source: SignalSource::XgBoost,
+                context: BetContext {
+                    btc_price: 0.0,
+                    eth_price: 0.0,
+                    sol_price: 0.0,
+                    btc_24h_change: 0.0,
+                    btc_funding_rate: 0.0,
+                    btc_open_interest: 0.0,
+                    fear_greed: String::new(),
+                    book_depth: c.book_depth,
+                    news_headlines,
+                },
+            });
+        }
+
+        signals.sort_by(|a, b| b.score().partial_cmp(&a.score()).unwrap());
+
+        tracing::info!(
+            signals = signals.len(),
+            rejections = rejections.len(),
+            "Final model-first signals"
+        );
+        Ok(ScanResult {
+            signals,
+            rejections,
+            markets_scanned,
+            news_total,
+            news_new,
+            news_matched,
+            llm_assessed: candidates.len(),
+            source_counts,
+        })
+    }
+
+    /// NEWS-FIRST funnel (fallback when no XGBoost model): news → match → LLM → bet.
+    async fn scan_news_first(
+        &self,
+        eligible: &[GammaMarket],
+        past_bets_summary: &str,
+        seen_headlines: &mut std::collections::HashSet<String>,
+        markets_scanned: usize,
+    ) -> Result<ScanResult> {
+        // Fetch news
+        let (mut news, source_counts) = self.news.fetch_all().await;
+        let news_total = news.len();
+
+        let freshness_cutoff = chrono::Utc::now() - chrono::Duration::hours(4);
+        news.retain(|item| {
+            item.published
+                .map(|p| p >= freshness_cutoff)
+                .unwrap_or(true)
+        });
+
+        // Dedup seen headlines
+        news.retain(|item| {
+            let key = item
+                .title
+                .to_lowercase()
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .take(60)
+                .collect::<String>();
+            !seen_headlines.contains(&key)
+        });
+        for item in &news {
+            let key = item
+                .title
+                .to_lowercase()
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .take(60)
+                .collect::<String>();
+            seen_headlines.insert(key);
+        }
+        if seen_headlines.len() > 3000 {
+            let drain_count = seen_headlines.len() - 2000;
+            let keys: Vec<String> = seen_headlines.iter().take(drain_count).cloned().collect();
+            for k in keys {
+                seen_headlines.remove(&k);
+            }
+        }
         let news_new = news.len();
 
         if news.is_empty() {
@@ -782,14 +1180,8 @@ impl LiveScanner {
             });
         }
 
-        // Step 3: Match news to markets by semantic similarity (OpenAI embeddings)
-        let matches = self.news.match_to_markets(&news, &eligible).await?;
-
-        tracing::info!(
-            matched = matches.len(),
-            "Markets matched with relevant news"
-        );
-
+        // Match news to markets
+        let matches = self.news.match_to_markets(&news, eligible).await?;
         let news_matched = matches.len();
 
         if matches.is_empty() {
@@ -805,27 +1197,18 @@ impl LiveScanner {
             });
         }
 
-        // Step 4: For top matches, check book depth and get price history
+        // Fetch depth + history for top matches
         let mut candidates: Vec<(NewsMatch, f64, String, Vec<PriceTick>, f64)> = Vec::new();
-
         for nm in matches.iter().take(self.cfg.max_llm_candidates * 2) {
             let token_id = nm.market.yes_token_id().unwrap();
             let current_price = Self::get_yes_price(&nm.market).unwrap_or(0.0);
 
-            // Check liquidity
             tokio::time::sleep(Duration::from_millis(100)).await;
             let book_depth = self.fetch_book_depth(&token_id).await.unwrap_or(0.0);
-
             if book_depth < self.cfg.min_book_depth {
-                tracing::debug!(
-                    market = %nm.market.question,
-                    depth = format_args!("${book_depth:.0}"),
-                    "Skipping — thin book"
-                );
                 continue;
             }
 
-            // Get price history for context
             tokio::time::sleep(Duration::from_millis(100)).await;
             let history = self
                 .fetch_price_history(&token_id)
@@ -840,14 +1223,12 @@ impl LiveScanner {
                 history,
                 book_depth,
             ));
-
             if candidates.len() >= self.cfg.max_llm_candidates {
                 break;
             }
         }
 
         if candidates.is_empty() {
-            tracing::info!("No news-matched markets passed liquidity filter");
             return Ok(ScanResult {
                 signals: Vec::new(),
                 rejections: Vec::new(),
@@ -860,148 +1241,57 @@ impl LiveScanner {
             });
         }
 
-        let has_model = self.xgb_model.is_some();
-        tracing::info!(
-            count = candidates.len(),
-            xgb = has_model,
-            "Assessing candidates{}",
-            if has_model {
-                " (XGBoost + LLM)"
-            } else {
-                " (LLM only)"
-            }
-        );
+        tracing::info!(count = candidates.len(), "Assessing candidates (LLM only)");
 
-        // Step 5: Assess each candidate — XGBoost instant, LLM as fallback/comparison
+        // LLM assessment for each candidate
         let mut signals = Vec::new();
         let mut rejections = Vec::new();
 
-        for (i, (nm, current_price, history_summary, history, book_depth)) in
+        for (i, (nm, current_price, history_summary, _history, book_depth)) in
             candidates.iter().enumerate()
         {
-            // Compute news features from matched articles
-            let news_count = nm.news.len();
-            let best_news_score = nm.relevance_score;
-            let now = chrono::Utc::now();
-            let avg_news_age_hours = if nm.news.is_empty() {
-                0.0
-            } else {
-                let total_hours: f64 = nm
-                    .news
-                    .iter()
-                    .map(|n| {
-                        n.published
-                            .map(|p| (now - p).num_minutes() as f64 / 60.0)
-                            .unwrap_or(4.0)
-                    })
-                    .sum();
-                total_hours / nm.news.len() as f64
-            };
-
-            // --- XGBoost prediction (instant, free) ---
-            let xgb_estimate = self.xgb_model.as_ref().map(|model| {
-                let features = MarketFeatures::from_market_and_news(
-                    &nm.market,
-                    *current_price,
-                    history,
-                    news_count,
-                    best_news_score,
-                    avg_news_age_hours,
-                );
-                let feature_vec = features.to_vec();
-                let xgb_prob = model.predict_prob(&feature_vec);
-                let xgb_conf = model.confidence(&feature_vec);
-                (xgb_prob, xgb_conf)
-            });
-
-            if let Some((xgb_prob, xgb_conf)) = xgb_estimate {
-                tracing::info!(
-                    market = %nm.market.question,
-                    xgb_prob = format_args!("{:.1}%", xgb_prob * 100.0),
-                    xgb_conf = format_args!("{:.0}%", xgb_conf * 100.0),
-                    price = format_args!("{:.1}%", current_price * 100.0),
-                    news = news_count,
-                    "XGBoost prediction"
-                );
+            if i > 0 {
+                tracing::info!("Waiting 21s for rate limit...");
+                tokio::time::sleep(Duration::from_secs(21)).await;
             }
 
-            // --- Signal source: XGBoost primary, LLM fallback ---
-            let (prob, confidence, combined_lr, reasoning, source) = if let Some((
-                xgb_prob,
-                xgb_conf,
-            )) = xgb_estimate
-            {
-                // Use XGBoost as primary; construct a synthetic LR from the probability shift
-                let lr = if *current_price > 0.01 && *current_price < 0.99 {
-                    (xgb_prob / *current_price) / ((1.0 - xgb_prob) / (1.0 - *current_price))
-                } else {
-                    1.0
-                };
-                (
-                    xgb_prob,
-                    xgb_conf,
-                    lr,
-                    format!(
-                        "XGBoost: {:.1}% (market {:.1}%, {} news)",
-                        xgb_prob * 100.0,
-                        current_price * 100.0,
-                        news_count
-                    ),
-                    SignalSource::XgBoost,
+            let (prob, confidence, combined_lr, reasoning) = match self
+                .assess_news_impact(
+                    &nm.market,
+                    *current_price,
+                    &nm.news,
+                    history_summary,
+                    past_bets_summary,
                 )
-            } else {
-                // No model — fall back to LLM for news assessment only
-                if i > 0 {
-                    tracing::info!("Waiting 21s for rate limit between candidates...");
-                    tokio::time::sleep(Duration::from_secs(21)).await;
-                }
-
-                match self
-                    .assess_news_impact(
-                        &nm.market,
-                        *current_price,
-                        &nm.news,
-                        history_summary,
-                        past_bets_summary,
-                    )
-                    .await
-                {
-                    Ok(r) => (r.0, r.1, r.2, r.3, SignalSource::LlmConsensus),
-                    Err(e) => {
-                        tracing::warn!(market = %nm.market.market_id, err = %e, "LLM assessment failed");
-                        continue;
-                    }
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(market = %nm.market.market_id, err = %e, "LLM failed");
+                    continue;
                 }
             };
 
-            // Determine best side using Bayesian edge computation
             let estimate = BayesianEstimate {
                 prior: *current_price,
                 posterior: prob,
-                combined_lr: 0.0, // not needed for edge calc
+                combined_lr: 0.0,
                 confidence,
                 reasoning: reasoning.clone(),
             };
             let (side, edge, bet_price, bet_prob) =
                 match bayesian::compute_edge(&estimate, *current_price) {
-                    Some((true, edge, price, prob)) => (BetSide::Yes, edge, price, prob),
-                    Some((false, edge, price, prob)) => (BetSide::No, edge, price, prob),
+                    Some((true, e, p, pr)) => (BetSide::Yes, e, p, pr),
+                    Some((false, e, p, pr)) => (BetSide::No, e, p, pr),
                     None => {
-                        let reason = format!(
-                            "no edge (prob {:.0}% ~ price {:.0}%)",
-                            prob * 100.0,
-                            current_price * 100.0
-                        );
-                        tracing::info!(
-                            market = %nm.market.question,
-                            prob = format_args!("{:.1}%", prob * 100.0),
-                            price = format_args!("{:.1}%", current_price * 100.0),
-                            "No edge on either side"
-                        );
                         rejections.push(RejectedSignal {
                             market_id: nm.market.market_id.clone(),
                             question: nm.market.question.clone(),
-                            reason,
+                            reason: format!(
+                                "no edge (prob {:.0}% ~ price {:.0}%)",
+                                prob * 100.0,
+                                current_price * 100.0
+                            ),
                             current_price: Some(*current_price),
                             estimated_prob: Some(prob),
                             edge: None,
@@ -1012,85 +1302,28 @@ impl LiveScanner {
                     }
                 };
 
-            // Use full Kelly here; each strategy will scale by its own fraction
             let kelly_size = fractional_kelly(bet_prob, bet_price, 1.0);
             let effective_edge = edge * confidence;
 
-            let news_titles: Vec<&str> = nm.news.iter().map(|n| n.title.as_str()).collect();
-            tracing::info!(
-                market = %nm.market.question,
-                side = %side,
-                price = format_args!("{:.1}%", bet_price * 100.0),
-                prob = format_args!("{:.1}%", prob * 100.0),
-                edge = format_args!("+{:.1}%", edge * 100.0),
-                eff_edge = format_args!("+{:.1}%", effective_edge * 100.0),
-                conf = format_args!("{:.0}%", confidence * 100.0),
-                news = ?news_titles,
-                "Signal candidate"
-            );
-
-            let reject = |reason: String| RejectedSignal {
-                market_id: nm.market.market_id.clone(),
-                question: nm.market.question.clone(),
-                reason,
-                current_price: Some(*current_price),
-                estimated_prob: Some(prob),
-                edge: Some(edge),
-                confidence: Some(confidence),
-                combined_lr: Some(combined_lr),
-            };
-
-            // Gate thresholds: trust XGBoost more (lower edge gate, lower confidence floor)
-            let (min_edge, min_kelly, min_conf) = match source {
-                SignalSource::XgBoost => (0.02, 0.003, 0.25),
-                SignalSource::LlmConsensus => (0.03, 0.005, 0.30),
-            };
-
-            if effective_edge < min_edge {
-                let reason = format!(
-                    "edge {:.1}% < {:.0}%",
-                    effective_edge * 100.0,
-                    min_edge * 100.0
-                );
-                tracing::info!(
-                    market = %nm.market.question,
-                    eff_edge = format_args!("+{:.1}%", effective_edge * 100.0),
-                    source = source.label(),
-                    "REJECTED: effective edge below gate"
-                );
-                rejections.push(reject(reason));
+            // LLM gate thresholds (stricter)
+            if effective_edge < 0.03 || kelly_size <= 0.005 || confidence < 0.30 {
+                rejections.push(RejectedSignal {
+                    market_id: nm.market.market_id.clone(),
+                    question: nm.market.question.clone(),
+                    reason: format!(
+                        "LLM gate: edge={:.1}% kelly={:.3} conf={:.0}%",
+                        effective_edge * 100.0,
+                        kelly_size,
+                        confidence * 100.0,
+                    ),
+                    current_price: Some(*current_price),
+                    estimated_prob: Some(prob),
+                    edge: Some(edge),
+                    confidence: Some(confidence),
+                    combined_lr: Some(combined_lr),
+                });
                 continue;
             }
-            if kelly_size <= min_kelly {
-                let reason = format!("kelly {:.3} < {:.3}", kelly_size, min_kelly);
-                tracing::info!(
-                    market = %nm.market.question,
-                    kelly = format_args!("{:.3}", kelly_size),
-                    "REJECTED: full Kelly too small"
-                );
-                rejections.push(reject(reason));
-                continue;
-            }
-            if confidence < min_conf {
-                let reason = format!("conf {:.0}% < {:.0}%", confidence * 100.0, min_conf * 100.0);
-                tracing::info!(
-                    market = %nm.market.question,
-                    conf = format_args!("{:.0}%", confidence * 100.0),
-                    "REJECTED: confidence below gate"
-                );
-                rejections.push(reject(reason));
-                continue;
-            }
-
-            tracing::info!(
-                market = %nm.market.question,
-                side = %side,
-                eff_edge = format_args!("+{:.1}%", effective_edge * 100.0),
-                kelly = format_args!("{:.1}%", kelly_size * 100.0),
-                conf = format_args!("{:.0}%", confidence * 100.0),
-                source = source.label(),
-                "ACCEPTED as signal — passing to strategies"
-            );
 
             let news_headlines: Vec<String> = nm.news.iter().map(|n| n.title.clone()).collect();
             signals.push(Signal {
@@ -1109,7 +1342,7 @@ impl LiveScanner {
                 prior: *current_price,
                 combined_lr,
                 news_matched_count: nm.news.len(),
-                source,
+                source: SignalSource::LlmConsensus,
                 context: BetContext {
                     btc_price: 0.0,
                     eth_price: 0.0,
@@ -1126,13 +1359,6 @@ impl LiveScanner {
 
         signals.sort_by(|a, b| b.score().partial_cmp(&a.score()).unwrap());
 
-        let llm_assessed = candidates.len();
-
-        tracing::info!(
-            signals = signals.len(),
-            rejections = rejections.len(),
-            "Final news-driven signals"
-        );
         Ok(ScanResult {
             signals,
             rejections,
@@ -1140,7 +1366,7 @@ impl LiveScanner {
             news_total,
             news_new,
             news_matched,
-            llm_assessed,
+            llm_assessed: candidates.len(),
             source_counts,
         })
     }
