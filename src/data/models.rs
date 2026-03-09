@@ -68,6 +68,13 @@ pub struct GammaMarket {
     pub one_day_price_change: Option<f64>,
     #[serde(default)]
     pub one_week_price_change: Option<f64>,
+    #[serde(default)]
+    pub events: Vec<GammaEvent>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GammaEvent {
+    pub slug: String,
 }
 
 impl GammaMarket {
@@ -111,9 +118,15 @@ impl GammaMarket {
     }
 
     pub fn polymarket_url(&self) -> String {
-        match &self.slug {
-            Some(slug) => format!("https://polymarket.com/event/{slug}"),
-            None => format!("https://polymarket.com/event/{}", self.market_id),
+        let event_slug = self.events.first().map(|e| e.slug.as_str());
+        let market_slug = self.slug.as_deref();
+        match (event_slug, market_slug) {
+            (Some(ev), Some(mk)) => {
+                format!("https://polymarket.com/event/{ev}/{mk}")
+            }
+            (Some(ev), None) => format!("https://polymarket.com/event/{ev}"),
+            (None, Some(slug)) => format!("https://polymarket.com/event/{slug}"),
+            (None, None) => format!("https://polymarket.com/event/{}", self.market_id),
         }
     }
 
