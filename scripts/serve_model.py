@@ -18,6 +18,7 @@ from pathlib import Path
 
 import joblib
 import numpy as np
+import pandas as pd
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -27,6 +28,14 @@ log = logging.getLogger("sidecar")
 MODEL_DIR = os.environ.get("MODEL_DIR", "/model")
 MODEL_PATH = Path(MODEL_DIR) / "ensemble.joblib"
 SCALER_PATH = Path(MODEL_DIR) / "scaler.joblib"
+
+FEATURE_NAMES = [
+    "yes_price", "momentum_1h", "momentum_24h", "volatility_24h", "rsi",
+    "log_volume", "log_liquidity", "days_to_expiry",
+    "is_crypto", "is_politics", "is_sports",
+    "news_count", "best_news_score", "avg_news_age_hours",
+    "order_imbalance", "spread", "price_change_1d", "price_change_1w",
+]
 
 app = FastAPI(title="Polymarket ML Sidecar")
 
@@ -105,12 +114,12 @@ def predict(req: PredictRequest):
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
-    features = np.array(req.features, dtype=np.float64).reshape(1, -1)
+    features = pd.DataFrame([req.features], columns=FEATURE_NAMES, dtype=np.float64)
     if scaler is not None:
-        features = scaler.transform(features)
+        features = pd.DataFrame(scaler.transform(features), columns=FEATURE_NAMES)
 
     prob = float(model.predict_proba(features)[0, 1])
-    confidence = _estimate_confidence(features)
+    confidence = _estimate_confidence(features.values)
 
     log.info(
         "predict  price=%.1f%% → prob=%.1f%% conf=%.0f%% edge=%+.1f%%",
@@ -130,12 +139,12 @@ def predict_batch(req: PredictBatchRequest):
     if not req.items:
         return BatchResponse(predictions=[])
 
-    features = np.array([item.features for item in req.items], dtype=np.float64)
+    features = pd.DataFrame([item.features for item in req.items], columns=FEATURE_NAMES, dtype=np.float64)
     if scaler is not None:
-        features = scaler.transform(features)
+        features = pd.DataFrame(scaler.transform(features), columns=FEATURE_NAMES)
 
     probs = model.predict_proba(features)[:, 1]
-    confidences = [_estimate_confidence(features[i : i + 1]) for i in range(len(features))]
+    confidences = [_estimate_confidence(features.values[i : i + 1]) for i in range(len(features))]
     market_prices = [item.market_price for item in req.items]
 
     for price, prob, conf in zip(market_prices, probs, confidences):
