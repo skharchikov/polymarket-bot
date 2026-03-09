@@ -40,7 +40,10 @@ RUN apk update && apk upgrade --no-cache && \
       bot
 
 COPY --from=builder /app/target/release/polymarket-bot /bin/polymarket-bot
-COPY model/xgb_model.json model/xgb_model.scaler.json model/xgb_model.meta.json /app/model/
+
+# Model files are optional — sidecar serves the full ensemble at runtime.
+# Local XGBoost is kept as fallback; files come from the shared Docker volume.
+RUN mkdir -p /app/model
 
 USER bot:bot
 WORKDIR /app
