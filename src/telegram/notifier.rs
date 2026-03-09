@@ -49,12 +49,15 @@ impl TelegramNotifier {
     pub async fn send_to(&self, chat_id: &str, message: &str) -> Result<()> {
         let url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
 
+        let full_message =
+            format!("{message}\n\n_This is not financial advice. Do your own research._");
+
         let resp = self
             .client
             .post(&url)
             .json(&serde_json::json!({
                 "chat_id": chat_id,
-                "text": message,
+                "text": full_message,
                 "parse_mode": "Markdown",
                 "disable_web_page_preview": true,
             }))

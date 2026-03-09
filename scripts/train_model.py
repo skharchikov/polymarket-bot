@@ -218,11 +218,13 @@ def evaluate_folds(model, X, y, prices, n_splits=5):
         edges = probs - p_test
         avg_edge = float(np.mean(edges))
 
-        # Simulated P&L using Kelly sizing (matches Rust bot)
+        # Simulated P&L using flat Kelly sizing (matches Rust bot)
+        # Rust bot uses flat €300 bankroll per strategy, not compounding.
         # Kelly: f = (b*p - q) / b  where b = (1-price)/price
-        pnl = 0.0
         kelly_fraction = 0.25  # quarter-Kelly, same as balanced strategy
-        bankroll = 300.0  # starting bankroll per strategy
+        bankroll = 300.0  # flat bankroll — does NOT compound
+        pnl = 0.0
+        n_bets = 0
         for prob, price, outcome in zip(probs, p_test, y_test):
             if price <= 0.01 or price >= 0.99:
                 continue
@@ -244,12 +246,12 @@ def evaluate_folds(model, X, y, prices, n_splits=5):
             f = max(f, 0.0) * kelly_fraction
             if f < 0.005:  # skip tiny bets
                 continue
-            stake = bankroll * f
+            stake = bankroll * f  # always size from flat bankroll
             if won:
                 pnl += stake * (1.0 - bet_price) / bet_price
             else:
                 pnl -= stake
-            bankroll += pnl * 0.01  # slow bankroll adjustment
+            n_bets += 1
 
         results.append({
             "fold": fold,
@@ -259,11 +261,14 @@ def evaluate_folds(model, X, y, prices, n_splits=5):
             "f1": f1,
             "avg_edge": avg_edge,
             "sim_pnl": pnl,
+            "final_bankroll": bankroll,
+            "n_bets": n_bets,
             "n_test": len(test_idx),
         })
 
         print(f"  Fold {fold}: Brier={brier:.4f} LogLoss={ll:.4f} "
-              f"Acc={acc:.1%} F1={f1:.2f} Edge={avg_edge:+.4f} PnL={pnl:+.2f}")
+              f"Acc={acc:.1%} F1={f1:.2f} Edge={avg_edge:+.4f} "
+              f"PnL=€{pnl:+.2f} ({n_bets} bets, final €{bankroll:.2f})")
 
     return results
 
@@ -404,8 +409,10 @@ def main():
 
     avg_brier = np.mean([r["brier"] for r in results])
     avg_edge = np.mean([r["avg_edge"] for r in results])
-    total_pnl = sum(r["sim_pnl"] for r in results)
-    print(f"\nAvg Brier: {avg_brier:.4f} | Avg Edge: {avg_edge:+.4f} | Total sim PnL: {total_pnl:+.2f}")
+    avg_pnl = np.mean([r["sim_pnl"] for r in results])
+    total_bets = sum(r["n_bets"] for r in results)
+    print(f"\nAvg Brier: {avg_brier:.4f} | Avg Edge: {avg_edge:+.4f} | "
+          f"Avg PnL per fold: €{avg_pnl:+.2f} | Total bets: {total_bets}")
 
     # Train final model on all data with calibration
     print("\nTraining final model on all data...")

@@ -61,6 +61,10 @@ pub struct AppConfig {
     #[config(env = "MAX_LLM_CANDIDATES", default = 1)]
     pub max_llm_candidates: usize,
 
+    /// Top N markets from XGBoost ranking to consider for betting.
+    #[config(env = "MAX_MODEL_CANDIDATES", default = 15)]
+    pub max_model_candidates: usize,
+
     /// Minimum effective edge (edge * confidence) to emit a signal.
     #[config(env = "MIN_EFFECTIVE_EDGE", default = 0.08)]
     pub min_effective_edge: f64,
