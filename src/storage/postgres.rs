@@ -329,6 +329,9 @@ impl PgPortfolio {
 
     /// Build a summary of open bets for /open command.
     pub async fn open_bets_summary(&self) -> Result<String> {
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()?;
         let open = self.open_bets().await?;
         if open.is_empty() {
             return Ok("📭 No open bets".to_string());
@@ -336,6 +339,8 @@ impl PgPortfolio {
 
         let mut lines = Vec::new();
         let mut total_cost = 0.0_f64;
+
+        let mut total_unrealized = 0.0_f64;
 
         for bet in &open {
             let age_days = (Utc::now() - bet.placed_at).num_hours() as f64 / 24.0;
@@ -345,19 +350,93 @@ impl PgPortfolio {
                 "conservative" => "🛡️",
                 _ => "📊",
             };
+            let side_emoji = match bet.side {
+                BetSide::Yes => "🟢 YES",
+                BetSide::No => "🔴 NO",
+            };
+            let source_icon = if bet.source == "xgboost" {
+                "🤖"
+            } else {
+                "🧠"
+            };
+            let expires = bet
+                .end_date
+                .as_ref()
+                .and_then(|d| {
+                    chrono::DateTime::parse_from_rfc3339(d)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .or_else(|_| {
+                            chrono::NaiveDateTime::parse_from_str(d, "%Y-%m-%dT%H:%M:%SZ")
+                                .map(|n| n.and_utc())
+                        })
+                        .ok()
+                })
+                .map(|dt| {
+                    let days_left = (dt - Utc::now()).num_days();
+                    format!("{days_left}d left")
+                })
+                .unwrap_or_default();
+
+            // Fetch current price for unrealized PnL
+            let current_yes: Option<f64> = async {
+                let url = format!("https://gamma-api.polymarket.com/markets/{}", bet.market_id);
+                let text = http.get(&url).send().await.ok()?.text().await.ok()?;
+                let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+                let prices_str = v["outcomePrices"].as_str()?;
+                let prices: Vec<String> = serde_json::from_str(prices_str).ok()?;
+                prices.first()?.parse::<f64>().ok()
+            }
+            .await;
+
+            let pnl_str = if let Some(yes_price) = current_yes {
+                let current = match bet.side {
+                    BetSide::Yes => yes_price,
+                    BetSide::No => 1.0 - yes_price,
+                };
+                let current_value = bet.shares * current;
+                let unrealized = current_value - bet.cost;
+                total_unrealized += unrealized;
+                let pnl_pct = if bet.cost > 0.0 {
+                    unrealized / bet.cost * 100.0
+                } else {
+                    0.0
+                };
+                format!(
+                    " | PnL `€{unrealized:+.2}` ({pnl_pct:+.0}%) @ `{cur:.1}¢`",
+                    cur = current * 100.0
+                )
+            } else {
+                String::new()
+            };
+
             total_cost += bet.cost;
             lines.push(format!(
-                "{label} `€{cost:.2}` @ `{price:.1}¢` ({age:.0}d)\n\u{00a0}\u{00a0}{q}",
+                "{label} *{side}* `€{cost:.2}` → {shares:.1} shares @ `{price:.1}¢`\n\
+                 \u{00a0}\u{00a0}📋 _{q}_\n\
+                 \u{00a0}\u{00a0}{src} Edge: `{edge:+.1}%` | Conf: `{conf:.0}%`{pnl}\n\
+                 \u{00a0}\u{00a0}⏰ {expires} ({age:.0}d ago)",
+                side = side_emoji,
                 cost = bet.cost,
+                shares = bet.shares,
                 price = bet.entry_price * 100.0,
-                age = age_days,
                 q = truncate(&bet.question, 50),
+                src = source_icon,
+                edge = bet.edge * 100.0,
+                conf = bet.confidence * 100.0,
+                pnl = pnl_str,
+                age = age_days,
             ));
         }
 
+        let unrealized_pct = if total_cost > 0.0 {
+            total_unrealized / total_cost * 100.0
+        } else {
+            0.0
+        };
+
         Ok(format!(
             "🔓 *Open Bets* ({count})\n\
-             💰 Total at risk: `€{total_cost:.2}`\n\n\
+             💰 At risk: `€{total_cost:.2}` | Unrealized: `€{total_unrealized:+.2}` ({unrealized_pct:+.1}%)\n\n\
              {details}",
             count = open.len(),
             details = lines.join("\n\n"),
