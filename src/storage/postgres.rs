@@ -68,6 +68,11 @@ impl PgPortfolio {
             .execute(&self.pool)
             .await
             .context("failed to run prediction_log migration")?;
+        let bet_source = include_str!("../../migrations/009_bet_source.sql");
+        sqlx::raw_sql(bet_source)
+            .execute(&self.pool)
+            .await
+            .context("failed to run bet_source migration")?;
         Ok(())
     }
 
@@ -324,12 +329,39 @@ impl PgPortfolio {
             0.0
         };
 
+        // Per-source breakdown
+        let all_resolved: Vec<&Bet> = resolved.iter().collect();
+        let mut source_lines = Vec::new();
+        for src in &["xgboost", "llm_consensus"] {
+            let src_bets: Vec<_> = all_resolved.iter().filter(|b| b.source == *src).collect();
+            if src_bets.is_empty() {
+                continue;
+            }
+            let src_wins = src_bets.iter().filter(|b| b.won == Some(true)).count();
+            let src_losses = src_bets.iter().filter(|b| b.won == Some(false)).count();
+            let src_pnl: f64 = src_bets.iter().filter_map(|b| b.pnl).sum();
+            let src_wr = if src_wins + src_losses > 0 {
+                src_wins as f64 / (src_wins + src_losses) as f64 * 100.0
+            } else {
+                0.0
+            };
+            let label = if *src == "xgboost" { "🤖" } else { "🧠" };
+            source_lines.push(format!(
+                "{label} *{src}*: {src_wins}W/{src_losses}L ({src_wr:.0}%) | PnL `€{src_pnl:+.2}`",
+            ));
+        }
+        let source_section = if source_lines.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n📡 *By Source*\n{}", source_lines.join("\n"))
+        };
+
         Ok(format!(
             "📊 *Bot Statistics*\n\n\
              💰 Bankroll: `€{total_bankroll:.2}` (started: `€{starting:.2}`)\n\
              💵 PnL: `€{total_pnl:+.2}` | ROI: `{total_roi:+.1}%`\n\
              📋 {total_wins}W / {total_losses}L ({total_wr:.0}%) | {total_open} open\n\n\
-             {strat_details}",
+             {strat_details}{source_section}",
             strat_details = strat_lines.join("\n\n"),
         ))
     }
@@ -581,8 +613,8 @@ impl PgPortfolio {
 
         let row: (i32,) = sqlx::query_as(
             "INSERT INTO bets (market_id, question, side, entry_price, slipped_price, shares, cost, fee_paid, \
-             estimated_prob, confidence, edge, kelly_size, reasoning, end_date, context, strategy) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id",
+             estimated_prob, confidence, edge, kelly_size, reasoning, end_date, context, strategy, source) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id",
         )
         .bind(&bet.market_id)
         .bind(&bet.question)
@@ -600,6 +632,7 @@ impl PgPortfolio {
         .bind(bet.end_date.as_deref())
         .bind(ctx_json)
         .bind(&bet.strategy)
+        .bind(&bet.source)
         .fetch_one(&self.pool)
         .await?;
 
@@ -1008,6 +1041,7 @@ struct BetRow {
     end_date: Option<String>,
     context: Option<serde_json::Value>,
     strategy: String,
+    source: String,
     placed_at: DateTime<Utc>,
     resolved: bool,
     won: Option<bool>,
@@ -1042,6 +1076,7 @@ impl BetRow {
             end_date: self.end_date,
             context,
             strategy: self.strategy,
+            source: self.source,
             placed_at: self.placed_at,
             resolved: self.resolved,
             won: self.won,

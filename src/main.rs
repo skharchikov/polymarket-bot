@@ -685,6 +685,10 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                             continue;
                         }
 
+                        let source_str = match signal.source {
+                            SignalSource::XgBoost => "xgboost",
+                            SignalSource::LlmConsensus => "llm_consensus",
+                        };
                         let new_bet = NewBet {
                             market_id: signal.market_id.clone(),
                             question: signal.question.clone(),
@@ -702,6 +706,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                             end_date: signal.end_date.clone(),
                             context: Some(signal.context.clone()),
                             strategy: strat.name.clone(),
+                            source: source_str.to_string(),
                         };
 
                         // Log prediction for Brier score tracking
@@ -1170,6 +1175,10 @@ async fn news_scan_cycle(
                         end_date: signal.end_date.clone(),
                         context: Some(signal.context.clone()),
                         strategy: strat.name.clone(),
+                        source: match signal.source {
+                            SignalSource::XgBoost => "xgboost".to_string(),
+                            SignalSource::LlmConsensus => "llm_consensus".to_string(),
+                        },
                     };
 
                     // Log prediction for Brier score tracking
