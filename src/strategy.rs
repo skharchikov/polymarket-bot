@@ -1,5 +1,5 @@
 use crate::pricing::kelly::fractional_kelly;
-use crate::scanner::live::Signal;
+use crate::scanner::live::{Signal, SignalSource};
 
 /// A strategy profile with its own risk parameters and bankroll.
 #[derive(Debug, Clone)]
@@ -74,12 +74,21 @@ impl StrategyProfile {
 
     /// Evaluate a signal against this strategy's thresholds.
     /// Returns Some with strategy-specific kelly size if accepted, None if rejected.
+    /// XGBoost signals get 50% lower thresholds (trust the model).
     pub fn evaluate(&self, signal: &Signal) -> Option<AcceptedSignal> {
         let effective_edge = signal.edge * signal.confidence;
-        if effective_edge < self.min_effective_edge {
+
+        // XGBoost model signals: halve the edge/confidence gates
+        let (min_edge, min_conf) = if signal.source == SignalSource::XgBoost {
+            (self.min_effective_edge * 0.5, self.min_confidence * 0.7)
+        } else {
+            (self.min_effective_edge, self.min_confidence)
+        };
+
+        if effective_edge < min_edge {
             return None;
         }
-        if signal.confidence < self.min_confidence {
+        if signal.confidence < min_conf {
             return None;
         }
 
@@ -108,7 +117,6 @@ impl StrategyProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scanner::live::SignalSource;
     use crate::storage::portfolio::{BetContext, BetSide};
 
     fn test_signal(edge: f64, confidence: f64, price: f64, prob: f64) -> Signal {
