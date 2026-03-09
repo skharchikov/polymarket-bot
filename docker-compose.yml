@@ -15,14 +15,35 @@ services:
       timeout: 3s
       retries: 5
 
+  model-server:
+    build:
+      context: scripts
+    command: ["python", "serve_model.py"]
+    environment:
+      MODEL_DIR: /model
+      MODEL_PORT: "8000"
+    volumes:
+      - model:/model
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
   bot:
     build: .
     depends_on:
       postgres:
         condition: service_healthy
+      model-server:
+        condition: service_started
     env_file: .env
     environment:
       DATABASE_URL: postgres://bot:bot@postgres:5432/polymarket
+      MODEL_SIDECAR_URL: http://model-server:8000
     volumes:
       - model:/app/model
     restart: unless-stopped

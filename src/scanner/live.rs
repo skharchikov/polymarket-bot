@@ -14,6 +14,7 @@ use crate::calibration::CalibrationCurve;
 use crate::config::AppConfig;
 use crate::data::models::{GammaMarket, PriceTick};
 use crate::model::features::MarketFeatures;
+use crate::model::sidecar::SidecarClient;
 use crate::model::xgb::XgbModel;
 use crate::pricing::kelly::fractional_kelly;
 use crate::storage::portfolio::{BetContext, BetSide};
@@ -260,6 +261,7 @@ pub struct LiveScanner {
     calibration: RwLock<CalibrationCurve>,
     cfg: Arc<AppConfig>,
     xgb_model: Option<XgbModel>,
+    sidecar: Option<SidecarClient>,
 }
 
 impl LiveScanner {
@@ -270,15 +272,29 @@ impl LiveScanner {
             .expect("failed to build HTTP client");
         let calibration = CalibrationCurve::load(&pool, cfg.calibration_min_samples).await?;
 
-        // Load XGBoost model if available (trained by scripts/train_model.py)
+        // ML model sidecar (full ensemble) takes priority over local XGBoost
+        let sidecar = if !cfg.model_sidecar_url.is_empty() {
+            let client = SidecarClient::new(&cfg.model_sidecar_url);
+            if client.is_healthy().await {
+                tracing::info!(url = %cfg.model_sidecar_url, "ML sidecar connected (full ensemble)");
+                Some(client)
+            } else {
+                tracing::warn!(url = %cfg.model_sidecar_url, "ML sidecar not reachable — will retry");
+                Some(client) // Keep it, will check health before each use
+            }
+        } else {
+            None
+        };
+
+        // Load local XGBoost model as fallback
         let model_path = std::path::Path::new(MODEL_PATH);
         let xgb_model = match XgbModel::load(model_path) {
             Ok(m) => {
-                tracing::info!(trees = m.n_trees(), "XGBoost model loaded");
+                tracing::info!(trees = m.n_trees(), "Local XGBoost model loaded (fallback)");
                 Some(m)
             }
             Err(e) => {
-                tracing::info!(err = %e, "No XGBoost model — using LLM only");
+                tracing::info!(err = %e, "No local XGBoost model");
                 None
             }
         };
@@ -291,6 +307,7 @@ impl LiveScanner {
             calibration: RwLock::new(calibration),
             cfg: Arc::clone(cfg),
             xgb_model,
+            sidecar,
         })
     }
 
@@ -314,6 +331,63 @@ impl LiveScanner {
                 tracing::debug!(err = %e, "Model reload skipped");
             }
         }
+    }
+
+    /// Returns true if any ML model (sidecar or local XGBoost) is available.
+    pub fn has_model(&self) -> bool {
+        self.sidecar.is_some() || self.xgb_model.is_some()
+    }
+
+    /// Get prediction from the best available model source.
+    /// Tries sidecar (full ensemble) first, falls back to local XGBoost.
+    async fn predict(&self, features: &[f64], market_price: f64) -> Option<(f64, f64)> {
+        // Try sidecar first
+        if let Some(sidecar) = &self.sidecar {
+            match sidecar.predict(features, market_price).await {
+                Ok(pred) => return Some((pred.prob, pred.confidence)),
+                Err(e) => {
+                    tracing::debug!(err = %e, "Sidecar unavailable, falling back to local XGBoost");
+                }
+            }
+        }
+
+        // Fall back to local XGBoost (raw prob, fixed moderate confidence)
+        if let Some(model) = &self.xgb_model {
+            let prob = model.predict_prob(features);
+            // Local XGBoost alone gets a conservative fixed confidence
+            return Some((prob, 0.45));
+        }
+
+        None
+    }
+
+    /// Batch prediction from sidecar, with per-item XGBoost fallback.
+    async fn predict_batch(&self, items: &[(Vec<f64>, f64)]) -> Vec<Option<(f64, f64)>> {
+        // Try sidecar batch first
+        if let Some(sidecar) = &self.sidecar {
+            match sidecar.predict_batch(items).await {
+                Ok(preds) => {
+                    return preds
+                        .into_iter()
+                        .map(|p| Some((p.prob, p.confidence)))
+                        .collect();
+                }
+                Err(e) => {
+                    tracing::debug!(err = %e, "Sidecar batch failed, falling back to local XGBoost");
+                }
+            }
+        }
+
+        // Fall back to local XGBoost one by one
+        items
+            .iter()
+            .map(|(features, _market_price)| {
+                self.xgb_model.as_ref().map(|model| {
+                    let prob = model.predict_prob(features);
+                    (prob, 0.45)
+                })
+            })
+            .collect()
     }
 
     /// Build an LLM agent for a specific role.
@@ -710,7 +784,7 @@ impl LiveScanner {
 
         // If we have a model, use MODEL-FIRST funnel.
         // Otherwise fall back to NEWS-FIRST funnel (LLM).
-        if self.xgb_model.is_some() {
+        if self.has_model() {
             self.scan_model_first(&eligible, skip_market_ids, seen_headlines, markets_scanned)
                 .await
         } else {
@@ -732,28 +806,32 @@ impl LiveScanner {
         seen_headlines: &mut std::collections::HashSet<String>,
         markets_scanned: usize,
     ) -> Result<ScanResult> {
-        let model = self.xgb_model.as_ref().unwrap();
         let top_n = self.cfg.max_model_candidates;
+        let use_sidecar = self.sidecar.is_some();
 
-        // Step 2: Run XGBoost on ALL eligible markets (instant, free)
         tracing::info!(
             count = eligible.len(),
-            "Running XGBoost on all eligible markets"
+            source = if use_sidecar {
+                "ensemble sidecar"
+            } else {
+                "local XGBoost"
+            },
+            "Running ML model on all eligible markets"
         );
 
         struct ModelCandidate {
             market: GammaMarket,
             current_price: f64,
-            xgb_prob: f64,
-            xgb_conf: f64,
+            ml_prob: f64,
+            ml_conf: f64,
             history: Vec<PriceTick>,
             book_depth: f64,
             /// Model score for ranking: |edge| * confidence
             score: f64,
         }
 
-        let mut scored: Vec<ModelCandidate> = Vec::new();
-
+        // Collect features and histories for all markets
+        let mut market_data: Vec<(GammaMarket, f64, Vec<PriceTick>, Vec<f64>)> = Vec::new();
         for market in eligible {
             let current_price = Self::get_yes_price(market).unwrap_or(0.0);
             let token_id = match market.yes_token_id() {
@@ -761,7 +839,6 @@ impl LiveScanner {
                 None => continue,
             };
 
-            // Fetch price history (needed for features)
             tokio::time::sleep(Duration::from_millis(50)).await;
             let history = self
                 .fetch_price_history(&token_id)
@@ -769,21 +846,35 @@ impl LiveScanner {
                 .unwrap_or_default();
 
             let features = MarketFeatures::from_market_and_history(market, current_price, &history);
-            let feature_vec = features.to_vec();
-            let xgb_prob = model.predict_prob_dampened(&feature_vec, current_price);
-            let xgb_conf = model.confidence(&feature_vec);
+            market_data.push((market.clone(), current_price, history, features.to_vec()));
+        }
 
-            // Raw edge: how far model disagrees with market
-            let edge = (xgb_prob - current_price).abs();
-            let score = edge * xgb_conf;
+        // Batch predict via sidecar or per-item XGBoost
+        let batch_items: Vec<(Vec<f64>, f64)> = market_data
+            .iter()
+            .map(|(_, price, _, fv)| (fv.clone(), *price))
+            .collect();
+        let predictions = self.predict_batch(&batch_items).await;
+
+        let mut scored: Vec<ModelCandidate> = Vec::new();
+        for ((market, current_price, history, _fv), pred) in
+            market_data.into_iter().zip(predictions.into_iter())
+        {
+            let (ml_prob, ml_conf) = match pred {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let edge = (ml_prob - current_price).abs();
+            let score = edge * ml_conf;
 
             scored.push(ModelCandidate {
-                market: market.clone(),
+                market,
                 current_price,
-                xgb_prob,
-                xgb_conf,
+                ml_prob,
+                ml_conf,
                 history,
-                book_depth: 0.0, // fetched later for top N
+                book_depth: 0.0,
                 score,
             });
         }
@@ -948,7 +1039,7 @@ impl LiveScanner {
                 };
 
             // Re-run model with news features if news available
-            let (xgb_prob, xgb_conf) = if news_count > 0 {
+            let (ml_prob, ml_conf) = if news_count > 0 {
                 let features = MarketFeatures::from_market_and_news(
                     &c.market,
                     c.current_price,
@@ -958,39 +1049,39 @@ impl LiveScanner {
                     avg_news_age_hours,
                 );
                 let fv = features.to_vec();
-                (
-                    model.predict_prob_dampened(&fv, c.current_price),
-                    model.confidence(&fv),
-                )
+                match self.predict(&fv, c.current_price).await {
+                    Some(p) => p,
+                    None => (c.ml_prob, c.ml_conf),
+                }
             } else {
-                (c.xgb_prob, c.xgb_conf)
+                (c.ml_prob, c.ml_conf)
             };
 
             let lr = if c.current_price > 0.01 && c.current_price < 0.99 {
-                (xgb_prob / c.current_price) / ((1.0 - xgb_prob) / (1.0 - c.current_price))
+                (ml_prob / c.current_price) / ((1.0 - ml_prob) / (1.0 - c.current_price))
             } else {
                 1.0
             };
 
             let reasoning = if news_count > 0 {
                 format!(
-                    "XGBoost: {:.1}% (market {:.1}%, {} news matched)",
-                    xgb_prob * 100.0,
+                    "ML: {:.1}% (market {:.1}%, {} news matched)",
+                    ml_prob * 100.0,
                     c.current_price * 100.0,
                     news_count,
                 )
             } else {
                 format!(
-                    "XGBoost: {:.1}% (market {:.1}%)",
-                    xgb_prob * 100.0,
+                    "ML: {:.1}% (market {:.1}%)",
+                    ml_prob * 100.0,
                     c.current_price * 100.0,
                 )
             };
 
             tracing::info!(
                 market = %c.market.question,
-                xgb_prob = format_args!("{:.1}%", xgb_prob * 100.0),
-                xgb_conf = format_args!("{:.0}%", xgb_conf * 100.0),
+                ml_prob = format_args!("{:.1}%", ml_prob * 100.0),
+                ml_conf = format_args!("{:.0}%", ml_conf * 100.0),
                 price = format_args!("{:.1}%", c.current_price * 100.0),
                 news = news_count,
                 "Model candidate"
@@ -999,9 +1090,9 @@ impl LiveScanner {
             // Compute edge
             let estimate = BayesianEstimate {
                 prior: c.current_price,
-                posterior: xgb_prob,
+                posterior: ml_prob,
                 combined_lr: 0.0,
-                confidence: xgb_conf,
+                confidence: ml_conf,
                 reasoning: reasoning.clone(),
             };
             let (side, edge, bet_price, bet_prob) =
@@ -1014,13 +1105,13 @@ impl LiveScanner {
                             question: c.market.question.clone(),
                             reason: format!(
                                 "no edge (prob {:.0}% ~ price {:.0}%)",
-                                xgb_prob * 100.0,
+                                ml_prob * 100.0,
                                 c.current_price * 100.0
                             ),
                             current_price: Some(c.current_price),
-                            estimated_prob: Some(xgb_prob),
+                            estimated_prob: Some(ml_prob),
                             edge: None,
-                            confidence: Some(xgb_conf),
+                            confidence: Some(ml_conf),
                             combined_lr: Some(lr),
                         });
                         continue;
@@ -1028,20 +1119,20 @@ impl LiveScanner {
                 };
 
             let kelly_size = fractional_kelly(bet_prob, bet_price, 1.0);
-            let effective_edge = edge * xgb_conf;
+            let effective_edge = edge * ml_conf;
 
             let reject = |reason: String| RejectedSignal {
                 market_id: c.market.market_id.clone(),
                 question: c.market.question.clone(),
                 reason,
                 current_price: Some(c.current_price),
-                estimated_prob: Some(xgb_prob),
+                estimated_prob: Some(ml_prob),
                 edge: Some(edge),
-                confidence: Some(xgb_conf),
+                confidence: Some(ml_conf),
                 combined_lr: Some(lr),
             };
 
-            // Gate thresholds (XGBoost — trusted)
+            // Gate thresholds
             if effective_edge < 0.02 {
                 rejections.push(reject(format!(
                     "edge {:.1}% < 2.0%",
@@ -1053,8 +1144,8 @@ impl LiveScanner {
                 rejections.push(reject(format!("kelly {:.3} < 0.003", kelly_size)));
                 continue;
             }
-            if xgb_conf < 0.25 {
-                rejections.push(reject(format!("conf {:.0}% < 25%", xgb_conf * 100.0,)));
+            if ml_conf < 0.25 {
+                rejections.push(reject(format!("conf {:.0}% < 25%", ml_conf * 100.0)));
                 continue;
             }
 
@@ -1063,7 +1154,7 @@ impl LiveScanner {
                 side = %side,
                 eff_edge = format_args!("+{:.1}%", effective_edge * 100.0),
                 kelly = format_args!("{:.1}%", kelly_size * 100.0),
-                conf = format_args!("{:.0}%", xgb_conf * 100.0),
+                conf = format_args!("{:.0}%", ml_conf * 100.0),
                 news = news_count,
                 "ACCEPTED — model signal"
             );
@@ -1076,7 +1167,7 @@ impl LiveScanner {
                 side,
                 current_price: bet_price,
                 estimated_prob: bet_prob,
-                confidence: xgb_conf,
+                confidence: ml_conf,
                 edge,
                 kelly_size,
                 reasoning,
@@ -1395,12 +1486,11 @@ impl LiveScanner {
     }
 
     /// Quickly assess a single market triggered by a websocket price move.
-    /// Uses XGBoost only (instant, no LLM calls).
+    /// Uses ML model (sidecar or local XGBoost fallback).
     pub async fn assess_alert(&self, market_id: &str, ws_price: f64) -> Result<Option<Signal>> {
-        let model = match &self.xgb_model {
-            Some(m) => m,
-            None => return Ok(None),
-        };
+        if !self.has_model() {
+            return Ok(None);
+        }
 
         // Fetch fresh market data
         let url = format!("{GAMMA_API}/markets/{market_id}");
@@ -1413,7 +1503,6 @@ impl LiveScanner {
             None => return Ok(None),
         };
 
-        // Get price history for features
         let history = self
             .fetch_price_history(&token_id)
             .await
@@ -1421,21 +1510,22 @@ impl LiveScanner {
 
         let features = MarketFeatures::from_market_and_history(&market, current_price, &history);
         let feature_vec = features.to_vec();
-        let xgb_prob = model.predict_prob_dampened(&feature_vec, current_price);
-        let xgb_conf = model.confidence(&feature_vec);
+        let (ml_prob, ml_conf) = match self.predict(&feature_vec, current_price).await {
+            Some(p) => p,
+            None => return Ok(None),
+        };
 
-        // Synthetic LR
         let lr = if current_price > 0.01 && current_price < 0.99 {
-            (xgb_prob / current_price) / ((1.0 - xgb_prob) / (1.0 - current_price))
+            (ml_prob / current_price) / ((1.0 - ml_prob) / (1.0 - current_price))
         } else {
             1.0
         };
 
         let estimate = BayesianEstimate {
             prior: current_price,
-            posterior: xgb_prob,
+            posterior: ml_prob,
             combined_lr: 0.0,
-            confidence: xgb_conf,
+            confidence: ml_conf,
             reasoning: String::new(),
         };
 
@@ -1447,16 +1537,16 @@ impl LiveScanner {
             };
 
         let kelly_size = fractional_kelly(bet_prob, bet_price, 1.0);
-        let effective_edge = edge * xgb_conf;
+        let effective_edge = edge * ml_conf;
 
-        // WS-triggered: stricter thresholds (fires frequently, avoid noise)
-        if effective_edge < 0.05 || kelly_size <= 0.01 || xgb_conf < 0.40 {
+        // WS-triggered: stricter thresholds
+        if effective_edge < 0.05 || kelly_size <= 0.01 || ml_conf < 0.40 {
             return Ok(None);
         }
 
         let reasoning = format!(
-            "XGBoost (WS trigger): {:.1}% (market {:.1}%)",
-            xgb_prob * 100.0,
+            "ML (WS trigger): {:.1}% (market {:.1}%)",
+            ml_prob * 100.0,
             current_price * 100.0
         );
 
@@ -1466,7 +1556,7 @@ impl LiveScanner {
             side,
             current_price: bet_price,
             estimated_prob: bet_prob,
-            confidence: xgb_conf,
+            confidence: ml_conf,
             edge,
             kelly_size,
             reasoning,

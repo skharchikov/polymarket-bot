@@ -116,72 +116,6 @@ impl XgbModel {
         sigmoid(raw + logit(self.base_score))
     }
 
-    /// Confidence estimate based on cumulative prediction stability.
-    /// GBM trees are sequential corrections, not independent voters —
-    /// so we measure how much the prediction changes as more trees are added.
-    /// Stable convergence = high confidence; late swings = low confidence.
-    pub fn confidence(&self, features: &[f64]) -> f64 {
-        let n = self.trees.len();
-        if n < 4 {
-            return 0.40;
-        }
-        let scaled = match &self.scaler {
-            Some(s) => s.transform(features),
-            None => features.to_vec(),
-        };
-
-        let base_logit = logit(self.base_score);
-
-        // Sample predictions at 25%, 50%, 75%, 100% of trees
-        let checkpoints = [n / 4, n / 2, 3 * n / 4, n];
-        let mut cumsum = 0.0;
-        let mut checkpoint_probs = Vec::with_capacity(4);
-        let mut ci = 0;
-        for (i, tree) in self.trees.iter().enumerate() {
-            cumsum += tree.predict(&scaled);
-            if ci < checkpoints.len() && i + 1 == checkpoints[ci] {
-                checkpoint_probs.push(sigmoid(cumsum + base_logit));
-                ci += 1;
-            }
-        }
-
-        // Measure spread of the checkpoint probabilities
-        let min_p = checkpoint_probs
-            .iter()
-            .cloned()
-            .fold(f64::INFINITY, f64::min);
-        let max_p = checkpoint_probs
-            .iter()
-            .cloned()
-            .fold(f64::NEG_INFINITY, f64::max);
-        let range = (max_p - min_p).abs();
-
-        // range of 0 → max confidence 0.75
-        // range of 0.05 → ~0.55
-        // range of 0.15 → ~0.38
-        // range of 0.30+ → ~0.25
-        let confidence: f64 = 0.75 / (1.0 + range * 8.0);
-        confidence.clamp(0.25, 0.75)
-    }
-
-    /// Predict probability but dampen extreme deviations from market price.
-    /// Uses log-odds clamping so the constraint is proportional at the extremes:
-    ///   - 9% market → allowed range ~[3.5%, 21%]
-    ///   - 50% market → allowed range ~[27%, 73%]
-    ///   - 90% market → allowed range ~[79%, 96.5%]
-    pub fn predict_prob_dampened(&self, features: &[f64], market_price: f64) -> f64 {
-        let raw_prob = self.predict_prob(features);
-        let market_logit = logit(market_price);
-        let raw_logit = logit(raw_prob);
-        // Max shift of 1.0 in log-odds ≈ 2.7× odds change
-        let max_logit_shift = 1.0;
-        let clamped_logit = raw_logit.clamp(
-            market_logit - max_logit_shift,
-            market_logit + max_logit_shift,
-        );
-        sigmoid(clamped_logit)
-    }
-
     pub fn n_trees(&self) -> usize {
         self.trees.len()
     }
@@ -363,15 +297,6 @@ mod tests {
             "Probability must be in [0,1]: {prob}"
         );
 
-        let conf = model.confidence(&features);
-        assert!(
-            (0.0..=1.0).contains(&conf),
-            "Confidence must be in [0,1]: {conf}"
-        );
-
-        println!(
-            "Model: {} trees, prob={prob:.4}, conf={conf:.4}",
-            model.n_trees()
-        );
+        println!("Model: {} trees, prob={prob:.4}", model.n_trees());
     }
 }

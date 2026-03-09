@@ -106,6 +106,11 @@ pub struct AppConfig {
     /// Active strategies (comma-separated: aggressive,balanced,conservative).
     #[config(env = "STRATEGIES", default = "aggressive,balanced,conservative")]
     pub strategies: String,
+
+    /// ML model sidecar URL (Python ensemble server).
+    /// When set, uses the full stacking ensemble instead of local XGBoost.
+    #[config(env = "MODEL_SIDECAR_URL", default = "")]
+    pub model_sidecar_url: String,
 }
 
 impl AppConfig {

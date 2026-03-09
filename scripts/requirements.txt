@@ -5,3 +5,6 @@ pandas>=2.0
 numpy>=1.24
 requests>=2.31
 psycopg2-binary>=2.9
+fastapi>=0.115
+uvicorn>=0.34
+joblib>=1.3

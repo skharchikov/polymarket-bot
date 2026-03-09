@@ -15,6 +15,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import joblib
 import numpy as np
 import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
@@ -460,6 +461,13 @@ def main():
     # Export
     print(f"\nExporting model...")
     export_xgboost_model(model, scaler, args.output, FEATURE_COLS)
+
+    # Save full ensemble for the sidecar server
+    ensemble_path = Path(args.output).parent / "ensemble.joblib"
+    scaler_joblib_path = Path(args.output).parent / "scaler.joblib"
+    joblib.dump(model, ensemble_path)
+    joblib.dump(scaler, scaler_joblib_path)
+    print(f"Saved full ensemble to {ensemble_path}")
 
     # Feature importance
     print_feature_importance(model, FEATURE_COLS)
