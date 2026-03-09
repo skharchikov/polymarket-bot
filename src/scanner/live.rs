@@ -309,7 +309,16 @@ impl LiveScanner {
     async fn predict(&self, features: &[f64], market_price: f64) -> Option<(f64, f64)> {
         let sidecar = self.sidecar.as_ref()?;
         match sidecar.predict(features, market_price).await {
-            Ok(pred) => Some((pred.prob, pred.confidence)),
+            Ok(pred) => {
+                tracing::debug!(
+                    market_price = format_args!("{:.1}%", market_price * 100.0),
+                    ml_prob = format_args!("{:.1}%", pred.prob * 100.0),
+                    ml_conf = format_args!("{:.0}%", pred.confidence * 100.0),
+                    edge = format_args!("{:+.1}%", (pred.prob - market_price) * 100.0),
+                    "Ensemble prediction"
+                );
+                Some((pred.prob, pred.confidence))
+            }
             Err(e) => {
                 tracing::warn!(err = %e, "Sidecar prediction failed");
                 None
@@ -323,10 +332,21 @@ impl LiveScanner {
             return vec![None; items.len()];
         };
         match sidecar.predict_batch(items).await {
-            Ok(preds) => preds
-                .into_iter()
-                .map(|p| Some((p.prob, p.confidence)))
-                .collect(),
+            Ok(preds) => {
+                tracing::info!(
+                    count = preds.len(),
+                    avg_conf = format_args!(
+                        "{:.0}%",
+                        preds.iter().map(|p| p.confidence).sum::<f64>() / preds.len().max(1) as f64
+                            * 100.0
+                    ),
+                    "Ensemble batch prediction complete"
+                );
+                preds
+                    .into_iter()
+                    .map(|p| Some((p.prob, p.confidence)))
+                    .collect()
+            }
             Err(e) => {
                 tracing::warn!(err = %e, "Sidecar batch prediction failed");
                 vec![None; items.len()]

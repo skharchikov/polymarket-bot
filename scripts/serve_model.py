@@ -11,6 +11,7 @@ Endpoints:
     GET  /health         — liveness check
 """
 
+import logging
 import os
 import time
 from pathlib import Path
@@ -19,6 +20,9 @@ import joblib
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("sidecar")
 
 MODEL_DIR = os.environ.get("MODEL_DIR", "/model")
 MODEL_PATH = Path(MODEL_DIR) / "ensemble.joblib"
@@ -106,10 +110,15 @@ def predict(req: PredictRequest):
         features = scaler.transform(features)
 
     prob = float(model.predict_proba(features)[0, 1])
-
-    # Confidence: use ensemble's internal disagreement
-    # Get predictions from each base estimator if available
     confidence = _estimate_confidence(features)
+
+    log.info(
+        "predict  price=%.1f%% → prob=%.1f%% conf=%.0f%% edge=%+.1f%%",
+        req.market_price * 100,
+        prob * 100,
+        confidence * 100,
+        (prob - req.market_price) * 100,
+    )
 
     return PredictResponse(prob=prob, confidence=confidence)
 
@@ -127,6 +136,18 @@ def predict_batch(req: PredictBatchRequest):
 
     probs = model.predict_proba(features)[:, 1]
     confidences = [_estimate_confidence(features[i : i + 1]) for i in range(len(features))]
+    market_prices = [item.market_price for item in req.items]
+
+    for price, prob, conf in zip(market_prices, probs, confidences):
+        log.info(
+            "batch    price=%.1f%% → prob=%.1f%% conf=%.0f%% edge=%+.1f%%",
+            price * 100,
+            float(prob) * 100,
+            conf * 100,
+            (float(prob) - price) * 100,
+        )
+
+    log.info("batch complete: %d predictions, avg_conf=%.0f%%", len(probs), np.mean(confidences) * 100)
 
     return BatchResponse(
         predictions=[
