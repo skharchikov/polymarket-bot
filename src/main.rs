@@ -332,7 +332,8 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
              ⏱ News: every {news_min}min | Housekeeping: every {hk_min}min\n\
              🎯 Max {max_sig} signals/day | Kelly: {kelly:.0}%\n\
              🔍 Min edge: {edge:.0}% | Min volume: ${vol:.0}\n\
-             🧠 Model: `{model}` ({agents}-agent consensus)",
+             🧠 Pipeline: {pipeline}\n\
+             🛑 Stop-loss: {sl:.0}% | Exit: {exit_days}d before expiry",
             open_count = open_bets.len(),
             wins = resolved.iter().filter(|b| b.won == Some(true)).count(),
             losses = resolved.iter().filter(|b| b.won == Some(false)).count(),
@@ -343,8 +344,19 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             kelly = cfg.kelly_fraction * 100.0,
             edge = cfg.min_effective_edge * 100.0,
             vol = cfg.min_volume,
-            model = cfg.llm_model,
-            agents = cfg.consensus_agents,
+            pipeline = if cfg.model_sidecar_url.is_empty() {
+                format!(
+                    "XGBoost → Bayesian (LLM fallback: `{}` {}-agent)",
+                    cfg.llm_model, cfg.consensus_agents
+                )
+            } else {
+                format!(
+                    "Ensemble sidecar → Bayesian (LLM fallback: `{}` {}-agent)",
+                    cfg.llm_model, cfg.consensus_agents
+                )
+            },
+            sl = cfg.stop_loss_pct * 100.0,
+            exit_days = cfg.exit_days_before_expiry,
         ))
         .await;
 
