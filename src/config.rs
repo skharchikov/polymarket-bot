@@ -54,7 +54,8 @@ pub struct AppConfig {
     pub kelly_fraction: f64,
 
     /// Max days until market expiry to consider.
-    #[config(env = "MAX_DAYS_TO_EXPIRY", default = 30)]
+    /// Sweet spot is 3-14d: enough signal, still uncertain, good training data.
+    #[config(env = "MAX_DAYS_TO_EXPIRY", default = 14)]
     pub max_days_to_expiry: i64,
 
     /// Max markets to send to LLM per scan cycle (each costs consensus_agents API calls).
