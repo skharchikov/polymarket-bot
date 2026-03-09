@@ -104,12 +104,14 @@ pub struct AppConfig {
     pub strategies: String,
 
     // --- Early exit ---
-    /// Stop-loss: exit if unrealized loss exceeds this fraction of cost (0.30 = -30%).
-    #[config(env = "STOP_LOSS_PCT", default = 0.30)]
+    /// Stop-loss: exit if unrealized loss exceeds this fraction of cost.
+    /// Set to 1.0 to disable (let all bets run to resolution for Brier data).
+    #[config(env = "STOP_LOSS_PCT", default = 1.0)]
     pub stop_loss_pct: f64,
 
     /// Exit if position is underwater and fewer than this many days to expiry.
-    #[config(env = "EXIT_DAYS_BEFORE_EXPIRY", default = 2)]
+    /// Set to 0 to disable expiry exits.
+    #[config(env = "EXIT_DAYS_BEFORE_EXPIRY", default = 0)]
     pub exit_days_before_expiry: i64,
 
     /// ML model sidecar URL (Python ensemble server).
