@@ -241,25 +241,11 @@ impl PgPortfolio {
 
     /// Build a stats summary string for /stats command.
     pub async fn stats_summary(&self) -> Result<String> {
-        let bankroll = self.bankroll().await?;
         let starting = self.starting_bankroll().await?;
         let resolved = self.resolved_bets().await?;
         let open = self.open_bets().await?;
-        let wins = resolved.iter().filter(|b| b.won == Some(true)).count();
-        let losses = resolved.iter().filter(|b| b.won == Some(false)).count();
-        let total_pnl: f64 = resolved.iter().filter_map(|b| b.pnl).sum();
-        let roi = if starting > 0.0 {
-            (bankroll - starting) / starting * 100.0
-        } else {
-            0.0
-        };
-        let win_rate = if wins + losses > 0 {
-            wins as f64 / (wins + losses) as f64 * 100.0
-        } else {
-            0.0
-        };
 
-        // Per-strategy breakdown
+        // Collect strategy names from bets + portfolio keys
         let all_bets: Vec<&Bet> = resolved.iter().chain(open.iter()).collect();
         let mut strategies: Vec<String> = all_bets
             .iter()
@@ -274,8 +260,21 @@ impl PgPortfolio {
                 "conservative".into(),
             ];
         }
+        let num_strategies = strategies.len() as f64;
+        let starting_per_strat = if num_strategies > 0.0 {
+            starting / num_strategies
+        } else {
+            0.0
+        };
 
+        // Build per-strategy stats
         let mut strat_lines = Vec::new();
+        let mut total_bankroll = 0.0_f64;
+        let mut total_pnl = 0.0_f64;
+        let mut total_wins = 0_usize;
+        let mut total_losses = 0_usize;
+        let mut total_open = 0_usize;
+
         for strat in &strategies {
             let label = match strat.as_str() {
                 "aggressive" => "🔥",
@@ -283,38 +282,55 @@ impl PgPortfolio {
                 "conservative" => "🛡️",
                 _ => "📊",
             };
-            let strat_resolved: Vec<_> = resolved.iter().filter(|b| &b.strategy == strat).collect();
-            let strat_open: Vec<_> = open.iter().filter(|b| &b.strategy == strat).collect();
-            let s_wins = strat_resolved
-                .iter()
-                .filter(|b| b.won == Some(true))
-                .count();
-            let s_losses = strat_resolved
-                .iter()
-                .filter(|b| b.won == Some(false))
-                .count();
-            let s_pnl: f64 = strat_resolved.iter().filter_map(|b| b.pnl).sum();
+            let s_resolved: Vec<_> = resolved.iter().filter(|b| &b.strategy == strat).collect();
+            let s_open_count = open.iter().filter(|b| &b.strategy == strat).count();
+            let s_wins = s_resolved.iter().filter(|b| b.won == Some(true)).count();
+            let s_losses = s_resolved.iter().filter(|b| b.won == Some(false)).count();
+            let s_pnl: f64 = s_resolved.iter().filter_map(|b| b.pnl).sum();
             let s_bankroll = self.strategy_bankroll(strat).await?;
+            let s_roi = if starting_per_strat > 0.0 {
+                (s_bankroll - starting_per_strat) / starting_per_strat * 100.0
+            } else {
+                0.0
+            };
             let s_wr = if s_wins + s_losses > 0 {
                 s_wins as f64 / (s_wins + s_losses) as f64 * 100.0
             } else {
                 0.0
             };
+
+            total_bankroll += s_bankroll;
+            total_pnl += s_pnl;
+            total_wins += s_wins;
+            total_losses += s_losses;
+            total_open += s_open_count;
+
             strat_lines.push(format!(
-                "{label} *{strat}*: `€{s_bankroll:.2}` | PnL `€{s_pnl:+.2}` | {s_wins}W/{s_losses}L ({s_wr:.0}%) | {open} open",
-                open = strat_open.len(),
+                "{label} *{strat}*\n\
+                 \u{00a0}\u{00a0}💰 `€{s_bankroll:.2}` | ROI `{s_roi:+.1}%`\n\
+                 \u{00a0}\u{00a0}💵 PnL `€{s_pnl:+.2}` | {s_wins}W/{s_losses}L ({s_wr:.0}%)\n\
+                 \u{00a0}\u{00a0}🔓 {s_open_count} open",
             ));
         }
 
+        let total_roi = if starting > 0.0 {
+            (total_bankroll - starting) / starting * 100.0
+        } else {
+            0.0
+        };
+        let total_wr = if total_wins + total_losses > 0 {
+            total_wins as f64 / (total_wins + total_losses) as f64 * 100.0
+        } else {
+            0.0
+        };
+
         Ok(format!(
             "📊 *Bot Statistics*\n\n\
-             💰 Bankroll: `€{bankroll:.2}` (started: `€{starting:.2}`)\n\
-             💵 Total PnL: `€{total_pnl:+.2}` | ROI: `{roi:+.1}%`\n\
-             📋 Record: {wins}W / {losses}L ({win_rate:.0}%)\n\
-             🔓 Open bets: {open}\n\n\
-             📈 *Per Strategy*\n{strat_details}",
-            open = open.len(),
-            strat_details = strat_lines.join("\n"),
+             💰 Bankroll: `€{total_bankroll:.2}` (started: `€{starting:.2}`)\n\
+             💵 PnL: `€{total_pnl:+.2}` | ROI: `{total_roi:+.1}%`\n\
+             📋 {total_wins}W / {total_losses}L ({total_wr:.0}%) | {total_open} open\n\n\
+             {strat_details}",
+            strat_details = strat_lines.join("\n\n"),
         ))
     }
 
