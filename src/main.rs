@@ -337,7 +337,8 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
 
     let _ = notifier
         .send(&format!(
-            "🤖 *Polymarket Signal Bot* {version_line}\n\n\
+            "🤖 *Polymarket Signal Bot* {version_line}\
+             {changelog_section}\n\n\
              💰 Bankroll: `€{total_bankroll:.2}` (started: `€{starting:.2}`)\n\
              💵 PnL: `€{total_pnl:+.2}` | ROI: `{total_roi:+.1}%`\n\
              📊 Open: {open_count} | Record: {wins}W/{losses}L\n\n\
@@ -347,8 +348,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
              🎯 Max {max_sig} signals/day | Kelly: {kelly:.0}%\n\
              🔍 Min edge: {edge:.0}% | Min volume: ${vol:.0}\n\
              🧠 Pipeline: {pipeline}\n\
-             🛑 Stop-loss: {sl:.0}% | Exit: {exit_days}d before expiry\
-             {changelog_section}",
+             🛑 Stop-loss: {sl:.0}% | Exit: {exit_days}d before expiry",
             open_count = open_bets.len(),
             wins = resolved.iter().filter(|b| b.won == Some(true)).count(),
             losses = resolved.iter().filter(|b| b.won == Some(false)).count(),
@@ -943,9 +943,10 @@ async fn housekeeping_cycle(
                     loss_pct * 100.0,
                     stop_loss_pct * 100.0
                 ))
-            } else if days_left <= exit_days_before_expiry && unrealized < 0.0 {
+            } else if days_left <= exit_days_before_expiry && loss_pct >= 0.10 {
                 Some(format!(
-                    "expiry exit ({days_left}d left, underwater €{unrealized:.2})"
+                    "expiry exit ({days_left}d left, {:.0}% underwater)",
+                    loss_pct * 100.0
                 ))
             } else {
                 None
