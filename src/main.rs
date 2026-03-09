@@ -6,6 +6,7 @@ mod bayesian;
 mod calibration;
 mod config;
 mod data;
+mod model;
 mod pricing;
 mod scanner;
 mod storage;
