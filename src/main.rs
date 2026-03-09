@@ -993,7 +993,7 @@ async fn broadcast(
     portfolio: &PgPortfolio,
     message: &str,
 ) {
-    let subs = portfolio.telegram_chat_ids().await.unwrap_or_default();
+    let subs = portfolio.telegram_subscribers().await.unwrap_or_default();
     notifier.broadcast(&subs, message).await;
 }
 

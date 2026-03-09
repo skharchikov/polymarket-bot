@@ -29,12 +29,19 @@ impl TelegramNotifier {
         self.send_to(&self.chat_id, message).await
     }
 
-    /// Send to owner + all subscriber chat IDs (deduped).
-    pub async fn broadcast(&self, subscriber_ids: &[String], message: &str) {
+    /// Send to owner + all subscribers (deduped). Logs usernames.
+    pub async fn broadcast(&self, subscribers: &[(String, Option<String>)], message: &str) {
         let _ = self.send(message).await;
-        for id in subscriber_ids {
+        tracing::info!(chat_id = %self.chat_id, "Sent to owner");
+        for (id, username) in subscribers {
             if id != &self.chat_id {
-                let _ = self.send_to(id, message).await;
+                let label = username.as_deref().unwrap_or("unknown");
+                match self.send_to(id, message).await {
+                    Ok(()) => tracing::info!(chat_id = %id, username = label, "Sent to subscriber"),
+                    Err(e) => {
+                        tracing::warn!(chat_id = %id, username = label, err = %e, "Failed to send to subscriber")
+                    }
+                }
             }
         }
     }

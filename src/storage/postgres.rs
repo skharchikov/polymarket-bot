@@ -149,6 +149,15 @@ impl PgPortfolio {
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
+    /// Get subscriber chat IDs with their usernames for logging.
+    pub async fn telegram_subscribers(&self) -> Result<Vec<(String, Option<String>)>> {
+        let rows: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT chat_id, username FROM telegram_users")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows)
+    }
+
     /// Build a stats summary string for /stats command.
     pub async fn stats_summary(&self) -> Result<String> {
         let bankroll = self.bankroll().await?;
