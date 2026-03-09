@@ -509,18 +509,13 @@ impl PgPortfolio {
         self.upsert_text("active_strategies", &strat_names.join(","))
             .await?;
 
-        // Sync global starting_bankroll = sum of per-strategy bankrolls
-        let mut total = 0.0;
-        for s in strategies {
-            total += self.strategy_bankroll(&s.name).await?;
-        }
-        let current_starting = self.starting_bankroll().await?;
-        if (current_starting - total).abs() > 0.01 {
+        // Set starting_bankroll only if not already stored (first run)
+        if !self.key_exists("starting_bankroll").await? || self.starting_bankroll().await? == 0.0 {
+            let total = strategies.len() as f64 * strategy_bankroll;
             self.upsert_f64("starting_bankroll", total).await?;
             tracing::info!(
-                old = format_args!("€{current_starting:.2}"),
-                new = format_args!("€{total:.2}"),
-                "Updated global starting_bankroll to match strategy sum"
+                starting = format_args!("€{total:.2}"),
+                "Set starting_bankroll (first run)"
             );
         }
 
