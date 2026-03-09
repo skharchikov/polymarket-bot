@@ -27,6 +27,13 @@ services:
       RETRAIN_MAX_AGE_HOURS: "24"
     volumes:
       - model:/model
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /model/ensemble.joblib"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
 
   model-server:
     build:
@@ -35,7 +42,7 @@ services:
     command: ["serve_model.py"]
     depends_on:
       trainer:
-        condition: service_completed_successfully
+        condition: service_healthy
     environment:
       MODEL_DIR: /model
       MODEL_PORT: "8000"
