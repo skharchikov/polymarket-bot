@@ -526,9 +526,7 @@ mod tests {
     #[test]
     fn test_embedding_min_similarity_threshold() {
         // Verify the threshold constant is in a reasonable range
-        assert!(
-            EMBEDDING_MIN_SIMILARITY > 0.0 && EMBEDDING_MIN_SIMILARITY < 1.0,
-            "Threshold should be between 0 and 1: {EMBEDDING_MIN_SIMILARITY}"
-        );
+        const { assert!(EMBEDDING_MIN_SIMILARITY > 0.0) };
+        const { assert!(EMBEDDING_MIN_SIMILARITY < 1.0) };
     }
 }
