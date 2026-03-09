@@ -15,6 +15,7 @@ mod telegram;
 
 use anyhow::Result;
 use config::AppConfig;
+use scanner::live::SignalSource;
 use scanner::ws::{ActivityAlert, MarketWatcher};
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -319,9 +320,19 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     let hk_notifier = Arc::clone(&notifier);
     let hk_scanner = Arc::clone(&scanner);
     let hk_interval = cfg.scan_interval_mins;
+    let hk_stop_loss = cfg.stop_loss_pct;
+    let hk_exit_days = cfg.exit_days_before_expiry;
     let housekeeping = tokio::spawn(async move {
         loop {
-            if let Err(e) = housekeeping_cycle(&hk_portfolio, &hk_notifier, &hk_scanner).await {
+            if let Err(e) = housekeeping_cycle(
+                &hk_portfolio,
+                &hk_notifier,
+                &hk_scanner,
+                hk_stop_loss,
+                hk_exit_days,
+            )
+            .await
+            {
                 tracing::error!(err = %e, "Housekeeping cycle failed");
             }
             tokio::time::sleep(Duration::from_secs(hk_interval * 60)).await;
@@ -593,6 +604,23 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                             strategy: strat.name.clone(),
                         };
 
+                        // Log prediction for Brier score tracking
+                        let source = match signal.source {
+                            SignalSource::XgBoost => "xgboost",
+                            SignalSource::LlmConsensus => "llm_consensus",
+                        };
+                        let _ = al_portfolio
+                            .log_prediction(
+                                &signal.market_id,
+                                source,
+                                signal.prior,
+                                signal.estimated_prob,
+                                signal.estimated_prob,
+                                signal.confidence,
+                                signal.edge,
+                            )
+                            .await;
+
                         match al_portfolio.place_bet(&new_bet).await {
                             Ok(_) => {
                                 last_ws_bet = std::time::Instant::now();
@@ -668,6 +696,8 @@ async fn housekeeping_cycle(
     portfolio: &PgPortfolio,
     notifier: &telegram::notifier::TelegramNotifier,
     scanner: &scanner::live::LiveScanner,
+    stop_loss_pct: f64,
+    exit_days_before_expiry: i64,
 ) -> Result<()> {
     portfolio.reset_daily_if_needed().await?;
 
@@ -742,7 +772,7 @@ async fn housekeeping_cycle(
         tracing::warn!(err = %e, "Failed to reload calibration curve");
     }
 
-    // Report unrealized P&L on open positions
+    // Check open positions for early exit and report unrealized P&L
     let open_bets = portfolio.open_bets().await?;
     if !open_bets.is_empty() {
         let mut lines = Vec::new();
@@ -767,6 +797,77 @@ async fn housekeeping_cycle(
                 storage::portfolio::BetSide::No => bet.shares * (1.0 - current),
             };
             let unrealized = current_value - bet.cost;
+
+            // --- Early exit checks ---
+            let loss_pct = if bet.cost > 0.0 {
+                -unrealized / bet.cost
+            } else {
+                0.0
+            };
+            let days_left = bet
+                .end_date
+                .as_ref()
+                .map(|d| {
+                    chrono::DateTime::parse_from_rfc3339(d)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .or_else(|_| {
+                            chrono::NaiveDateTime::parse_from_str(d, "%Y-%m-%dT%H:%M:%SZ")
+                                .map(|n| n.and_utc())
+                        })
+                        .map(|dt| (dt - chrono::Utc::now()).num_days())
+                        .unwrap_or(999)
+                })
+                .unwrap_or(999);
+
+            let exit_reason = if loss_pct >= stop_loss_pct {
+                Some(format!(
+                    "stop-loss triggered ({:.0}% loss > {:.0}% limit)",
+                    loss_pct * 100.0,
+                    stop_loss_pct * 100.0
+                ))
+            } else if days_left <= exit_days_before_expiry && unrealized < 0.0 {
+                Some(format!(
+                    "expiry exit ({days_left}d left, underwater €{unrealized:.2})"
+                ))
+            } else {
+                None
+            };
+
+            if let Some(reason) = exit_reason {
+                match portfolio.early_exit(bet.id, current, &reason).await {
+                    Ok(Some(r)) => {
+                        let msg = format!(
+                            "\u{1f6a8} *Early Exit*\n\n\
+                             \u{1f4cb} _{question}_\n\
+                             \u{1f3b2} Side: *{side}* @ `{entry:.1}\u{00a2}` \u{2192} `{now:.1}\u{00a2}`\n\
+                             \u{1f4a1} Reason: {reason}\n\
+                             \u{1f4b5} PnL: `\u{20ac}{pnl:+.2}`\n\n\
+                             \u{1f4b0} Bankroll: `\u{20ac}{bankroll:.2}`\n\
+                             \u{1f4ca} Record: {wins}W / {losses}L | Total PnL: `\u{20ac}{total_pnl:+.2}`",
+                            question = r.question,
+                            side = r.side,
+                            entry = r.entry_price * 100.0,
+                            now = current * 100.0,
+                            pnl = r.pnl,
+                            bankroll = r.bankroll,
+                            wins = r.total_wins,
+                            losses = r.total_losses,
+                            total_pnl = r.total_pnl,
+                        );
+                        broadcast(notifier, portfolio, &msg).await;
+                        tracing::info!(
+                            market = %bet.question,
+                            reason = %reason,
+                            pnl = format_args!("€{:+.2}", r.pnl),
+                            "Early exit executed"
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::error!(err = %e, "Early exit failed"),
+                }
+                continue; // Skip adding to open positions report
+            }
+
             total_unrealized += unrealized;
             total_cost += bet.cost;
 
@@ -965,6 +1066,23 @@ async fn news_scan_cycle(
                         context: Some(signal.context.clone()),
                         strategy: strat.name.clone(),
                     };
+
+                    // Log prediction for Brier score tracking
+                    let source = match signal.source {
+                        SignalSource::XgBoost => "xgboost",
+                        SignalSource::LlmConsensus => "llm_consensus",
+                    };
+                    let _ = portfolio
+                        .log_prediction(
+                            &signal.market_id,
+                            source,
+                            signal.prior,
+                            signal.estimated_prob,
+                            signal.estimated_prob,
+                            signal.confidence,
+                            signal.edge,
+                        )
+                        .await;
 
                     match portfolio.place_bet(&new_bet).await {
                         Ok(_bet_id) => {

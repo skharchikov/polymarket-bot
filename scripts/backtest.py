@@ -137,21 +137,26 @@ def simulate_strategy(
     strategy_name="balanced",
     use_bayesian=True,
     model_probs=None,
+    stop_loss_pct=None,
+    volatilities=None,
 ):
     """Simulate betting with a strategy profile.
 
-    If use_bayesian=True, posteriors are already Bayesian-anchored.
-    If use_bayesian=False, posteriors are raw model probs (old behavior).
+    If stop_loss_pct is set, losing bets exit at stop-loss instead of full loss.
+    Winning bets in volatile markets may get stopped out prematurely.
     """
     s = STRATEGIES[strategy_name]
     bankroll_start = 300.0
     bankroll = bankroll_start
-    flat_bankroll = 300.0  # flat sizing base (Rust bot uses flat, not compounding)
+    flat_bankroll = 300.0
     pnl = 0.0
     n_bets = 0
     wins = 0
     losses = 0
+    stopped_out_winners = 0
     bets_log = []
+
+    rng = np.random.RandomState(42)
 
     for i in range(len(posteriors)):
         post = posteriors[i]
@@ -185,8 +190,6 @@ def simulate_strategy(
 
         # Effective edge gate
         eff_edge = edge * conf
-
-        # XGBoost signals get halved thresholds (matches Rust)
         min_edge = s["min_eff_edge"] * 0.5
         min_conf = s["min_conf"] * 0.7
 
@@ -201,38 +204,69 @@ def simulate_strategy(
             continue
 
         stake = flat_bankroll * k
-        # Cap stake at remaining bankroll
         stake = min(stake, bankroll)
         if stake < 0.50:
             continue
 
-        # Fees (3% slippage + trading)
-        fee = stake * 0.03
+        entry_fee = stake * 0.02
+        exit_fee_rate = 0.02
 
-        if won:
-            profit = stake * (1.0 - bet_price) / bet_price - fee
-            pnl += profit
-            bankroll += profit
-            wins += 1
+        # --- Stop-loss logic ---
+        if stop_loss_pct is not None:
+            vol = volatilities[i] if volatilities is not None else 0.0
+
+            if won:
+                # Check if volatile enough to trigger premature stop-out.
+                # Model: if 24h volatility > stop_loss / 2, there's a chance
+                # the price whipsawed through our stop before recovering.
+                # P(stop-out) = min(vol / stop_loss_pct, 0.5)
+                p_stopped = min(vol / stop_loss_pct, 0.5) if stop_loss_pct > 0 else 0
+                if rng.random() < p_stopped:
+                    # Stopped out of a winner — lose stop_loss_pct of stake
+                    exit_value = stake * (1.0 - stop_loss_pct)
+                    exit_fee = exit_value * exit_fee_rate
+                    loss = stake - exit_value + entry_fee + exit_fee
+                    pnl -= loss
+                    bankroll -= loss
+                    losses += 1
+                    stopped_out_winners += 1
+                    n_bets += 1
+                    bets_log.append({"won": False, "stopped": True, "pnl_after": pnl})
+                    if bankroll <= 0:
+                        break
+                    continue
+                else:
+                    # Normal win
+                    gross = stake * (1.0 - bet_price) / bet_price
+                    exit_fee = gross * exit_fee_rate
+                    profit = gross - entry_fee - exit_fee
+                    pnl += profit
+                    bankroll += profit
+                    wins += 1
+            else:
+                # Losing bet — stop-loss caps the loss
+                exit_value = stake * (1.0 - stop_loss_pct)
+                exit_fee = exit_value * exit_fee_rate
+                loss = stake - exit_value + entry_fee + exit_fee
+                pnl -= loss
+                bankroll -= loss
+                losses += 1
         else:
-            loss = stake + fee
-            pnl -= loss
-            bankroll -= loss
-            losses += 1
+            # No stop-loss — original behavior
+            fee = stake * 0.03
+            if won:
+                profit = stake * (1.0 - bet_price) / bet_price - fee
+                pnl += profit
+                bankroll += profit
+                wins += 1
+            else:
+                loss = stake + fee
+                pnl -= loss
+                bankroll -= loss
+                losses += 1
 
         n_bets += 1
-        bets_log.append({
-            "side": side,
-            "price": bet_price,
-            "prob": bet_prob,
-            "edge": edge,
-            "eff_edge": eff_edge,
-            "conf": conf,
-            "kelly": k,
-            "stake": stake,
-            "won": won,
-            "pnl_after": pnl,
-        })
+        bets_log.append({"won": won, "stopped": False, "pnl_after": pnl})
 
         if bankroll <= 0:
             break
@@ -248,6 +282,7 @@ def simulate_strategy(
         "bankroll_start": bankroll_start,
         "bankroll_end": bankroll,
         "roi": pnl / bankroll_start * 100,
+        "stopped_out_winners": stopped_out_winners,
         "bets_log": bets_log,
     }
 
@@ -477,11 +512,103 @@ def sweep_conservative(df, n_splits=5):
     return best
 
 
+def sweep_stop_loss(df, n_splits=5):
+    """Compare different stop-loss levels across all strategies."""
+    X = build_feature_matrix(df)
+    y = df["label"].values
+    prices = df["yes_price"].values
+    # volatility_24h is feature index 3 in FEATURE_COLS
+    vol_idx = FEATURE_COLS.index("volatility_24h")
+
+    scaler = RobustScaler()
+    X_scaled = pd.DataFrame(scaler.fit_transform(X), columns=FEATURE_COLS)
+
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+
+    # Pre-compute fold data
+    fold_data = []
+    for fold, (train_idx, test_idx) in enumerate(tscv.split(X_scaled)):
+        X_train = X_scaled.iloc[train_idx]
+        X_test = X_scaled.iloc[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+        p_test = prices[test_idx]
+        # Use raw (unscaled) volatility for stop-loss simulation
+        vol_test = X.iloc[test_idx]["volatility_24h"].values
+
+        raw_model = build_ensemble()
+        n_train = len(X_train)
+        cal_method = "isotonic" if n_train > 1000 else "sigmoid"
+        cal_cv = min(3, max(2, n_train // 200))
+
+        model = CalibratedClassifierCV(
+            estimator=raw_model, method=cal_method, cv=cal_cv, ensemble=True,
+        )
+        model.fit(X_train, y_train)
+
+        model_probs = model.predict_proba(X_test)[:, 1]
+        confs = np.array([estimate_confidence(model, X_test.iloc[i:i+1]) for i in range(len(X_test))])
+
+        posteriors = np.array([
+            bayesian_posterior(price, compute_lr(prob, price), conf)
+            for prob, price, conf in zip(model_probs, p_test, confs)
+        ])
+
+        fold_data.append((posteriors, confs, p_test, y_test, vol_test))
+        print(f"  Fold {fold} prepared ({len(test_idx)} samples, avg vol={vol_test.mean():.3f})")
+
+    stop_loss_levels = [None, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50]
+
+    print(f"\n{'='*90}")
+    print(f"STOP-LOSS COMPARISON (Bayesian-anchored, all folds combined)")
+    print(f"{'='*90}")
+
+    for strategy in ["aggressive", "balanced", "conservative"]:
+        print(f"\n  [{strategy.upper()}]")
+        print(f"  {'StopLoss':>10s} | {'Bets':>5s} {'WR':>5s} {'Stopped':>8s} {'PnL':>10s} {'ROI':>7s} | {'vs None':>10s}")
+        print(f"  {'-'*70}")
+
+        baseline_pnl = None
+
+        for sl in stop_loss_levels:
+            total_pnl = 0
+            total_bets = 0
+            total_wins = 0
+            total_stopped = 0
+
+            for posteriors, confs, p_test, y_test, vol_test in fold_data:
+                res = simulate_strategy(
+                    posteriors, confs, p_test, y_test,
+                    strategy_name=strategy, use_bayesian=True,
+                    stop_loss_pct=sl, volatilities=vol_test,
+                )
+                total_pnl += res["pnl"]
+                total_bets += res["n_bets"]
+                total_wins += res["wins"]
+                total_stopped += res.get("stopped_out_winners", 0)
+
+            wr = total_wins / max(total_bets, 1)
+            roi = total_pnl / (300.0 * n_splits) * 100
+
+            if sl is None:
+                baseline_pnl = total_pnl
+                sl_label = "None"
+            else:
+                sl_label = f"{sl:.0%}"
+
+            delta = total_pnl - baseline_pnl if baseline_pnl is not None else 0
+
+            print(f"  {sl_label:>10s} | "
+                  f"{total_bets:>5d} {wr:>4.0%} {total_stopped:>8d} "
+                  f"{total_pnl:>+10.2f} {roi:>+6.1f}% | "
+                  f"{delta:>+10.2f}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Backtest with Bayesian anchoring")
     parser.add_argument("--input", default="model/training_data.json")
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--sweep", action="store_true", help="Sweep conservative params")
+    parser.add_argument("--stop-loss", action="store_true", help="Compare stop-loss levels")
     args = parser.parse_args()
 
     df = load_data(args.input)
@@ -492,6 +619,9 @@ def main():
     if args.sweep:
         print(f"Sweeping conservative params on {len(df)} samples, {args.folds} folds")
         sweep_conservative(df, n_splits=args.folds)
+    elif args.stop_loss:
+        print(f"Comparing stop-loss levels on {len(df)} samples, {args.folds} folds")
+        sweep_stop_loss(df, n_splits=args.folds)
     else:
         print(f"Running backtest on {len(df)} samples across {args.folds} folds")
         print(f"Comparing: OLD (raw model prob) vs NEW (Bayesian-anchored)")

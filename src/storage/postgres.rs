@@ -63,6 +63,11 @@ impl PgPortfolio {
             .execute(&self.pool)
             .await
             .context("failed to run reset_bankroll migration")?;
+        let pred_log = include_str!("../../migrations/008_prediction_log.sql");
+        sqlx::raw_sql(pred_log)
+            .execute(&self.pool)
+            .await
+            .context("failed to run prediction_log migration")?;
         Ok(())
     }
 
@@ -76,7 +81,78 @@ impl PgPortfolio {
         .bind(market_id)
         .execute(&self.pool)
         .await?;
+        // Also resolve prediction_log entries
+        sqlx::query(
+            "UPDATE prediction_log SET resolved = true, outcome = $1, resolved_at = NOW() \
+             WHERE market_id = $2 AND resolved = false",
+        )
+        .bind(yes_won)
+        .bind(market_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
+    }
+
+    /// Log a model prediction for Brier score tracking.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn log_prediction(
+        &self,
+        market_id: &str,
+        source: &str,
+        market_price: f64,
+        model_prob: f64,
+        posterior: f64,
+        confidence: f64,
+        edge: f64,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO prediction_log (market_id, source, market_price, model_prob, posterior, confidence, edge) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7)",
+        )
+        .bind(market_id)
+        .bind(source)
+        .bind(market_price)
+        .bind(model_prob)
+        .bind(posterior)
+        .bind(confidence)
+        .bind(edge)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Compute Brier score from resolved predictions.
+    /// Returns (brier_score, n_predictions, market_brier) or None if no data.
+    pub async fn brier_score(&self) -> Result<Option<(f64, usize, f64)>> {
+        #[derive(sqlx::FromRow)]
+        struct PredRow {
+            posterior: f64,
+            market_price: f64,
+            outcome: Option<bool>,
+        }
+
+        let rows: Vec<PredRow> = sqlx::query_as(
+            "SELECT posterior, market_price, outcome FROM prediction_log \
+             WHERE resolved = true AND outcome IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        if rows.is_empty() {
+            return Ok(None);
+        }
+
+        let n = rows.len();
+        let mut model_sum = 0.0;
+        let mut market_sum = 0.0;
+
+        for r in &rows {
+            let actual = if r.outcome.unwrap_or(false) { 1.0 } else { 0.0 };
+            model_sum += (r.posterior - actual).powi(2);
+            market_sum += (r.market_price - actual).powi(2);
+        }
+
+        Ok(Some((model_sum / n as f64, n, market_sum / n as f64)))
     }
 
     /// Market IDs rejected in the last `hours` — skip re-assessment.
@@ -173,7 +249,7 @@ impl PgPortfolio {
         let losses = resolved.iter().filter(|b| b.won == Some(false)).count();
         let total_pnl: f64 = resolved.iter().filter_map(|b| b.pnl).sum();
         let roi = if starting > 0.0 {
-            total_pnl / starting * 100.0
+            (bankroll - starting) / starting * 100.0
         } else {
             0.0
         };
@@ -424,6 +500,7 @@ impl PgPortfolio {
             side: String,
             shares: f64,
             cost: f64,
+            fee_paid: f64,
             question: String,
             entry_price: f64,
             edge: f64,
@@ -432,7 +509,7 @@ impl PgPortfolio {
         }
 
         let row: Option<OpenBetRow> = sqlx::query_as(
-            "SELECT id, side, shares, cost, question, entry_price, edge, confidence, strategy \
+            "SELECT id, side, shares, cost, fee_paid, question, entry_price, edge, confidence, strategy \
              FROM bets WHERE market_id = $1 AND resolved = false LIMIT 1",
         )
         .bind(market_id)
@@ -442,11 +519,23 @@ impl PgPortfolio {
         let Some(r) = row else {
             return Ok(None);
         };
-        let (bet_id, side_str, shares, cost, question, entry_price, edge, confidence, strategy) = (
+        let (
+            bet_id,
+            side_str,
+            shares,
+            cost,
+            entry_fee,
+            question,
+            entry_price,
+            edge,
+            confidence,
+            strategy,
+        ) = (
             r.id,
             r.side,
             r.shares,
             r.cost,
+            r.fee_paid,
             r.question,
             r.entry_price,
             r.edge,
@@ -468,7 +557,8 @@ impl PgPortfolio {
         let gross_payout = if bet_won { shares } else { 0.0 };
         let exit_fee = gross_payout * fee_pct;
         let net_payout = gross_payout - exit_fee;
-        let pnl = net_payout - cost;
+        // PnL includes both entry and exit fees for accurate accounting
+        let pnl = net_payout - cost - entry_fee;
 
         sqlx::query(
             "UPDATE bets SET resolved = true, won = $1, pnl = $2, fee_paid = fee_paid + $3, \
@@ -504,6 +594,98 @@ impl PgPortfolio {
             cost,
             edge,
             confidence,
+            pnl,
+            bankroll: bankroll + net_payout,
+            total_wins: wins,
+            total_losses: losses,
+            total_pnl,
+        }))
+    }
+
+    /// Early exit: sell a position at current market price (paper trade).
+    /// Returns the same ResolvedBet struct as resolve_bet for consistent messaging.
+    pub async fn early_exit(
+        &self,
+        bet_id: i32,
+        current_yes_price: f64,
+        reason: &str,
+    ) -> Result<Option<ResolvedBet>> {
+        #[derive(sqlx::FromRow)]
+        struct OpenBetRow {
+            id: i32,
+            side: String,
+            shares: f64,
+            cost: f64,
+            fee_paid: f64,
+            question: String,
+            entry_price: f64,
+            edge: f64,
+            confidence: f64,
+            strategy: String,
+        }
+
+        let row: Option<OpenBetRow> = sqlx::query_as(
+            "SELECT id, side, shares, cost, fee_paid, question, entry_price, edge, confidence, strategy \
+             FROM bets WHERE id = $1 AND resolved = false LIMIT 1",
+        )
+        .bind(bet_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(r) = row else {
+            return Ok(None);
+        };
+
+        let side = if r.side == "Yes" {
+            BetSide::Yes
+        } else {
+            BetSide::No
+        };
+
+        // Selling shares at current market price
+        let sell_price = match side {
+            BetSide::Yes => current_yes_price,
+            BetSide::No => 1.0 - current_yes_price,
+        };
+        let fee_pct = 0.02;
+        let gross_payout = r.shares * sell_price;
+        let exit_fee = gross_payout * fee_pct;
+        let net_payout = gross_payout - exit_fee;
+        let pnl = net_payout - r.cost - r.fee_paid;
+
+        let reasoning = format!("Early exit: {reason}");
+        sqlx::query(
+            "UPDATE bets SET resolved = true, won = false, pnl = $1, fee_paid = fee_paid + $2, \
+             reasoning = reasoning || E'\\n' || $3, resolved_at = NOW() WHERE id = $4",
+        )
+        .bind(pnl)
+        .bind(exit_fee)
+        .bind(&reasoning)
+        .bind(r.id)
+        .execute(&self.pool)
+        .await?;
+
+        // Credit strategy bankroll with sell proceeds
+        let strat_bankroll = self.strategy_bankroll(&r.strategy).await?;
+        self.set_strategy_bankroll(&r.strategy, strat_bankroll + net_payout)
+            .await?;
+
+        let bankroll = self.bankroll().await?;
+        self.set_bankroll(bankroll + net_payout).await?;
+
+        let resolved = self.resolved_bets().await?;
+        let wins = resolved.iter().filter(|b| b.won == Some(true)).count();
+        let losses = resolved.iter().filter(|b| b.won == Some(false)).count();
+        let total_pnl: f64 = resolved.iter().filter_map(|b| b.pnl).sum();
+
+        Ok(Some(ResolvedBet {
+            question: r.question,
+            side,
+            won: false,
+            entry_price: r.entry_price,
+            cost: r.cost,
+            edge: r.edge,
+            confidence: r.confidence,
             pnl,
             bankroll: bankroll + net_payout,
             total_wins: wins,
@@ -561,13 +743,13 @@ impl PgPortfolio {
         let losses = resolved.iter().filter(|b| b.won == Some(false)).count();
         let total_pnl: f64 = resolved.iter().filter_map(|b| b.pnl).sum();
         let starting = self.starting_bankroll().await?;
+        let bankroll = self.bankroll().await?;
         let roi = if starting > 0.0 {
-            total_pnl / starting * 100.0
+            (bankroll - starting) / starting * 100.0
         } else {
             0.0
         };
         let today = Utc::now().format("%Y-%m-%d").to_string();
-        let bankroll = self.bankroll().await?;
 
         sqlx::query(
             "INSERT INTO daily_snapshots (date, bankroll, open_bets, total_bets, wins, losses, total_pnl, roi_pct) \
@@ -599,8 +781,9 @@ impl PgPortfolio {
         let losses = resolved.iter().filter(|b| b.won == Some(false)).count();
         let total_pnl: f64 = resolved.iter().filter_map(|b| b.pnl).sum();
         let total_fees: f64 = all_bets.iter().map(|b| b.fee_paid).sum();
+        // ROI from actual bankroll delta (most accurate, includes all fees)
         let roi = if starting > 0.0 {
-            total_pnl / starting * 100.0
+            (bankroll - starting) / starting * 100.0
         } else {
             0.0
         };
@@ -627,6 +810,20 @@ impl PgPortfolio {
             resolved_count = resolved.len(),
             open_count = open.len(),
         );
+
+        // Brier score — model accuracy vs market
+        if let Ok(Some((brier, n_preds, market_brier))) = self.brier_score().await {
+            let skill = if market_brier > 0.0 {
+                (1.0 - brier / market_brier) * 100.0
+            } else {
+                0.0
+            };
+            msg.push_str(&format!(
+                "\n\u{1f3af} *Model accuracy ({n_preds} predictions):*\n\
+                 Brier score: `{brier:.4}` (market: `{market_brier:.4}`)\n\
+                 Skill vs market: `{skill:+.1}%`\n",
+            ));
+        }
 
         if !open.is_empty() {
             msg.push_str("\n\u{1f513} *Open bets:*\n");
@@ -669,7 +866,6 @@ impl PgPortfolio {
 
 #[derive(sqlx::FromRow)]
 struct BetRow {
-    #[allow(dead_code)]
     id: i32,
     market_id: String,
     question: String,
@@ -704,6 +900,7 @@ impl BetRow {
         let context: Option<BetContext> = self.context.and_then(|v| serde_json::from_value(v).ok());
 
         Bet {
+            id: self.id,
             market_id: self.market_id,
             question: self.question,
             side,

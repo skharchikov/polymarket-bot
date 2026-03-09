@@ -108,6 +108,15 @@ pub struct AppConfig {
     #[config(env = "STRATEGIES", default = "aggressive,balanced,conservative")]
     pub strategies: String,
 
+    // --- Early exit ---
+    /// Stop-loss: exit if unrealized loss exceeds this fraction of cost (0.30 = -30%).
+    #[config(env = "STOP_LOSS_PCT", default = 0.30)]
+    pub stop_loss_pct: f64,
+
+    /// Exit if position is underwater and fewer than this many days to expiry.
+    #[config(env = "EXIT_DAYS_BEFORE_EXPIRY", default = 2)]
+    pub exit_days_before_expiry: i64,
+
     /// ML model sidecar URL (Python ensemble server).
     /// When set, uses the full stacking ensemble instead of local XGBoost.
     #[config(env = "MODEL_SIDECAR_URL", default = "")]

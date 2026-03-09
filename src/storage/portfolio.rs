@@ -52,6 +52,7 @@ pub struct NewBet {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bet {
+    pub id: i32,
     pub market_id: String,
     pub question: String,
     #[serde(default = "default_side")]
