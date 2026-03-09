@@ -18,7 +18,8 @@ services:
   model-server:
     build:
       context: scripts
-    command: ["python", "serve_model.py"]
+    entrypoint: ["python"]
+    command: ["serve_model.py"]
     environment:
       MODEL_DIR: /model
       MODEL_PORT: "8000"
