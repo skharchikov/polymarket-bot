@@ -18,7 +18,7 @@ use crate::model::sidecar::SidecarClient;
 use crate::pricing::kelly::fractional_kelly;
 use crate::storage::portfolio::{BetContext, BetSide};
 
-use super::news::{NewsAggregator, NewsItem, NewsMatch};
+use super::news::{NewsAggregator, NewsItem, NewsMatch, dedup_news};
 
 const GAMMA_API: &str = "https://gamma-api.polymarket.com";
 const CLOB_API: &str = "https://clob.polymarket.com";
@@ -802,7 +802,7 @@ impl LiveScanner {
         &self,
         eligible: &[GammaMarket],
         _skip_market_ids: &[String],
-        seen_headlines: &mut std::collections::HashSet<String>,
+        _seen_headlines: &mut std::collections::HashSet<String>,
         markets_scanned: usize,
     ) -> Result<ScanResult> {
         let top_n = self.cfg.max_model_candidates;
@@ -942,6 +942,9 @@ impl LiveScanner {
         );
 
         // Step 4: Fetch news and match to top candidates (boost, not gate)
+        // No cross-cycle headline dedup for model-first — the 4h freshness
+        // window handles staleness, and the same headline may be relevant
+        // to different top candidates across cycles.
         let (mut news, source_counts) = self.news.fetch_all().await;
         let news_total = news.len();
 
@@ -952,35 +955,9 @@ impl LiveScanner {
                 .unwrap_or(true)
         });
 
-        // Dedup seen headlines
-        news.retain(|item| {
-            let key = item
-                .title
-                .to_lowercase()
-                .chars()
-                .filter(|c| c.is_alphanumeric())
-                .take(60)
-                .collect::<String>();
-            !seen_headlines.contains(&key)
-        });
-        for item in &news {
-            let key = item
-                .title
-                .to_lowercase()
-                .chars()
-                .filter(|c| c.is_alphanumeric())
-                .take(60)
-                .collect::<String>();
-            seen_headlines.insert(key);
-        }
-        // Prune seen set
-        if seen_headlines.len() > 3000 {
-            let drain_count = seen_headlines.len() - 2000;
-            let keys: Vec<String> = seen_headlines.iter().take(drain_count).cloned().collect();
-            for k in keys {
-                seen_headlines.remove(&k);
-            }
-        }
+        // Dedup within this batch only (same headline from multiple RSS feeds)
+        dedup_news(&mut news);
+
         let news_new = news.len();
 
         // Match news to candidate markets only (not all eligible — saves embedding cost)

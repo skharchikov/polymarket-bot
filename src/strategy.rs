@@ -24,7 +24,7 @@ impl StrategyProfile {
             kelly_fraction: 0.50,
             min_effective_edge: 0.05,
             min_confidence: 0.40,
-            max_signals_per_day: 5,
+            max_signals_per_day: 10,
             min_bet: 5.0,
         }
     }
@@ -35,7 +35,7 @@ impl StrategyProfile {
             kelly_fraction: 0.25,
             min_effective_edge: 0.08,
             min_confidence: 0.50,
-            max_signals_per_day: 3,
+            max_signals_per_day: 5,
             min_bet: 10.0,
         }
     }
@@ -46,7 +46,7 @@ impl StrategyProfile {
             kelly_fraction: 0.15,
             min_effective_edge: 0.08,
             min_confidence: 0.50,
-            max_signals_per_day: 2,
+            max_signals_per_day: 3,
             min_bet: 15.0,
         }
     }

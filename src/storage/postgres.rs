@@ -33,51 +33,10 @@ impl PgPortfolio {
     }
 
     pub async fn run_migrations(&self) -> Result<()> {
-        let init = include_str!("../../migrations/001_init.sql");
-        sqlx::raw_sql(init)
-            .execute(&self.pool)
+        sqlx::migrate!("./migrations")
+            .run(&self.pool)
             .await
-            .context("failed to run init migration")?;
-        let calibration = include_str!("../../migrations/002_calibration.sql");
-        sqlx::raw_sql(calibration)
-            .execute(&self.pool)
-            .await
-            .context("failed to run calibration migration")?;
-        let strategies = include_str!("../../migrations/003_strategies.sql");
-        sqlx::raw_sql(strategies)
-            .execute(&self.pool)
-            .await
-            .context("failed to run strategies migration")?;
-        let rejected = include_str!("../../migrations/004_rejected_signals.sql");
-        sqlx::raw_sql(rejected)
-            .execute(&self.pool)
-            .await
-            .context("failed to run rejected_signals migration")?;
-        let tg_users = include_str!("../../migrations/005_telegram_users.sql");
-        sqlx::raw_sql(tg_users)
-            .execute(&self.pool)
-            .await
-            .context("failed to run telegram_users migration")?;
-        let reset = include_str!("../../migrations/006_reset_bankroll.sql");
-        sqlx::raw_sql(reset)
-            .execute(&self.pool)
-            .await
-            .context("failed to run reset_bankroll migration")?;
-        let pred_log = include_str!("../../migrations/008_prediction_log.sql");
-        sqlx::raw_sql(pred_log)
-            .execute(&self.pool)
-            .await
-            .context("failed to run prediction_log migration")?;
-        let bet_source = include_str!("../../migrations/009_bet_source.sql");
-        sqlx::raw_sql(bet_source)
-            .execute(&self.pool)
-            .await
-            .context("failed to run bet_source migration")?;
-        let fix_bankroll = include_str!("../../migrations/010_fix_global_bankroll.sql");
-        sqlx::raw_sql(fix_bankroll)
-            .execute(&self.pool)
-            .await
-            .context("failed to run fix_global_bankroll migration")?;
+            .context("failed to run migrations")?;
         Ok(())
     }
 

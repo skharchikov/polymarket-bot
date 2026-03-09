@@ -424,7 +424,7 @@ fn parse_rss_date(s: &str) -> Option<DateTime<Utc>> {
         .map(|d| d.with_timezone(&Utc))
 }
 
-fn dedup_news(items: &mut Vec<NewsItem>) {
+pub fn dedup_news(items: &mut Vec<NewsItem>) {
     let mut seen = std::collections::HashSet::new();
     items.retain(|item| {
         let key = item
