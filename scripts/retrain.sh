@@ -2,7 +2,7 @@
 set -e
 
 MODEL_FILE="/model/ensemble.joblib"
-MAX_AGE_HOURS="${RETRAIN_MAX_AGE_HOURS:-72}"
+MAX_AGE_HOURS="${RETRAIN_MAX_AGE_HOURS:-24}"
 
 # Skip training if the model is fresh enough
 if [ -f "$MODEL_FILE" ]; then

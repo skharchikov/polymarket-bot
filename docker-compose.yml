@@ -24,7 +24,7 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://bot:bot@postgres:5432/polymarket
-      RETRAIN_MAX_AGE_HOURS: "72"
+      RETRAIN_MAX_AGE_HOURS: "24"
     volumes:
       - model:/model
 
