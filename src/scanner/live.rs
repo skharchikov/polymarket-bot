@@ -13,6 +13,8 @@ use crate::bayesian::{self, AgentAssessment, BayesianEstimate};
 use crate::calibration::CalibrationCurve;
 use crate::config::AppConfig;
 use crate::data::models::{GammaMarket, PriceTick};
+use crate::model::features::MarketFeatures;
+use crate::model::xgb::XgbModel;
 use crate::pricing::kelly::fractional_kelly;
 use crate::storage::portfolio::{BetContext, BetSide};
 
@@ -216,6 +218,8 @@ impl AgentRole {
     }
 }
 
+const MODEL_PATH: &str = "model/xgb_model.json";
+
 pub struct LiveScanner {
     http: Client,
     openai_client: openai::Client,
@@ -223,6 +227,7 @@ pub struct LiveScanner {
     pool: PgPool,
     calibration: RwLock<CalibrationCurve>,
     cfg: Arc<AppConfig>,
+    xgb_model: Option<XgbModel>,
 }
 
 impl LiveScanner {
@@ -232,6 +237,20 @@ impl LiveScanner {
             .build()
             .expect("failed to build HTTP client");
         let calibration = CalibrationCurve::load(&pool, cfg.calibration_min_samples).await?;
+
+        // Load XGBoost model if available (trained by scripts/train_model.py)
+        let model_path = std::path::Path::new(MODEL_PATH);
+        let xgb_model = match XgbModel::load(model_path) {
+            Ok(m) => {
+                tracing::info!(trees = m.n_trees(), "XGBoost model loaded");
+                Some(m)
+            }
+            Err(e) => {
+                tracing::info!(err = %e, "No XGBoost model — using LLM only");
+                None
+            }
+        };
+
         Ok(Self {
             news: NewsAggregator::new(http.clone()),
             http,
@@ -239,6 +258,7 @@ impl LiveScanner {
             pool,
             calibration: RwLock::new(calibration),
             cfg: Arc::clone(cfg),
+            xgb_model,
         })
     }
 
@@ -247,6 +267,21 @@ impl LiveScanner {
         let curve = CalibrationCurve::load(&self.pool, self.cfg.calibration_min_samples).await?;
         *self.calibration.write().await = curve;
         Ok(())
+    }
+
+    /// Hot-reload XGBoost model from disk (call after retraining).
+    #[allow(dead_code)]
+    pub fn reload_model(&mut self) {
+        let model_path = std::path::Path::new(MODEL_PATH);
+        match XgbModel::load(model_path) {
+            Ok(m) => {
+                tracing::info!(trees = m.n_trees(), "XGBoost model reloaded");
+                self.xgb_model = Some(m);
+            }
+            Err(e) => {
+                tracing::debug!(err = %e, "Model reload skipped");
+            }
+        }
     }
 
     /// Build an LLM agent for a specific role.
@@ -739,7 +774,7 @@ impl LiveScanner {
         }
 
         // Step 4: For top matches, check book depth and get price history
-        let mut candidates: Vec<(NewsMatch, f64, String, f64)> = Vec::new();
+        let mut candidates: Vec<(NewsMatch, f64, String, Vec<PriceTick>, f64)> = Vec::new();
 
         for nm in matches.iter().take(self.cfg.max_llm_candidates * 2) {
             let token_id = nm.market.yes_token_id().unwrap();
@@ -766,7 +801,13 @@ impl LiveScanner {
                 .unwrap_or_default();
             let history_summary = summarize_history(&history, current_price);
 
-            candidates.push((nm.clone(), current_price, history_summary, book_depth));
+            candidates.push((
+                nm.clone(),
+                current_price,
+                history_summary,
+                history,
+                book_depth,
+            ));
 
             if candidates.len() >= self.cfg.max_llm_candidates {
                 break;
@@ -787,38 +828,87 @@ impl LiveScanner {
             });
         }
 
+        let has_model = self.xgb_model.is_some();
         tracing::info!(
             count = candidates.len(),
-            "Assessing news impact with LLM..."
+            xgb = has_model,
+            "Assessing candidates{}",
+            if has_model {
+                " (XGBoost + LLM)"
+            } else {
+                " (LLM only)"
+            }
         );
 
-        // Step 5: LLM assesses news impact on each candidate
+        // Step 5: Assess each candidate — XGBoost instant, LLM as fallback/comparison
         let mut signals = Vec::new();
         let mut rejections = Vec::new();
 
-        for (i, (nm, current_price, history_summary, book_depth)) in candidates.iter().enumerate() {
-            // Rate limit between candidates: just need 21s since last LLM call.
-            // The previous candidate's last agent call already waited, so only
-            // the gap between that call finishing and the next one starting matters.
-            if i > 0 {
-                tracing::info!("Waiting 21s for rate limit between candidates...");
-                tokio::time::sleep(Duration::from_secs(21)).await;
+        for (i, (nm, current_price, history_summary, history, book_depth)) in
+            candidates.iter().enumerate()
+        {
+            // --- XGBoost prediction (instant, free) ---
+            let xgb_estimate = self.xgb_model.as_ref().map(|model| {
+                let features =
+                    MarketFeatures::from_market_and_history(&nm.market, *current_price, history);
+                let feature_vec = features.to_vec();
+                let xgb_prob = model.predict_prob(&feature_vec);
+                let xgb_conf = model.confidence(&feature_vec);
+                (xgb_prob, xgb_conf)
+            });
+
+            if let Some((xgb_prob, xgb_conf)) = xgb_estimate {
+                tracing::info!(
+                    market = %nm.market.question,
+                    xgb_prob = format_args!("{:.1}%", xgb_prob * 100.0),
+                    xgb_conf = format_args!("{:.0}%", xgb_conf * 100.0),
+                    price = format_args!("{:.1}%", current_price * 100.0),
+                    "XGBoost prediction"
+                );
             }
 
-            let (prob, confidence, combined_lr, reasoning) = match self
-                .assess_news_impact(
-                    &nm.market,
-                    *current_price,
-                    &nm.news,
-                    history_summary,
-                    past_bets_summary,
-                )
-                .await
+            // --- LLM prediction (slow, costs money — skip if XGBoost is confident) ---
+            let (prob, confidence, combined_lr, reasoning) = if let Some((xgb_prob, xgb_conf)) =
+                xgb_estimate
             {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(market = %nm.market.market_id, err = %e, "LLM assessment failed");
-                    continue;
+                // Use XGBoost as primary; construct a synthetic LR from the probability shift
+                let lr = if *current_price > 0.01 && *current_price < 0.99 {
+                    (xgb_prob / *current_price) / ((1.0 - xgb_prob) / (1.0 - *current_price))
+                } else {
+                    1.0
+                };
+                (
+                    xgb_prob,
+                    xgb_conf,
+                    lr,
+                    format!(
+                        "XGBoost: {:.1}% (market {:.1}%)",
+                        xgb_prob * 100.0,
+                        current_price * 100.0
+                    ),
+                )
+            } else {
+                // No model — fall back to LLM
+                if i > 0 {
+                    tracing::info!("Waiting 21s for rate limit between candidates...");
+                    tokio::time::sleep(Duration::from_secs(21)).await;
+                }
+
+                match self
+                    .assess_news_impact(
+                        &nm.market,
+                        *current_price,
+                        &nm.news,
+                        history_summary,
+                        past_bets_summary,
+                    )
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(market = %nm.market.market_id, err = %e, "LLM assessment failed");
+                        continue;
+                    }
                 }
             };
 
