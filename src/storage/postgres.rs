@@ -423,10 +423,15 @@ impl PgPortfolio {
             };
 
             let q = truncate(&bet.question, 50);
+            // Strip chars that break Telegram Markdown v1 links
+            let q_safe: String = q
+                .chars()
+                .filter(|c| !matches!(c, '[' | ']' | '(' | ')'))
+                .collect();
             let q_link = if link.is_empty() {
-                format!("_{q}_")
+                q_safe
             } else {
-                format!("[{q}]({link})")
+                format!("[{q_safe}]({link})")
             };
 
             total_cost += bet.cost;
