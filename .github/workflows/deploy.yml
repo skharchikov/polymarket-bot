@@ -58,7 +58,10 @@ jobs:
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
-          ssh -i ~/.ssh/deploy_key "deploy@$DEPLOY_HOST" "\
+          ssh -i ~/.ssh/deploy_key \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=40 \
+            "deploy@$DEPLOY_HOST" "\
             cd $DEPLOY_DIR && \
             docker compose build --no-cache && \
             docker compose up -d && \
