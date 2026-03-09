@@ -204,7 +204,7 @@ def build_ensemble():
     return stacker
 
 
-def evaluate_folds(model, X, y, prices, n_splits=5):
+def evaluate_folds(model, X, y, prices, n_splits=5, market_ids=None):
     """Time-series cross-validation with market-relevant metrics."""
     tscv = TimeSeriesSplit(n_splits=n_splits)
     results = []
@@ -413,8 +413,9 @@ def main():
     raw_model = build_ensemble()
 
     # Evaluate with time-series CV
+    market_ids = df["market_id"].values if "market_id" in df.columns else None
     print("\nTime-series cross-validation:")
-    results = evaluate_folds(raw_model, X_scaled, y, prices)
+    results = evaluate_folds(raw_model, X_scaled, y, prices, market_ids=market_ids)
 
     avg_brier = np.mean([r["brier"] for r in results])
     avg_edge = np.mean([r["avg_edge"] for r in results])
@@ -445,21 +446,34 @@ def main():
 
     # Final evaluation on last 20% (held out by time)
     split_idx = int(len(X_scaled) * 0.8)
-    X_test = X_scaled[split_idx:]
-    y_test = y[split_idx:]
-    p_test = prices[split_idx:]
+    X_test_all = X_scaled[split_idx:]
+    y_test_all = y[split_idx:]
+    p_test_all = prices[split_idx:]
 
-    if len(X_test) > 10:
-        probs = model.predict_proba(X_test)[:, 1]
-        print(f"\nHeld-out test ({len(X_test)} samples):")
-        print(f"  Brier: {brier_score_loss(y_test, probs):.4f}")
-        print(f"  LogLoss: {log_loss(y_test, probs):.4f}")
-        print(f"  Accuracy: {accuracy_score(y_test, (probs > 0.5).astype(int)):.1%}")
-        print(f"  Avg edge vs market: {np.mean(probs - p_test):+.4f}")
+    if len(X_test_all) > 10:
+        probs_all = model.predict_proba(X_test_all)[:, 1]
+        print(f"\nHeld-out test ({len(X_test_all)} samples):")
+        print(f"  Brier: {brier_score_loss(y_test_all, probs_all):.4f}")
+        print(f"  Accuracy: {accuracy_score(y_test_all, (probs_all > 0.5).astype(int)):.1%}")
+
+        # Report new-market-only subset for honest signal estimate
+        if "market_id" in df.columns:
+            train_ids = set(df["market_id"].iloc[:split_idx])
+            test_ids = df["market_id"].iloc[split_idx:].values
+            clean = np.array([mid not in train_ids for mid in test_ids])
+            n_clean = clean.sum()
+            if n_clean >= 10:
+                probs_c = probs_all[clean]
+                y_c = y_test_all[clean]
+                p_c = p_test_all[clean]
+                print(f"  New-market subset ({n_clean}/{len(X_test_all)} samples):")
+                print(f"    Brier: {brier_score_loss(y_c, probs_c):.4f} "
+                      f"(market baseline: {brier_score_loss(y_c, p_c):.4f})")
+                print(f"    Accuracy: {accuracy_score(y_c, (probs_c > 0.5).astype(int)):.1%}")
 
         # Calibration curve
         try:
-            frac, mean_pred = calibration_curve(y_test, probs, n_bins=5)
+            frac, mean_pred = calibration_curve(y_test_all, probs_all, n_bins=5)
             print(f"  Calibration (predicted -> actual):")
             for pred, actual in zip(mean_pred, frac):
                 print(f"    {pred:.2f} -> {actual:.2f}")
