@@ -770,7 +770,7 @@ impl LiveScanner {
 
             let features = MarketFeatures::from_market_and_history(market, current_price, &history);
             let feature_vec = features.to_vec();
-            let xgb_prob = model.predict_prob(&feature_vec);
+            let xgb_prob = model.predict_prob_dampened(&feature_vec, current_price);
             let xgb_conf = model.confidence(&feature_vec);
 
             // Raw edge: how far model disagrees with market
@@ -958,7 +958,10 @@ impl LiveScanner {
                     avg_news_age_hours,
                 );
                 let fv = features.to_vec();
-                (model.predict_prob(&fv), model.confidence(&fv))
+                (
+                    model.predict_prob_dampened(&fv, c.current_price),
+                    model.confidence(&fv),
+                )
             } else {
                 (c.xgb_prob, c.xgb_conf)
             };
@@ -1418,7 +1421,7 @@ impl LiveScanner {
 
         let features = MarketFeatures::from_market_and_history(&market, current_price, &history);
         let feature_vec = features.to_vec();
-        let xgb_prob = model.predict_prob(&feature_vec);
+        let xgb_prob = model.predict_prob_dampened(&feature_vec, current_price);
         let xgb_conf = model.confidence(&feature_vec);
 
         // Synthetic LR

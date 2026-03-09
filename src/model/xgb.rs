@@ -116,7 +116,7 @@ impl XgbModel {
         sigmoid(raw + logit(self.base_score))
     }
 
-    /// Confidence estimate based on tree agreement.
+    /// Confidence estimate based on tree agreement (coefficient of variation).
     /// Returns 0.0-1.0 where higher = more trees agree.
     pub fn confidence(&self, features: &[f64]) -> f64 {
         if self.trees.is_empty() {
@@ -131,11 +131,31 @@ impl XgbModel {
         let mean = predictions.iter().sum::<f64>() / predictions.len() as f64;
         let variance =
             predictions.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / predictions.len() as f64;
+        let std_dev = variance.sqrt();
 
-        // Low variance = high confidence. Map variance to 0-1 confidence.
-        // Typical tree output variance is 0.01-0.5
-        let confidence = 1.0 / (1.0 + variance * 10.0);
-        confidence.clamp(0.3, 0.95)
+        // Use coefficient of variation relative to mean magnitude.
+        // Higher CV = less agreement = lower confidence.
+        let mean_abs = mean.abs().max(0.01);
+        let cv = std_dev / mean_abs;
+
+        // CV of 0 → confidence 0.80 (max, model is still just one ensemble member)
+        // CV of 1 → confidence ~0.35
+        // CV of 2+ → confidence ~0.25
+        let confidence = 0.80 / (1.0 + cv * 1.5);
+        confidence.clamp(0.25, 0.80)
+    }
+
+    /// Predict probability but dampen extreme deviations from market price.
+    /// The standalone XGBoost model is one part of a stacking ensemble;
+    /// it shouldn't be trusted to deviate more than ~25% from market consensus.
+    pub fn predict_prob_dampened(&self, features: &[f64], market_price: f64) -> f64 {
+        let raw_prob = self.predict_prob(features);
+        // Max deviation from market price: 25 percentage points
+        let max_deviation = 0.25;
+        raw_prob.clamp(
+            (market_price - max_deviation).max(0.01),
+            (market_price + max_deviation).min(0.99),
+        )
     }
 
     pub fn n_trees(&self) -> usize {
