@@ -18,7 +18,7 @@ services:
   trainer:
     build:
       context: scripts
-    command: ["/bin/sh", "retrain.sh"]
+    command: ["retrain.sh"]
     depends_on:
       postgres:
         condition: service_healthy
