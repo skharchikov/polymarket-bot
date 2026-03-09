@@ -89,6 +89,24 @@ impl GammaMarket {
         ids.into_iter().next().filter(|s| !s.is_empty())
     }
 
+    /// True if this is a binary YES/NO market (exactly 2 outcomes).
+    /// Multi-outcome markets (e.g. "Who will win?" with 5 candidates) return false.
+    pub fn is_binary(&self) -> bool {
+        // Check outcomes field: should be ["Yes","No"]
+        if let Some(outcomes_str) = &self.outcomes
+            && let Ok(outcomes) = serde_json::from_str::<Vec<String>>(outcomes_str)
+        {
+            return outcomes.len() == 2;
+        }
+        // Fallback: check token IDs count (binary markets have exactly 2)
+        if let Some(ids_str) = &self.clob_token_ids
+            && let Ok(ids) = serde_json::from_str::<Vec<String>>(ids_str)
+        {
+            return ids.len() == 2;
+        }
+        false
+    }
+
     pub fn polymarket_url(&self) -> String {
         match &self.slug {
             Some(slug) => format!("https://polymarket.com/event/{slug}"),

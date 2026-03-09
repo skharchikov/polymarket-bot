@@ -103,6 +103,7 @@ impl Crawler {
 
         let candidates: Vec<_> = gamma_markets
             .iter()
+            .filter(|gm| gm.is_binary())
             .filter(|gm| !gm.is_short_duration_noise())
             .filter(|gm| !self.config.crypto_only || gm.is_crypto_related())
             .filter(|gm| gm.volume_num >= self.config.min_volume)

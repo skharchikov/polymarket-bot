@@ -38,6 +38,10 @@ sqlx = { version = "0.8.6", features = [
   "json",
 ] }
 
+# WebSocket
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+
 # Environment variables
 dotenvy = "0.15"
 
