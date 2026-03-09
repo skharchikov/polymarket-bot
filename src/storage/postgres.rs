@@ -334,6 +334,66 @@ impl PgPortfolio {
         ))
     }
 
+    /// Build a summary of open bets for /open command.
+    pub async fn open_bets_summary(&self) -> Result<String> {
+        let open = self.open_bets().await?;
+        if open.is_empty() {
+            return Ok("📭 No open bets".to_string());
+        }
+
+        let mut lines = Vec::new();
+        let mut total_cost = 0.0_f64;
+
+        for bet in &open {
+            let age_days = (Utc::now() - bet.placed_at).num_hours() as f64 / 24.0;
+            let label = match bet.strategy.as_str() {
+                "aggressive" => "🔥",
+                "balanced" => "⚖️",
+                "conservative" => "🛡️",
+                _ => "📊",
+            };
+            total_cost += bet.cost;
+            lines.push(format!(
+                "{label} `€{cost:.2}` @ `{price:.1}¢` ({age:.0}d)\n\u{00a0}\u{00a0}{q}",
+                cost = bet.cost,
+                price = bet.entry_price * 100.0,
+                age = age_days,
+                q = truncate(&bet.question, 50),
+            ));
+        }
+
+        Ok(format!(
+            "🔓 *Open Bets* ({count})\n\
+             💰 Total at risk: `€{total_cost:.2}`\n\n\
+             {details}",
+            count = open.len(),
+            details = lines.join("\n\n"),
+        ))
+    }
+
+    /// Build a model accuracy summary for /brier command.
+    pub async fn brier_summary(&self) -> Result<String> {
+        match self.brier_score().await? {
+            Some((model_brier, n, market_brier)) => {
+                let skill = if market_brier > 0.0 {
+                    (1.0 - model_brier / market_brier) * 100.0
+                } else {
+                    0.0
+                };
+                let skill_emoji = if skill > 0.0 { "✅" } else { "❌" };
+                Ok(format!(
+                    "🎯 *Model Accuracy*\n\n\
+                     📊 Predictions: {n}\n\
+                     🤖 Model Brier: `{model_brier:.4}` (lower = better)\n\
+                     📈 Market Brier: `{market_brier:.4}`\n\
+                     {skill_emoji} Skill vs market: `{skill:+.1}%`\n\n\
+                     _Brier score: 0 = perfect, 0.25 = random_",
+                ))
+            }
+            None => Ok("🎯 *Model Accuracy*\n\nNo resolved predictions yet.".to_string()),
+        }
+    }
+
     // --- meta helpers ---
 
     async fn get_f64(&self, key: &str) -> Result<f64> {

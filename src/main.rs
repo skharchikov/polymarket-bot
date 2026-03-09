@@ -424,6 +424,8 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     // Spawn Telegram command polling loop
     let cmd_portfolio = Arc::clone(&portfolio);
     let cmd_notifier = Arc::clone(&notifier);
+    let cmd_stats = Arc::clone(&stats);
+    let cmd_start = std::time::Instant::now();
     let command_loop = tokio::spawn(async move {
         loop {
             let commands = cmd_notifier.poll_commands().await;
@@ -439,7 +441,15 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                 let reply = match cmd.as_str() {
                     "start" => {
                         let name = first_name.as_deref().unwrap_or("there");
-                        format!("👋 Hi {name}! I'm the Polymarket Signal Bot.\n\nCommands:\n/stats — portfolio statistics\n/help — show commands")
+                        format!(
+                            "👋 Hi {name}! I'm the Polymarket Signal Bot.\n\n\
+                             Commands:\n\
+                             /stats — portfolio statistics\n\
+                             /open — open positions\n\
+                             /brier — model accuracy\n\
+                             /health — bot health\n\
+                             /help — show commands"
+                        )
                     }
                     "stats" => match cmd_portfolio.stats_summary().await {
                         Ok(s) => s,
@@ -448,7 +458,44 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                             "⚠️ Failed to load stats".to_string()
                         }
                     },
-                    "help" => "📖 *Commands*\n\n/start — welcome message\n/stats — portfolio statistics\n/help — this message".to_string(),
+                    "open" => match cmd_portfolio.open_bets_summary().await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(err = %e, "Failed to build open bets");
+                            "⚠️ Failed to load open bets".to_string()
+                        }
+                    },
+                    "brier" => match cmd_portfolio.brier_summary().await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(err = %e, "Failed to build brier");
+                            "⚠️ Failed to load model accuracy".to_string()
+                        }
+                    },
+                    "health" => {
+                        let uptime = cmd_start.elapsed();
+                        let hours = uptime.as_secs() / 3600;
+                        let mins = (uptime.as_secs() % 3600) / 60;
+                        let scans = cmd_stats.scans_completed.load(Ordering::Relaxed);
+                        let mkts = cmd_stats.markets_scanned.load(Ordering::Relaxed);
+                        let sigs = cmd_stats.signals_found.load(Ordering::Relaxed);
+                        let news = cmd_stats.news_new.load(Ordering::Relaxed);
+                        format!(
+                            "🏥 *Bot Health*\n\n\
+                             ⏱ Uptime: {hours}h {mins}m\n\
+                             🔄 Scans completed: {scans}\n\
+                             🔍 Markets scanned: {mkts}\n\
+                             📡 Signals found: {sigs}\n\
+                             📰 News processed: {news}",
+                        )
+                    }
+                    "help" => "📖 *Commands*\n\n\
+                         /stats — portfolio statistics\n\
+                         /open — open positions\n\
+                         /brier — model accuracy\n\
+                         /health — bot health & uptime\n\
+                         /help — this message"
+                        .to_string(),
                     _ => format!("❓ Unknown command: /{cmd}\nTry /help"),
                 };
 
