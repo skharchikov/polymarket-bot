@@ -1541,6 +1541,7 @@ dependencies = [
  "mimalloc",
  "reqwest",
  "rig-core",
+ "rustls",
  "serde",
  "serde_json",
  "sqlx",
