@@ -1016,6 +1016,12 @@ async fn housekeeping_cycle(
             msg.push_str(&format!("\n{line}"));
         }
 
+        // Cache unrealized PnL for /stats command
+        let _ = portfolio
+            .upsert_f64_pub("unrealized_pnl", total_unrealized)
+            .await;
+        let _ = portfolio.upsert_f64_pub("open_exposure", total_cost).await;
+
         broadcast(notifier, portfolio, &msg).await;
     }
 

@@ -356,10 +356,20 @@ impl PgPortfolio {
             format!("\n\n📡 *By Source*\n{}", source_lines.join("\n"))
         };
 
+        // Unrealized PnL (cached from housekeeping)
+        let unrealized = self.get_f64("unrealized_pnl").await.unwrap_or(0.0);
+        let exposure = self.get_f64("open_exposure").await.unwrap_or(0.0);
+        let unrealized_section = if total_open > 0 {
+            format!("\n📈 Unrealized: `€{unrealized:+.2}` (€{exposure:.2} deployed)\n")
+        } else {
+            String::new()
+        };
+
         Ok(format!(
             "📊 *Bot Statistics*\n\n\
              💰 Bankroll: `€{total_bankroll:.2}` (started: `€{starting:.2}`)\n\
-             💵 PnL: `€{total_pnl:+.2}` | ROI: `{total_roi:+.1}%`\n\
+             💵 Realized PnL: `€{total_pnl:+.2}` | ROI: `{total_roi:+.1}%`\n\
+             {unrealized_section}\
              📋 {total_wins}W / {total_losses}L ({total_wr:.0}%) | {total_open} open\n\n\
              {strat_details}{source_section}",
             strat_details = strat_lines.join("\n\n"),
@@ -462,6 +472,10 @@ impl PgPortfolio {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    pub async fn upsert_f64_pub(&self, key: &str, val: f64) -> Result<()> {
+        self.upsert_f64(key, val).await
     }
 
     async fn upsert_f64(&self, key: &str, val: f64) -> Result<()> {
