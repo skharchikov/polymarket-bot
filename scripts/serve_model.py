@@ -75,10 +75,15 @@ class HealthResponse(BaseModel):
 
 @app.get("/health", response_model=HealthResponse)
 def health():
+    if model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Model not loaded — run trainer first",
+        )
     age = time.time() - model_loaded_at if model_loaded_at else None
     return HealthResponse(
-        status="ok" if model is not None else "no_model",
-        model_loaded=model is not None,
+        status="ok",
+        model_loaded=True,
         model_age_secs=age,
     )
 

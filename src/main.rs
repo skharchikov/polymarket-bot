@@ -70,50 +70,6 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Run Python training pipeline to create initial XGBoost model.
-async fn train_model_if_missing() -> Result<()> {
-    use tokio::process::Command;
-
-    std::fs::create_dir_all("model")?;
-
-    // Step 1: Fetch training data
-    let fetch = Command::new("python3")
-        .args([
-            "scripts/fetch_data.py",
-            "--markets",
-            "500",
-            "--output",
-            "model/training_data.json",
-        ])
-        .output()
-        .await?;
-
-    if !fetch.status.success() {
-        let stderr = String::from_utf8_lossy(&fetch.stderr);
-        anyhow::bail!("fetch_data.py failed: {stderr}");
-    }
-    tracing::info!("Training data fetched");
-
-    // Step 2: Train model
-    let train = Command::new("python3")
-        .args([
-            "scripts/train_model.py",
-            "--input",
-            "model/training_data.json",
-            "--output",
-            "model/xgb_model.json",
-        ])
-        .output()
-        .await?;
-
-    if !train.status.success() {
-        let stderr = String::from_utf8_lossy(&train.stderr);
-        anyhow::bail!("train_model.py failed: {stderr}");
-    }
-
-    Ok(())
-}
-
 async fn run_backtest() -> Result<()> {
     use backtest::engine::{BacktestConfig, run_backtest};
     use data::crawler::{Crawler, CrawlerConfig};
@@ -295,15 +251,6 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     let portfolio = Arc::new(PgPortfolio::new(pool.clone()).await?);
     portfolio.run_migrations().await?;
     tracing::info!("Database connected and migrations applied");
-
-    // Train XGBoost model on first run if it doesn't exist yet
-    if !std::path::Path::new("model/xgb_model.json").exists() {
-        tracing::info!("No XGBoost model found — training initial model...");
-        match train_model_if_missing().await {
-            Ok(()) => tracing::info!("Initial model training complete"),
-            Err(e) => tracing::warn!(err = %e, "Model training failed — will use LLM fallback"),
-        }
-    }
 
     let notifier = Arc::new(telegram::notifier::TelegramNotifier::new(
         &cfg.telegram_bot_token,

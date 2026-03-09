@@ -15,7 +15,6 @@ use crate::config::AppConfig;
 use crate::data::models::{GammaMarket, PriceTick};
 use crate::model::features::MarketFeatures;
 use crate::model::sidecar::SidecarClient;
-use crate::model::xgb::XgbModel;
 use crate::pricing::kelly::fractional_kelly;
 use crate::storage::portfolio::{BetContext, BetSide};
 
@@ -251,8 +250,6 @@ impl AgentRole {
     }
 }
 
-const MODEL_PATH: &str = "model/xgb_model.json";
-
 pub struct LiveScanner {
     http: Client,
     openai_client: openai::Client,
@@ -260,7 +257,6 @@ pub struct LiveScanner {
     pool: PgPool,
     calibration: RwLock<CalibrationCurve>,
     cfg: Arc<AppConfig>,
-    xgb_model: Option<XgbModel>,
     sidecar: Option<SidecarClient>,
 }
 
@@ -272,31 +268,18 @@ impl LiveScanner {
             .expect("failed to build HTTP client");
         let calibration = CalibrationCurve::load(&pool, cfg.calibration_min_samples).await?;
 
-        // ML model sidecar (full ensemble) takes priority over local XGBoost
+        // ML model sidecar (full ensemble) — required
         let sidecar = if !cfg.model_sidecar_url.is_empty() {
             let client = SidecarClient::new(&cfg.model_sidecar_url);
             if client.is_healthy().await {
                 tracing::info!(url = %cfg.model_sidecar_url, "ML sidecar connected (full ensemble)");
-                Some(client)
             } else {
-                tracing::warn!(url = %cfg.model_sidecar_url, "ML sidecar not reachable — will retry");
-                Some(client) // Keep it, will check health before each use
+                tracing::warn!(url = %cfg.model_sidecar_url, "ML sidecar not healthy yet — predictions will fail until it's ready");
             }
+            Some(client)
         } else {
+            tracing::warn!("MODEL_SIDECAR_URL not set — model predictions disabled");
             None
-        };
-
-        // Load local XGBoost model as fallback
-        let model_path = std::path::Path::new(MODEL_PATH);
-        let xgb_model = match XgbModel::load(model_path) {
-            Ok(m) => {
-                tracing::info!(trees = m.n_trees(), "Local XGBoost model loaded (fallback)");
-                Some(m)
-            }
-            Err(e) => {
-                tracing::info!(err = %e, "No local XGBoost model");
-                None
-            }
         };
 
         Ok(Self {
@@ -306,7 +289,6 @@ impl LiveScanner {
             pool,
             calibration: RwLock::new(calibration),
             cfg: Arc::clone(cfg),
-            xgb_model,
             sidecar,
         })
     }
@@ -318,76 +300,38 @@ impl LiveScanner {
         Ok(())
     }
 
-    /// Hot-reload XGBoost model from disk (call after retraining).
-    #[allow(dead_code)]
-    pub fn reload_model(&mut self) {
-        let model_path = std::path::Path::new(MODEL_PATH);
-        match XgbModel::load(model_path) {
-            Ok(m) => {
-                tracing::info!(trees = m.n_trees(), "XGBoost model reloaded");
-                self.xgb_model = Some(m);
-            }
-            Err(e) => {
-                tracing::debug!(err = %e, "Model reload skipped");
-            }
-        }
-    }
-
-    /// Returns true if any ML model (sidecar or local XGBoost) is available.
+    /// Returns true if the ML sidecar is configured.
     pub fn has_model(&self) -> bool {
-        self.sidecar.is_some() || self.xgb_model.is_some()
+        self.sidecar.is_some()
     }
 
-    /// Get prediction from the best available model source.
-    /// Tries sidecar (full ensemble) first, falls back to local XGBoost.
+    /// Get prediction from the ML sidecar.
     async fn predict(&self, features: &[f64], market_price: f64) -> Option<(f64, f64)> {
-        // Try sidecar first
-        if let Some(sidecar) = &self.sidecar {
-            match sidecar.predict(features, market_price).await {
-                Ok(pred) => return Some((pred.prob, pred.confidence)),
-                Err(e) => {
-                    tracing::debug!(err = %e, "Sidecar unavailable, falling back to local XGBoost");
-                }
+        let sidecar = self.sidecar.as_ref()?;
+        match sidecar.predict(features, market_price).await {
+            Ok(pred) => Some((pred.prob, pred.confidence)),
+            Err(e) => {
+                tracing::warn!(err = %e, "Sidecar prediction failed");
+                None
             }
         }
-
-        // Fall back to local XGBoost (raw prob, fixed moderate confidence)
-        if let Some(model) = &self.xgb_model {
-            let prob = model.predict_prob(features);
-            // Local XGBoost alone gets a conservative fixed confidence
-            return Some((prob, 0.45));
-        }
-
-        None
     }
 
-    /// Batch prediction from sidecar, with per-item XGBoost fallback.
+    /// Batch prediction from the ML sidecar.
     async fn predict_batch(&self, items: &[(Vec<f64>, f64)]) -> Vec<Option<(f64, f64)>> {
-        // Try sidecar batch first
-        if let Some(sidecar) = &self.sidecar {
-            match sidecar.predict_batch(items).await {
-                Ok(preds) => {
-                    return preds
-                        .into_iter()
-                        .map(|p| Some((p.prob, p.confidence)))
-                        .collect();
-                }
-                Err(e) => {
-                    tracing::debug!(err = %e, "Sidecar batch failed, falling back to local XGBoost");
-                }
+        let Some(sidecar) = &self.sidecar else {
+            return vec![None; items.len()];
+        };
+        match sidecar.predict_batch(items).await {
+            Ok(preds) => preds
+                .into_iter()
+                .map(|p| Some((p.prob, p.confidence)))
+                .collect(),
+            Err(e) => {
+                tracing::warn!(err = %e, "Sidecar batch prediction failed");
+                vec![None; items.len()]
             }
         }
-
-        // Fall back to local XGBoost one by one
-        items
-            .iter()
-            .map(|(features, _market_price)| {
-                self.xgb_model.as_ref().map(|model| {
-                    let prob = model.predict_prob(features);
-                    (prob, 0.45)
-                })
-            })
-            .collect()
     }
 
     /// Build an LLM agent for a specific role.

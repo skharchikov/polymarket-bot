@@ -3,6 +3,10 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+const MAX_RETRIES: usize = 3;
+const RETRY_DELAY: Duration = Duration::from_secs(2);
 
 /// HTTP client for the Python ML sidecar (full stacking ensemble).
 #[derive(Debug, Clone)]
@@ -11,13 +15,13 @@ pub struct SidecarClient {
     base_url: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct PredictRequest {
     features: Vec<f64>,
     market_price: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct BatchRequest {
     items: Vec<PredictRequest>,
 }
@@ -35,6 +39,7 @@ struct BatchResponse {
 
 #[derive(Deserialize)]
 struct HealthResponse {
+    #[allow(dead_code)]
     status: String,
     model_loaded: bool,
 }
@@ -42,7 +47,7 @@ struct HealthResponse {
 impl SidecarClient {
     pub fn new(base_url: &str) -> Self {
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
+            .timeout(Duration::from_secs(10))
             .build()
             .expect("failed to build sidecar HTTP client");
         Self {
@@ -59,25 +64,39 @@ impl SidecarClient {
             .send()
             .await
         {
-            Ok(resp) => resp
-                .json::<HealthResponse>()
-                .await
-                .map(|h| h.model_loaded)
-                .unwrap_or(false),
+            Ok(resp) => resp.status().is_success(),
             Err(_) => false,
         }
     }
 
-    /// Get prediction from the full ensemble for a single market.
+    /// Get prediction from the full ensemble, with retries.
     pub async fn predict(&self, features: &[f64], market_price: f64) -> Result<Prediction> {
         let req = PredictRequest {
             features: features.to_vec(),
             market_price,
         };
+
+        let mut last_err = None;
+        for attempt in 0..MAX_RETRIES {
+            if attempt > 0 {
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
+            match self.do_predict(&req).await {
+                Ok(pred) => return Ok(pred),
+                Err(e) => {
+                    tracing::debug!(attempt = attempt + 1, err = %e, "Sidecar predict retry");
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err.unwrap())
+    }
+
+    async fn do_predict(&self, req: &PredictRequest) -> Result<Prediction> {
         let resp = self
             .client
             .post(format!("{}/predict", self.base_url))
-            .json(&req)
+            .json(req)
             .send()
             .await
             .context("sidecar predict request")?;
@@ -93,7 +112,7 @@ impl SidecarClient {
             .context("parsing sidecar response")
     }
 
-    /// Batch prediction for multiple markets at once.
+    /// Batch prediction with retries.
     pub async fn predict_batch(&self, items: &[(Vec<f64>, f64)]) -> Result<Vec<Prediction>> {
         let req = BatchRequest {
             items: items
@@ -104,10 +123,28 @@ impl SidecarClient {
                 })
                 .collect(),
         };
+
+        let mut last_err = None;
+        for attempt in 0..MAX_RETRIES {
+            if attempt > 0 {
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
+            match self.do_predict_batch(&req).await {
+                Ok(preds) => return Ok(preds),
+                Err(e) => {
+                    tracing::debug!(attempt = attempt + 1, err = %e, "Sidecar batch retry");
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err.unwrap())
+    }
+
+    async fn do_predict_batch(&self, req: &BatchRequest) -> Result<Vec<Prediction>> {
         let resp = self
             .client
             .post(format!("{}/predict_batch", self.base_url))
-            .json(&req)
+            .json(req)
             .send()
             .await
             .context("sidecar batch request")?;
