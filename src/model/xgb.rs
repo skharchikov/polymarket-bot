@@ -116,46 +116,70 @@ impl XgbModel {
         sigmoid(raw + logit(self.base_score))
     }
 
-    /// Confidence estimate based on tree agreement (coefficient of variation).
-    /// Returns 0.0-1.0 where higher = more trees agree.
+    /// Confidence estimate based on cumulative prediction stability.
+    /// GBM trees are sequential corrections, not independent voters —
+    /// so we measure how much the prediction changes as more trees are added.
+    /// Stable convergence = high confidence; late swings = low confidence.
     pub fn confidence(&self, features: &[f64]) -> f64 {
-        if self.trees.is_empty() {
-            return 0.5;
+        let n = self.trees.len();
+        if n < 4 {
+            return 0.40;
         }
         let scaled = match &self.scaler {
             Some(s) => s.transform(features),
             None => features.to_vec(),
         };
 
-        let predictions: Vec<f64> = self.trees.iter().map(|t| t.predict(&scaled)).collect();
-        let mean = predictions.iter().sum::<f64>() / predictions.len() as f64;
-        let variance =
-            predictions.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / predictions.len() as f64;
-        let std_dev = variance.sqrt();
+        let base_logit = logit(self.base_score);
 
-        // Use coefficient of variation relative to mean magnitude.
-        // Higher CV = less agreement = lower confidence.
-        let mean_abs = mean.abs().max(0.01);
-        let cv = std_dev / mean_abs;
+        // Sample predictions at 25%, 50%, 75%, 100% of trees
+        let checkpoints = [n / 4, n / 2, 3 * n / 4, n];
+        let mut cumsum = 0.0;
+        let mut checkpoint_probs = Vec::with_capacity(4);
+        let mut ci = 0;
+        for (i, tree) in self.trees.iter().enumerate() {
+            cumsum += tree.predict(&scaled);
+            if ci < checkpoints.len() && i + 1 == checkpoints[ci] {
+                checkpoint_probs.push(sigmoid(cumsum + base_logit));
+                ci += 1;
+            }
+        }
 
-        // CV of 0 → confidence 0.80 (max, model is still just one ensemble member)
-        // CV of 1 → confidence ~0.35
-        // CV of 2+ → confidence ~0.25
-        let confidence = 0.80 / (1.0 + cv * 1.5);
-        confidence.clamp(0.25, 0.80)
+        // Measure spread of the checkpoint probabilities
+        let min_p = checkpoint_probs
+            .iter()
+            .cloned()
+            .fold(f64::INFINITY, f64::min);
+        let max_p = checkpoint_probs
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
+        let range = (max_p - min_p).abs();
+
+        // range of 0 → max confidence 0.75
+        // range of 0.05 → ~0.55
+        // range of 0.15 → ~0.38
+        // range of 0.30+ → ~0.25
+        let confidence: f64 = 0.75 / (1.0 + range * 8.0);
+        confidence.clamp(0.25, 0.75)
     }
 
     /// Predict probability but dampen extreme deviations from market price.
-    /// The standalone XGBoost model is one part of a stacking ensemble;
-    /// it shouldn't be trusted to deviate more than ~25% from market consensus.
+    /// Uses log-odds clamping so the constraint is proportional at the extremes:
+    ///   - 9% market → allowed range ~[3.5%, 21%]
+    ///   - 50% market → allowed range ~[27%, 73%]
+    ///   - 90% market → allowed range ~[79%, 96.5%]
     pub fn predict_prob_dampened(&self, features: &[f64], market_price: f64) -> f64 {
         let raw_prob = self.predict_prob(features);
-        // Max deviation from market price: 25 percentage points
-        let max_deviation = 0.25;
-        raw_prob.clamp(
-            (market_price - max_deviation).max(0.01),
-            (market_price + max_deviation).min(0.99),
-        )
+        let market_logit = logit(market_price);
+        let raw_logit = logit(raw_prob);
+        // Max shift of 1.0 in log-odds ≈ 2.7× odds change
+        let max_logit_shift = 1.0;
+        let clamped_logit = raw_logit.clamp(
+            market_logit - max_logit_shift,
+            market_logit + max_logit_shift,
+        );
+        sigmoid(clamped_logit)
     }
 
     pub fn n_trees(&self) -> usize {
