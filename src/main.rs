@@ -1175,7 +1175,8 @@ async fn heartbeat_cycle(
          📰 {news_total} news items ({news_new} new)\n\
          🎯 {signals} signals found\n\n\
          💰 Bankroll: `€{bankroll:.2}`\n\
-         📊 Open bets: {open} | Signals today: {today}/{max}",
+         📊 Open bets: {open}\n\
+         🆕 New bets today: {today}/{max}",
         interval = cfg.heartbeat_interval_mins,
         open = open_count,
         today = signals_today,
