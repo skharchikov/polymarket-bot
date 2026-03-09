@@ -2,11 +2,14 @@
 set -e
 
 MODEL_FILE="/model/ensemble.joblib"
-MAX_AGE_HOURS=24
+MAX_AGE_HOURS="${RETRAIN_MAX_AGE_HOURS:-72}"
 
 # Skip training if the model is fresh enough
 if [ -f "$MODEL_FILE" ]; then
-    age_secs=$(( $(date +%s) - $(stat -c %Y "$MODEL_FILE" 2>/dev/null || stat -f %m "$MODEL_FILE") ))
+    # stat -c works on Linux (Debian), stat -f on macOS
+    mod_time=$(stat -c %Y "$MODEL_FILE" 2>/dev/null || stat -f %m "$MODEL_FILE" 2>/dev/null || echo 0)
+    now=$(date +%s)
+    age_secs=$(( now - mod_time ))
     age_hours=$(( age_secs / 3600 ))
     echo "Existing model is ${age_hours}h old (max ${MAX_AGE_HOURS}h)"
     if [ "$age_hours" -lt "$MAX_AGE_HOURS" ]; then
