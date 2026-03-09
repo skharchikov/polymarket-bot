@@ -259,13 +259,62 @@ impl PgPortfolio {
             0.0
         };
 
+        // Per-strategy breakdown
+        let all_bets: Vec<&Bet> = resolved.iter().chain(open.iter()).collect();
+        let mut strategies: Vec<String> = all_bets
+            .iter()
+            .map(|b| b.strategy.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if strategies.is_empty() {
+            strategies = vec![
+                "aggressive".into(),
+                "balanced".into(),
+                "conservative".into(),
+            ];
+        }
+
+        let mut strat_lines = Vec::new();
+        for strat in &strategies {
+            let label = match strat.as_str() {
+                "aggressive" => "🔥",
+                "balanced" => "⚖️",
+                "conservative" => "🛡️",
+                _ => "📊",
+            };
+            let strat_resolved: Vec<_> = resolved.iter().filter(|b| &b.strategy == strat).collect();
+            let strat_open: Vec<_> = open.iter().filter(|b| &b.strategy == strat).collect();
+            let s_wins = strat_resolved
+                .iter()
+                .filter(|b| b.won == Some(true))
+                .count();
+            let s_losses = strat_resolved
+                .iter()
+                .filter(|b| b.won == Some(false))
+                .count();
+            let s_pnl: f64 = strat_resolved.iter().filter_map(|b| b.pnl).sum();
+            let s_bankroll = self.strategy_bankroll(strat).await?;
+            let s_wr = if s_wins + s_losses > 0 {
+                s_wins as f64 / (s_wins + s_losses) as f64 * 100.0
+            } else {
+                0.0
+            };
+            strat_lines.push(format!(
+                "{label} *{strat}*: `€{s_bankroll:.2}` | PnL `€{s_pnl:+.2}` | {s_wins}W/{s_losses}L ({s_wr:.0}%) | {open} open",
+                open = strat_open.len(),
+            ));
+        }
+
         Ok(format!(
             "📊 *Bot Statistics*\n\n\
              💰 Bankroll: `€{bankroll:.2}` (started: `€{starting:.2}`)\n\
              💵 Total PnL: `€{total_pnl:+.2}` | ROI: `{roi:+.1}%`\n\
              📋 Record: {wins}W / {losses}L ({win_rate:.0}%)\n\
-             🔓 Open bets: {open}",
+             🔓 Open bets: {open}\n\n\
+             📈 *Per Strategy*\n{strat_details}",
             open = open.len(),
+            strat_details = strat_lines.join("\n"),
         ))
     }
 
