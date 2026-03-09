@@ -10,7 +10,7 @@ if [ -f "$MODEL_FILE" ]; then
     age_hours=$(( age_secs / 3600 ))
     echo "Existing model is ${age_hours}h old (max ${MAX_AGE_HOURS}h)"
     if [ "$age_hours" -lt "$MAX_AGE_HOURS" ]; then
-        echo "Model is fresh — skipping retrain"
+        echo "Model is fresh - skipping retrain"
         exit 0
     fi
 fi
