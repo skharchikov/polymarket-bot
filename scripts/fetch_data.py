@@ -339,14 +339,19 @@ def fetch_bet_snapshots(database_url: str, scraper: PolymarketScraper,
         return []
 
     cur = conn.cursor()
-    cur.execute("""
-        SELECT market_id, side, entry_price, estimated_prob, confidence,
-               edge, won, placed_at, end_date, context
-        FROM bets
-        WHERE resolved = TRUE AND won IS NOT NULL
-        ORDER BY placed_at
-    """)
-    rows = cur.fetchall()
+    try:
+        cur.execute("""
+            SELECT market_id, side, entry_price, estimated_prob, confidence,
+                   edge, won, placed_at, end_date, context
+            FROM bets
+            WHERE resolved = TRUE AND won IS NOT NULL
+            ORDER BY placed_at
+        """)
+        rows = cur.fetchall()
+    except Exception as e:
+        print(f"  Could not query bets: {e}")
+        conn.close()
+        return []
     conn.close()
 
     if not rows:
