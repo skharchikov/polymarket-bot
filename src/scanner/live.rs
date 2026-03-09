@@ -687,6 +687,7 @@ impl LiveScanner {
 
         let eligible: Vec<GammaMarket> = markets
             .into_iter()
+            .filter(|m| m.is_binary())
             .filter(|m| m.volume_num >= self.cfg.min_volume)
             .filter(|m| m.yes_token_id().is_some())
             .filter(|m| self.expires_within_window(m.end_date.as_deref()))
@@ -1149,6 +1150,7 @@ impl LiveScanner {
         let markets = self.fetch_active_markets().await?;
         let pairs: Vec<(String, String)> = markets
             .into_iter()
+            .filter(|m| m.is_binary())
             .filter(|m| m.volume_num >= self.cfg.min_volume)
             .filter(|m| self.expires_within_window(m.end_date.as_deref()))
             .filter(|m| {
