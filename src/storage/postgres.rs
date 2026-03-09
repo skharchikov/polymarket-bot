@@ -377,20 +377,32 @@ impl PgPortfolio {
                 })
                 .unwrap_or_default();
 
-            // Fetch current price for unrealized PnL
-            let current_yes: Option<f64> = async {
+            // Fetch market data: current price + slug for URL
+            let market_data: Option<(f64, String)> = async {
                 let url = format!("https://gamma-api.polymarket.com/markets/{}", bet.market_id);
                 let text = http.get(&url).send().await.ok()?.text().await.ok()?;
                 let v: serde_json::Value = serde_json::from_str(&text).ok()?;
                 let prices_str = v["outcomePrices"].as_str()?;
                 let prices: Vec<String> = serde_json::from_str(prices_str).ok()?;
-                prices.first()?.parse::<f64>().ok()
+                let yes_price = prices.first()?.parse::<f64>().ok()?;
+                let event_slug = v["events"]
+                    .as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|e| e["slug"].as_str());
+                let market_slug = v["slug"].as_str();
+                let poly_url = match (event_slug, market_slug) {
+                    (Some(ev), Some(mk)) => format!("https://polymarket.com/event/{ev}/{mk}"),
+                    (Some(ev), None) => format!("https://polymarket.com/event/{ev}"),
+                    (None, Some(mk)) => format!("https://polymarket.com/event/{mk}"),
+                    (None, None) => String::new(),
+                };
+                Some((yes_price, poly_url))
             }
             .await;
 
-            let pnl_str = if let Some(yes_price) = current_yes {
+            let (pnl_str, link) = if let Some((yes_price, poly_url)) = &market_data {
                 let current = match bet.side {
-                    BetSide::Yes => yes_price,
+                    BetSide::Yes => *yes_price,
                     BetSide::No => 1.0 - yes_price,
                 };
                 let current_value = bet.shares * current;
@@ -401,25 +413,32 @@ impl PgPortfolio {
                 } else {
                     0.0
                 };
-                format!(
+                let pnl = format!(
                     " | PnL `€{unrealized:+.2}` ({pnl_pct:+.0}%) @ `{cur:.1}¢`",
-                    cur = current * 100.0
-                )
+                    cur = current * 100.0,
+                );
+                (pnl, poly_url.clone())
             } else {
-                String::new()
+                (String::new(), String::new())
+            };
+
+            let q = truncate(&bet.question, 50);
+            let q_link = if link.is_empty() {
+                format!("_{q}_")
+            } else {
+                format!("[{q}]({link})")
             };
 
             total_cost += bet.cost;
             lines.push(format!(
                 "{label} *{side}* `€{cost:.2}` → {shares:.1} shares @ `{price:.1}¢`\n\
-                 \u{00a0}\u{00a0}📋 _{q}_\n\
+                 \u{00a0}\u{00a0}📋 {q_link}\n\
                  \u{00a0}\u{00a0}{src} Edge: `{edge:+.1}%` | Conf: `{conf:.0}%`{pnl}\n\
                  \u{00a0}\u{00a0}⏰ {expires} ({age:.0}d ago)",
                 side = side_emoji,
                 cost = bet.cost,
                 shares = bet.shares,
                 price = bet.entry_price * 100.0,
-                q = truncate(&bet.question, 50),
                 src = source_icon,
                 edge = bet.edge * 100.0,
                 conf = bet.confidence * 100.0,
