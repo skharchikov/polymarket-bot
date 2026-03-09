@@ -1143,6 +1143,122 @@ impl LiveScanner {
             source_counts,
         })
     }
+
+    /// Get YES token IDs for all eligible markets (for websocket subscription).
+    pub async fn eligible_token_ids(&self) -> Result<Vec<(String, String)>> {
+        let markets = self.fetch_active_markets().await?;
+        let pairs: Vec<(String, String)> = markets
+            .into_iter()
+            .filter(|m| m.volume_num >= self.cfg.min_volume)
+            .filter(|m| self.expires_within_window(m.end_date.as_deref()))
+            .filter(|m| {
+                let price = Self::get_yes_price(m).unwrap_or(0.0);
+                price > self.cfg.min_price && price < self.cfg.max_price
+            })
+            .filter_map(|m| {
+                let token = m.yes_token_id()?;
+                Some((token, m.market_id.clone()))
+            })
+            .collect();
+        Ok(pairs)
+    }
+
+    /// Quickly assess a single market triggered by a websocket price move.
+    /// Uses XGBoost only (instant, no LLM calls).
+    pub async fn assess_alert(&self, market_id: &str, ws_price: f64) -> Result<Option<Signal>> {
+        let model = match &self.xgb_model {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+
+        // Fetch fresh market data
+        let url = format!("{GAMMA_API}/markets/{market_id}");
+        let resp = self.http.get(&url).send().await?;
+        let market: GammaMarket = resp.json().await?;
+
+        let current_price = Self::get_yes_price(&market).unwrap_or(ws_price);
+        let token_id = match market.yes_token_id() {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+
+        // Get price history for features
+        let history = self
+            .fetch_price_history(&token_id)
+            .await
+            .unwrap_or_default();
+
+        let features = MarketFeatures::from_market_and_history(&market, current_price, &history);
+        let feature_vec = features.to_vec();
+        let xgb_prob = model.predict_prob(&feature_vec);
+        let xgb_conf = model.confidence(&feature_vec);
+
+        // Synthetic LR
+        let lr = if current_price > 0.01 && current_price < 0.99 {
+            (xgb_prob / current_price) / ((1.0 - xgb_prob) / (1.0 - current_price))
+        } else {
+            1.0
+        };
+
+        let estimate = BayesianEstimate {
+            prior: current_price,
+            posterior: xgb_prob,
+            combined_lr: 0.0,
+            confidence: xgb_conf,
+            reasoning: String::new(),
+        };
+
+        let (side, edge, bet_price, bet_prob) =
+            match bayesian::compute_edge(&estimate, current_price) {
+                Some((true, edge, price, prob)) => (BetSide::Yes, edge, price, prob),
+                Some((false, edge, price, prob)) => (BetSide::No, edge, price, prob),
+                None => return Ok(None),
+            };
+
+        let kelly_size = fractional_kelly(bet_prob, bet_price, 1.0);
+        let effective_edge = edge * xgb_conf;
+
+        // Use XGBoost thresholds (trust the model)
+        if effective_edge < 0.02 || kelly_size <= 0.003 || xgb_conf < 0.25 {
+            return Ok(None);
+        }
+
+        let reasoning = format!(
+            "XGBoost (WS trigger): {:.1}% (market {:.1}%)",
+            xgb_prob * 100.0,
+            current_price * 100.0
+        );
+
+        Ok(Some(Signal {
+            market_id: market.market_id.clone(),
+            question: market.question.clone(),
+            side,
+            current_price: bet_price,
+            estimated_prob: bet_prob,
+            confidence: xgb_conf,
+            edge,
+            kelly_size,
+            reasoning,
+            end_date: market.end_date.clone(),
+            volume: market.volume_num,
+            polymarket_url: market.polymarket_url(),
+            prior: current_price,
+            combined_lr: lr,
+            news_matched_count: 0,
+            source: SignalSource::XgBoost,
+            context: BetContext {
+                btc_price: 0.0,
+                eth_price: 0.0,
+                sol_price: 0.0,
+                btc_24h_change: 0.0,
+                btc_funding_rate: 0.0,
+                btc_open_interest: 0.0,
+                fear_greed: String::new(),
+                book_depth: 0.0,
+                news_headlines: Vec::new(),
+            },
+        }))
+    }
 }
 
 fn summarize_history(history: &[PriceTick], current_price: f64) -> String {

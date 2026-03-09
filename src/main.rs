@@ -15,13 +15,16 @@ mod telegram;
 
 use anyhow::Result;
 use config::AppConfig;
+use scanner::ws::{ActivityAlert, MarketWatcher};
 use sqlx::PgPool;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use storage::portfolio::NewBet;
 use storage::postgres::PgPortfolio;
 use strategy::StrategyProfile;
+use tokio::sync::{RwLock, mpsc};
 
 /// Shared scan stats for heartbeat reporting.
 struct ScanStats {
@@ -460,6 +463,194 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         }
     });
 
+    // --- WebSocket price watcher ---
+    let (alert_tx, mut alert_rx) = mpsc::channel::<ActivityAlert>(100);
+
+    // Shared token→market_id mapping (refreshed periodically)
+    let token_map: Arc<RwLock<HashMap<String, String>>> = Arc::new(RwLock::new(HashMap::new()));
+
+    let ws_watcher = Arc::new(MarketWatcher::new(
+        alert_tx, 0.03,  // 3% price move triggers alert
+        500.0, // $500+ trade triggers alert
+    ));
+
+    // Spawn websocket connection
+    let ws_watcher_run = Arc::clone(&ws_watcher);
+    let ws_loop = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        ws_watcher_run.run().await;
+    });
+
+    // Spawn token refresh loop — updates subscriptions every 30min
+    let ws_tokens = Arc::clone(&ws_watcher.tokens);
+    let ws_scanner = Arc::clone(&scanner);
+    let ws_token_map = Arc::clone(&token_map);
+    let ws_refresh = tokio::spawn(async move {
+        loop {
+            match ws_scanner.eligible_token_ids().await {
+                Ok(pairs) => {
+                    let mut map = ws_token_map.write().await;
+                    map.clear();
+                    let mut tokens = Vec::with_capacity(pairs.len());
+                    for (token, market_id) in &pairs {
+                        map.insert(token.clone(), market_id.clone());
+                        tokens.push(token.clone());
+                    }
+                    drop(map);
+
+                    *ws_tokens.write().await = tokens;
+                    tracing::info!(count = pairs.len(), "Refreshed WS token subscriptions");
+                }
+                Err(e) => {
+                    tracing::warn!(err = %e, "Failed to refresh WS tokens");
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(30 * 60)).await;
+        }
+    });
+
+    // Spawn alert processing loop — runs XGBoost on markets triggered by WS
+    let al_scanner = Arc::clone(&scanner);
+    let al_portfolio = Arc::clone(&portfolio);
+    let al_notifier = Arc::clone(&notifier);
+    let al_strategies = Arc::clone(&strategies);
+    let al_cfg = Arc::clone(&cfg);
+    let al_token_map = Arc::clone(&token_map);
+    let alert_loop = tokio::spawn(async move {
+        // Throttle: don't re-assess same market within 5 minutes
+        let mut last_assessed: HashMap<String, std::time::Instant> = HashMap::new();
+
+        while let Some(alert) = alert_rx.recv().await {
+            let map = al_token_map.read().await;
+            let market_id = match map.get(&alert.asset_id) {
+                Some(id) => id.clone(),
+                None => continue,
+            };
+            drop(map);
+
+            // Throttle
+            let now = std::time::Instant::now();
+            if let Some(last) = last_assessed.get(&market_id)
+                && now.duration_since(*last) < Duration::from_secs(300)
+            {
+                continue;
+            }
+            last_assessed.insert(market_id.clone(), now);
+
+            // Check not already bet on
+            let skip_ids = al_portfolio.open_bet_market_ids().await.unwrap_or_default();
+            if skip_ids.contains(&market_id) {
+                continue;
+            }
+
+            tracing::info!(
+                market_id = &market_id[..16.min(market_id.len())],
+                price = format_args!("{:.1}%", alert.price * 100.0),
+                delta = format_args!("{:+.1}%", (alert.price - alert.prev_price) * 100.0),
+                "WS alert → assessing market"
+            );
+
+            match al_scanner.assess_alert(&market_id, alert.price).await {
+                Ok(Some(signal)) => {
+                    tracing::info!(
+                        market = %signal.question,
+                        side = %signal.side,
+                        edge = format_args!("+{:.1}%", signal.edge * 100.0),
+                        "WS-triggered signal found"
+                    );
+
+                    // Process through strategies (same logic as news_scan_cycle)
+                    for strat in al_strategies.iter() {
+                        let sent = al_portfolio
+                            .strategy_signals_today(&strat.name)
+                            .await
+                            .unwrap_or(0);
+                        if sent >= strat.max_signals_per_day {
+                            continue;
+                        }
+
+                        let accepted = match strat.evaluate(&signal) {
+                            Some(a) => a,
+                            None => continue,
+                        };
+
+                        let strat_bankroll = al_portfolio
+                            .strategy_bankroll(&strat.name)
+                            .await
+                            .unwrap_or(0.0);
+                        let raw_bet = strat_bankroll * accepted.kelly_size;
+                        if raw_bet < strat.min_bet {
+                            continue;
+                        }
+
+                        let slipped_price =
+                            (signal.current_price * (1.0 + al_cfg.slippage_pct)).min(0.99);
+                        let shares = raw_bet / slipped_price;
+                        let fee = raw_bet * al_cfg.fee_pct;
+                        let total_cost = raw_bet + fee;
+                        if total_cost > strat_bankroll {
+                            continue;
+                        }
+
+                        let new_bet = NewBet {
+                            market_id: signal.market_id.clone(),
+                            question: signal.question.clone(),
+                            side: signal.side.clone(),
+                            entry_price: signal.current_price,
+                            slipped_price,
+                            shares,
+                            cost: raw_bet,
+                            fee,
+                            estimated_prob: signal.estimated_prob,
+                            confidence: signal.confidence,
+                            edge: signal.edge,
+                            kelly_size: accepted.kelly_size,
+                            reasoning: signal.reasoning.clone(),
+                            end_date: signal.end_date.clone(),
+                            context: Some(signal.context.clone()),
+                            strategy: strat.name.clone(),
+                        };
+
+                        match al_portfolio.place_bet(&new_bet).await {
+                            Ok(_) => {
+                                let new_bankroll = al_portfolio
+                                    .strategy_bankroll(&strat.name)
+                                    .await
+                                    .unwrap_or(0.0);
+                                let msg = format!(
+                                    "⚡ *WS-Triggered Bet* ({label} {strat_name})\n\
+                                     {signal_msg}\n\n\
+                                     💸 Stake: `€{cost:.2}` ({shares:.1} shares @ `{price:.1}¢`)\n\
+                                     💰 Strategy bankroll: `€{bankroll:.2}`",
+                                    label = strat.label(),
+                                    strat_name = strat.name,
+                                    signal_msg = signal.to_telegram_message(),
+                                    cost = raw_bet,
+                                    shares = shares,
+                                    price = slipped_price * 100.0,
+                                    bankroll = new_bankroll,
+                                );
+                                broadcast(&al_notifier, &al_portfolio, &msg).await;
+                            }
+                            Err(e) => {
+                                tracing::error!(err = %e, "Failed to place WS-triggered bet");
+                            }
+                        }
+                    }
+                }
+                Ok(None) => {
+                    tracing::debug!(
+                        market_id = &market_id[..16.min(market_id.len())],
+                        "WS alert — no edge"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(err = %e, "WS alert assessment failed");
+                }
+            }
+        }
+    });
+
     tokio::select! {
         r = housekeeping => {
             tracing::error!("Housekeeping loop exited: {:?}", r);
@@ -472,6 +663,15 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         }
         r = command_loop => {
             tracing::error!("Command loop exited: {:?}", r);
+        }
+        r = ws_loop => {
+            tracing::error!("WebSocket loop exited: {:?}", r);
+        }
+        r = ws_refresh => {
+            tracing::error!("WS refresh loop exited: {:?}", r);
+        }
+        r = alert_loop => {
+            tracing::error!("Alert processing loop exited: {:?}", r);
         }
     }
 
