@@ -1,20 +1,19 @@
 # Polymarket Signal Bot
 
-Automated prediction market trading bot that finds alpha by matching breaking news to Polymarket markets that haven't priced it in yet.
-
-Uses Bayesian updating with multi-agent LLM likelihood ratios (Skeptic + Catalyst + BaseRate roles) to assess probability impact, calibration tracking to correct systematic biases, and runs multiple strategy profiles simultaneously with independent bankrolls and Kelly Criterion sizing.
+Automated prediction market trading bot that combines an XGBoost/ensemble ML model with Bayesian updating to find alpha on Polymarket. The model continuously retrains on its own resolved bets, improving over time.
 
 ## Architecture
 
 ```
 src/
-├── main.rs              # Entry point, dual-loop orchestration
+├── main.rs              # Entry point, multi-loop orchestration
 ├── bayesian.rs          # Bayesian updating with likelihood ratios
 ├── config.rs            # Env-var configuration (confique)
 ├── strategy.rs          # Strategy profiles (aggressive/balanced/conservative)
 ├── calibration.rs       # Calibration curve from resolved LLM estimates
 ├── scanner/
-│   ├── live.rs          # Market scanning, multi-agent LLM consensus, signals
+│   ├── live.rs          # ML-first scanning, Bayesian consensus, signals
+│   ├── ws.rs            # WebSocket price alerts for real-time triggers
 │   └── news.rs          # Multi-source news fetching & keyword matching
 ├── data/
 │   ├── models.rs        # GammaMarket, PriceTick data structures
@@ -29,20 +28,50 @@ src/
 │   ├── metrics.rs       # Sharpe ratio, Brier score, max drawdown
 │   └── portfolio.rs     # In-memory portfolio for backtesting
 └── telegram/
-    └── notifier.rs      # Telegram alert formatting & delivery
+    └── notifier.rs      # Telegram alerts, commands, daily reports
+
+scripts/
+├── fetch_data.py        # Fetches resolved markets + own bets for training
+├── train_model.py       # Trains XGBoost/stacking ensemble
+├── serve_model.py       # HTTP model server (sidecar)
+├── retrain.sh           # Continuous retraining loop (every 24h)
+└── backtest.py          # Python backtest with stop-loss simulation
 ```
 
 ## How It Works
 
+### ML-First Pipeline
+
 1. **News scan loop** (every 10 min) fetches breaking news from Google News RSS, Reddit, CoinDesk, Reuters, and Polymarket trending
 2. Matches news to eligible markets by keyword relevance (volume, expiry, price filters)
-3. Checks order book liquidity and price history for top matches
-4. **Bayesian updating**: 2-3 LLM agents (Skeptic, Catalyst, BaseRate) each estimate a likelihood ratio — how much more likely is this news in YES-worlds vs NO-worlds. Starting from the market price as prior, each agent's confidence-dampened LR updates the posterior via Bayes' rule
-5. **Calibration correction**: adjusts posterior estimates based on historical accuracy (10-bin curve with Laplace smoothing)
+3. **XGBoost ensemble** scores all eligible markets on 15+ features (price momentum, volatility, volume trends, order book depth, time to expiry)
+4. **Bayesian anchoring**: model predictions are anchored to market price as prior, with the model's likelihood ratio dampened by confidence (`LR^confidence`) — prevents overconfident predictions
+5. Top candidates enriched with order book and price history data
 6. Each **strategy profile** independently evaluates signals against its own thresholds and Kelly fraction
-7. Places paper bets with per-strategy bankrolls and sends detailed Telegram summaries (sources, matches, rejections)
+7. Places paper bets with per-strategy bankrolls and sends detailed Telegram summaries
 
-A separate **housekeeping loop** (every 30 min) resolves settled bets, updates calibration data, calculates PnL, and sends daily performance reports.
+### WebSocket Alerts
+
+A parallel WebSocket connection monitors real-time price movements. Significant moves trigger instant reassessment through the XGBoost model, enabling faster reaction than the 10-minute scan cycle.
+
+### Continuous Learning
+
+The model retrains every 24 hours on:
+- **~1000 resolved Polymarket markets** fetched from the API
+- **Own resolved bets** (weighted 3x) — both wins and losses, with exact entry prices and known outcomes
+
+As more bets resolve, the model sees more of its own data and improves predictions over time.
+
+### Risk Management
+
+- **Stop-loss** (default 30%): exits positions when unrealized loss exceeds threshold
+- **Expiry exit** (default 2 days): exits underwater positions approaching expiry
+- **Terminal risk scaling**: reduces position size as market approaches expiry (`sqrt(days/14)`)
+- **Per-strategy bankrolls**: each strategy has independent bankroll isolation
+
+### Housekeeping Loop
+
+A separate loop (every 30 min) resolves settled bets, checks stop-loss/expiry exits, updates calibration data, logs predictions for Brier score tracking, and sends daily performance reports.
 
 ## Strategy Profiles
 
@@ -50,11 +79,21 @@ Three strategies run simultaneously, each with independent bankrolls (default �
 
 | Strategy | Kelly | Min Edge | Min Confidence | Max Signals/Day |
 |---|---|---|---|---|
-| **Aggressive** | 50% | 5% | 40% | 5 |
-| **Balanced** | 25% | 8% | 50% | 3 |
-| **Conservative** | 10% | 12% | 65% | 2 |
+| **Aggressive** 🔥 | 50% | 5% | 40% | 5 |
+| **Balanced** ⚖️ | 25% | 8% | 50% | 3 |
+| **Conservative** 🛡️ | 15% | 8% | 50% | 2 |
 
-Strategies share the expensive LLM scan results but evaluate signals independently — no duplicate API calls.
+XGBoost signals get relaxed thresholds (50% lower edge gate, 30% lower confidence gate) since the model has demonstrated calibration.
+
+## Telegram Commands
+
+| Command | Description |
+|---|---|
+| `/stats` | Portfolio statistics with per-strategy breakdown |
+| `/open` | Current open positions with cost and age |
+| `/brier` | Model accuracy (Brier score vs market baseline) |
+| `/health` | Bot uptime, scan counts, signals found |
+| `/help` | List commands |
 
 ## Setup
 
@@ -69,7 +108,11 @@ cp .env.example .env
 docker compose up -d
 ```
 
-Final image is ~3.5MB (scratch base, static musl binary, UPX compressed).
+Starts 4 services:
+- **postgres**: data persistence
+- **trainer**: continuous model retraining (every 24h)
+- **model-server**: HTTP sidecar serving ensemble predictions
+- **bot**: main Rust application (~3.5 MB binary)
 
 ### Local Development
 
@@ -97,45 +140,37 @@ All settings via environment variables with sensible defaults:
 | `DATABASE_URL` | *required* | Postgres connection string |
 | `TELEGRAM_BOT_TOKEN` | *required* | Telegram bot token |
 | `TELEGRAM_CHAT_ID` | *required* | Telegram chat ID |
-| `OPENAI_API_KEY` | *required* | OpenAI API key |
-| `LLM_MODEL` | `gpt-4o` | OpenAI model for assessment |
+| `OPENAI_API_KEY` | *required* | OpenAI API key (LLM fallback) |
+| `MODEL_SIDECAR_URL` | `` | ML model server URL (auto in Docker) |
+| `LLM_MODEL` | `gpt-4o` | LLM model for news assessment fallback |
 | `STRATEGIES` | `aggressive,balanced,conservative` | Active strategy profiles |
 | `STRATEGY_BANKROLL` | `300.0` | Starting bankroll per strategy (EUR) |
-| `CONSENSUS_AGENTS` | `2` | Number of LLM agents (1-3) |
-| `CALIBRATION_MIN_SAMPLES` | `20` | Min resolved estimates before calibration activates |
+| `STOP_LOSS_PCT` | `0.30` | Stop-loss threshold (30%) |
+| `EXIT_DAYS_BEFORE_EXPIRY` | `2` | Exit underwater positions N days before expiry |
+| `CONSENSUS_AGENTS` | `2` | Number of LLM agents for fallback (1-3) |
 | `SCAN_INTERVAL_MINS` | `30` | Housekeeping loop interval |
 | `NEWS_SCAN_INTERVAL_MINS` | `10` | News scan loop interval |
-| `HEARTBEAT_INTERVAL_MINS` | `60` | Heartbeat message interval (0 to disable) |
 | `MAX_SIGNALS_PER_DAY` | `3` | Global max signals per day |
-| `MAX_MARKETS_FETCH` | `1000` | Max markets to fetch from Polymarket API |
-| `MAX_LLM_CANDIDATES` | `1` | Markets assessed per scan cycle |
+| `MAX_MODEL_CANDIDATES` | `15` | Top N markets from XGBoost ranking |
+| `MAX_LLM_CANDIDATES` | `1` | Markets assessed by LLM per cycle |
 | `MIN_VOLUME` | `1000.0` | Min market volume filter |
 | `MIN_BOOK_DEPTH` | `200.0` | Min order book depth (USD) |
-| `MIN_PRICE` | `0.03` | Min YES price filter |
-| `MAX_PRICE` | `0.97` | Max YES price filter |
-| `MAX_DAYS_TO_EXPIRY` | `30` | Max days to market expiry |
-| `KELLY_FRACTION` | `0.25` | Global Kelly fraction (strategies override) |
-| `MIN_EFFECTIVE_EDGE` | `0.08` | Global min edge (strategies override) |
+| `MAX_DAYS_TO_EXPIRY` | `14` | Max days to market expiry |
+| `KELLY_FRACTION` | `0.25` | Global Kelly fraction |
+| `MIN_EFFECTIVE_EDGE` | `0.08` | Global min effective edge |
 | `SLIPPAGE_PCT` | `0.01` | Slippage assumption (1%) |
 | `FEE_PCT` | `0.02` | Trading fee (2%) |
-| `MIN_BET` | `10.0` | Minimum bet size (EUR) |
 
-## Backtesting
+## Prediction Tracking
 
-Runs 4 strategies on historical closed markets:
+Every prediction is logged to a `prediction_log` table with market price, model posterior, confidence, and edge. When markets resolve, Brier scores are computed:
 
-- **SMA Crossover** — short vs long moving average momentum
-- **Mean Reversion** — buy when price deviates >1 std-dev from mean
-- **Trend Following** — linear regression slope with volatility filter
-- **Contrarian Extremes** — counter-trend at prices far from 0.5
-
-```bash
-cargo run -- backtest
-```
+- **Model Brier** vs **Market Brier** shows whether the model adds value over just using market prices
+- **Skill metric**: `1 - (model_brier / market_brier)` — positive means the model outperforms the market
 
 ## Docker Image
 
-Built with Alpine musl for a static binary, compressed with UPX, running on `alpine`:
+Built with Alpine musl for a static binary, compressed with UPX:
 
 - `strip = true`, `lto = true`, `codegen-units = 1`
 - mimalloc allocator (musl's malloc is slow)
