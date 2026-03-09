@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use storage::portfolio::NewBet;
+use storage::portfolio::{BetSide, NewBet};
 use storage::postgres::PgPortfolio;
 use strategy::StrategyProfile;
 use tokio::sync::{RwLock, mpsc};
@@ -729,13 +729,18 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                                     .strategy_bankroll(&strat.name)
                                     .await
                                     .unwrap_or(0.0);
+                                let side_emoji = match signal.side {
+                                    BetSide::Yes => "🟢 YES",
+                                    BetSide::No => "🔴 NO",
+                                };
                                 let msg = format!(
                                     "⚡ *WS-Triggered Bet* ({label} {strat_name})\n\
                                      {signal_msg}\n\n\
-                                     💸 Stake: `€{cost:.2}` ({shares:.1} shares @ `{price:.1}¢`)\n\
+                                     💸 Bet: *{side}* `€{cost:.2}` ({shares:.1} shares @ `{price:.1}¢`)\n\
                                      💰 Strategy bankroll: `€{bankroll:.2}`",
                                     label = strat.label(),
                                     strat_name = strat.name,
+                                    side = side_emoji,
                                     signal_msg = signal.to_telegram_message(),
                                     cost = raw_bet,
                                     shares = shares,
@@ -893,8 +898,8 @@ async fn housekeeping_cycle(
             // For YES bets: value = shares * current_price
             // For NO bets: value = shares * (1 - current_price)
             let current_value = match bet.side {
-                storage::portfolio::BetSide::Yes => bet.shares * current,
-                storage::portfolio::BetSide::No => bet.shares * (1.0 - current),
+                BetSide::Yes => bet.shares * current,
+                BetSide::No => bet.shares * (1.0 - current),
             };
             let unrealized = current_value - bet.cost;
 
@@ -1221,11 +1226,15 @@ async fn news_scan_cycle(
                                 String::new()
                             };
 
+                            let side_emoji = match signal.side {
+                                BetSide::Yes => "🟢 YES",
+                                BetSide::No => "🔴 NO",
+                            };
                             let msg = format!(
                                 "{label} *{strat_name}*\n\
                                  {signal}\n\
                                  {news}\n\
-                                 💸 *Paper bet placed*\n\
+                                 💸 *Bet: {side}*\n\
                                  💵 Stake: `€{cost:.2}` ({shares:.1} shares @ `{price:.1}¢`)\n\
                                  🏷 Fees: `€{fee:.2}` (slippage + trading)\n\
                                  💰 Strategy bankroll: `€{bankroll:.2}`\n\
@@ -1234,6 +1243,7 @@ async fn news_scan_cycle(
                                 strat_name = strat.name,
                                 signal = signal.to_telegram_message(),
                                 news = news_section,
+                                side = side_emoji,
                                 cost = bet_amount,
                                 shares = shares,
                                 price = slipped_price * 100.0,
