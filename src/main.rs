@@ -270,27 +270,73 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     let strat_names: Vec<&str> = strategies.iter().map(|s| s.name.as_str()).collect();
     tracing::info!(strategies = ?strat_names, "Strategies loaded");
 
-    let bankroll = portfolio.bankroll().await?;
-    let open_count = portfolio.open_bets().await?.len();
-
-    let starting = portfolio.starting_bankroll().await?;
+    let open_bets = portfolio.open_bets().await?;
     let resolved = portfolio.resolved_bets().await?;
-    let wins = resolved.iter().filter(|b| b.won == Some(true)).count();
-    let losses = resolved.iter().filter(|b| b.won == Some(false)).count();
+    let starting = portfolio.starting_bankroll().await?;
+    let num_strategies = strategies.len() as f64;
+    let starting_per_strat = if num_strategies > 0.0 {
+        starting / num_strategies
+    } else {
+        0.0
+    };
+
+    let mut strat_lines = Vec::new();
+    let mut total_bankroll = 0.0_f64;
+    for strat in strategies.iter() {
+        let s_bankroll = portfolio.strategy_bankroll(&strat.name).await?;
+        let s_open = open_bets
+            .iter()
+            .filter(|b| b.strategy == strat.name)
+            .count();
+        let s_resolved: Vec<_> = resolved
+            .iter()
+            .filter(|b| b.strategy == strat.name)
+            .collect();
+        let s_wins = s_resolved.iter().filter(|b| b.won == Some(true)).count();
+        let s_losses = s_resolved.iter().filter(|b| b.won == Some(false)).count();
+        let s_pnl: f64 = s_resolved.iter().filter_map(|b| b.pnl).sum();
+        let s_roi = if starting_per_strat > 0.0 {
+            (s_bankroll - starting_per_strat) / starting_per_strat * 100.0
+        } else {
+            0.0
+        };
+        total_bankroll += s_bankroll;
+        strat_lines.push(format!(
+            "{} *{}*: `€{:.2}` ({:+.1}%) | PnL `€{:+.2}` | {}W/{}L | {} open",
+            strat.label(),
+            strat.name,
+            s_bankroll,
+            s_roi,
+            s_pnl,
+            s_wins,
+            s_losses,
+            s_open,
+        ));
+    }
+
     let total_pnl: f64 = resolved.iter().filter_map(|b| b.pnl).sum();
+    let total_roi = if starting > 0.0 {
+        (total_bankroll - starting) / starting * 100.0
+    } else {
+        0.0
+    };
 
     let _ = notifier
         .send(&format!(
             "🤖 *Polymarket Signal Bot started*\n\n\
-             💰 Bankroll: `€{bankroll:.2}` (started: `€{starting:.2}`)\n\
-             📊 Open bets: {open_count} | Record: {wins}W/{losses}L\n\
-             💵 Total PnL: `€{total_pnl:+.2}`\n\n\
+             💰 Bankroll: `€{total_bankroll:.2}` (started: `€{starting:.2}`)\n\
+             💵 PnL: `€{total_pnl:+.2}` | ROI: `{total_roi:+.1}%`\n\
+             📊 Open: {open_count} | Record: {wins}W/{losses}L\n\n\
+             {strat_details}\n\n\
              ⚙️ *Config:*\n\
              ⏱ News: every {news_min}min | Housekeeping: every {hk_min}min\n\
              🎯 Max {max_sig} signals/day | Kelly: {kelly:.0}%\n\
              🔍 Min edge: {edge:.0}% | Min volume: ${vol:.0}\n\
-             🧠 Model: `{model}` ({agents}-agent consensus)\n\
-             🎭 Strategies: {strat_info}",
+             🧠 Model: `{model}` ({agents}-agent consensus)",
+            open_count = open_bets.len(),
+            wins = resolved.iter().filter(|b| b.won == Some(true)).count(),
+            losses = resolved.iter().filter(|b| b.won == Some(false)).count(),
+            strat_details = strat_lines.join("\n"),
             news_min = cfg.news_scan_interval_mins,
             hk_min = cfg.scan_interval_mins,
             max_sig = cfg.max_signals_per_day,
@@ -299,11 +345,6 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             vol = cfg.min_volume,
             model = cfg.llm_model,
             agents = cfg.consensus_agents,
-            strat_info = strategies
-                .iter()
-                .map(|s| format!("{} {}", s.label(), s.name))
-                .collect::<Vec<_>>()
-                .join(", "),
         ))
         .await;
 
