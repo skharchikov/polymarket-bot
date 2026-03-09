@@ -73,6 +73,11 @@ impl PgPortfolio {
             .execute(&self.pool)
             .await
             .context("failed to run bet_source migration")?;
+        let fix_bankroll = include_str!("../../migrations/010_fix_global_bankroll.sql");
+        sqlx::raw_sql(fix_bankroll)
+            .execute(&self.pool)
+            .await
+            .context("failed to run fix_global_bankroll migration")?;
         Ok(())
     }
 
@@ -250,21 +255,17 @@ impl PgPortfolio {
         let resolved = self.resolved_bets().await?;
         let open = self.open_bets().await?;
 
-        // Collect strategy names from bets + portfolio keys
-        let all_bets: Vec<&Bet> = resolved.iter().chain(open.iter()).collect();
-        let mut strategies: Vec<String> = all_bets
-            .iter()
-            .map(|b| b.strategy.clone())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        if strategies.is_empty() {
-            strategies = vec![
+        // Read active strategies from portfolio (set by init_strategy_bankrolls)
+        let strat_str = self.get_text("active_strategies").await?;
+        let strategies: Vec<String> = if strat_str.is_empty() {
+            vec![
                 "aggressive".into(),
                 "balanced".into(),
                 "conservative".into(),
-            ];
-        }
+            ]
+        } else {
+            strat_str.split(',').map(|s| s.trim().to_string()).collect()
+        };
         let num_strategies = strategies.len() as f64;
         let starting_per_strat = if num_strategies > 0.0 {
             starting / num_strategies
@@ -551,6 +552,26 @@ impl PgPortfolio {
                     "Initialized strategy bankroll"
                 );
             }
+        }
+
+        // Store active strategy names so /stats can show all of them
+        let strat_names: Vec<&str> = strategies.iter().map(|s| s.name.as_str()).collect();
+        self.upsert_text("active_strategies", &strat_names.join(","))
+            .await?;
+
+        // Sync global starting_bankroll = sum of per-strategy bankrolls
+        let mut total = 0.0;
+        for s in strategies {
+            total += self.strategy_bankroll(&s.name).await?;
+        }
+        let current_starting = self.starting_bankroll().await?;
+        if (current_starting - total).abs() > 0.01 {
+            self.upsert_f64("starting_bankroll", total).await?;
+            tracing::info!(
+                old = format_args!("€{current_starting:.2}"),
+                new = format_args!("€{total:.2}"),
+                "Updated global starting_bankroll to match strategy sum"
+            );
         }
 
         // Init signal counters (idempotent — won't overwrite existing)
