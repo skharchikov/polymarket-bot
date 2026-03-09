@@ -108,6 +108,7 @@ impl StrategyProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scanner::live::SignalSource;
     use crate::storage::portfolio::{BetContext, BetSide};
 
     fn test_signal(edge: f64, confidence: f64, price: f64, prob: f64) -> Signal {
@@ -127,6 +128,7 @@ mod tests {
             prior: price,
             combined_lr: 1.0,
             news_matched_count: 0,
+            source: SignalSource::LlmConsensus,
             context: BetContext::default(),
         }
     }

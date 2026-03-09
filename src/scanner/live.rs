@@ -23,6 +23,21 @@ use super::news::{NewsAggregator, NewsItem, NewsMatch};
 const GAMMA_API: &str = "https://gamma-api.polymarket.com";
 const CLOB_API: &str = "https://clob.polymarket.com";
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SignalSource {
+    XgBoost,
+    LlmConsensus,
+}
+
+impl SignalSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::XgBoost => "XGBoost Model",
+            Self::LlmConsensus => "LLM Consensus",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Signal {
     pub market_id: String,
@@ -44,6 +59,8 @@ pub struct Signal {
     /// Number of news items matched to this market
     pub news_matched_count: usize,
     pub context: BetContext,
+    /// Whether this signal came from XGBoost or LLM
+    pub source: SignalSource,
 }
 
 impl Signal {
@@ -53,24 +70,37 @@ impl Signal {
             BetSide::No => ("\u{1f534}", "NO"),
         };
 
-        // Format multi-agent reasoning as separate lines
-        let reasoning_lines: Vec<&str> = self.reasoning.split(" | ").collect();
-        let reasoning_block = if reasoning_lines.len() > 1 {
-            let mut block = String::from("\n\u{1f9e0} *Bayesian Agents:*\n");
-            for line in &reasoning_lines {
-                let safe = sanitize_markdown(line);
-                block.push_str(&format!("  \u{2022} _{safe}_\n"));
-            }
-            block
+        let source_tag = match self.source {
+            SignalSource::XgBoost => "\u{1f916} XGBoost",
+            SignalSource::LlmConsensus => "\u{1f9e0} LLM",
+        };
+
+        // Format reasoning block based on source
+        let reasoning_block = if self.source == SignalSource::XgBoost {
+            format!(
+                "\n\u{1f916} _Model: {:.1}% vs market {:.1}%_",
+                self.estimated_prob * 100.0,
+                self.prior * 100.0
+            )
         } else {
-            format!("\n\u{1f4a1} _{}_", sanitize_markdown(&self.reasoning))
+            let reasoning_lines: Vec<&str> = self.reasoning.split(" | ").collect();
+            if reasoning_lines.len() > 1 {
+                let mut block = String::from("\n\u{1f9e0} *Bayesian Agents:*\n");
+                for line in &reasoning_lines {
+                    let safe = sanitize_markdown(line);
+                    block.push_str(&format!("  \u{2022} _{safe}_\n"));
+                }
+                block
+            } else {
+                format!("\n\u{1f4a1} _{}_", sanitize_markdown(&self.reasoning))
+            }
         };
 
         format!(
-            "{emoji} *{side_label} Signal*\n\n\
+            "{emoji} *{side_label} Signal* ({source})\n\n\
              \u{1f4cb} [{question}]({url})\n\n\
              \u{1f4b0} Market price: `{price:.1}\u{00a2}`\n\
-             \u{1f9ea} Bayes: `{prior:.1}%` → `{posterior:.1}%` (LR=`{lr:.2}`)\n\
+             \u{1f9ea} Estimate: `{prior:.1}%` \u{2192} `{posterior:.1}%` (LR=`{lr:.2}`)\n\
              \u{1f4ca} Edge: `+{edge:.1}%`\n\
              \u{1f512} Confidence: `{conf:.0}%`\n\
              \u{1f4d0} Kelly size: `{kelly:.1}%` of bankroll\n\
@@ -78,6 +108,7 @@ impl Signal {
              \u{1f4f0} News matched: {news_count} articles\n\
              \u{23f0} Expires: {end}\
              {reasoning}",
+            source = source_tag,
             question = self.question,
             url = self.polymarket_url,
             price = self.current_price * 100.0,
@@ -847,10 +878,35 @@ impl LiveScanner {
         for (i, (nm, current_price, history_summary, history, book_depth)) in
             candidates.iter().enumerate()
         {
+            // Compute news features from matched articles
+            let news_count = nm.news.len();
+            let best_news_score = nm.relevance_score;
+            let now = chrono::Utc::now();
+            let avg_news_age_hours = if nm.news.is_empty() {
+                0.0
+            } else {
+                let total_hours: f64 = nm
+                    .news
+                    .iter()
+                    .map(|n| {
+                        n.published
+                            .map(|p| (now - p).num_minutes() as f64 / 60.0)
+                            .unwrap_or(4.0)
+                    })
+                    .sum();
+                total_hours / nm.news.len() as f64
+            };
+
             // --- XGBoost prediction (instant, free) ---
             let xgb_estimate = self.xgb_model.as_ref().map(|model| {
-                let features =
-                    MarketFeatures::from_market_and_history(&nm.market, *current_price, history);
+                let features = MarketFeatures::from_market_and_news(
+                    &nm.market,
+                    *current_price,
+                    history,
+                    news_count,
+                    best_news_score,
+                    avg_news_age_hours,
+                );
                 let feature_vec = features.to_vec();
                 let xgb_prob = model.predict_prob(&feature_vec);
                 let xgb_conf = model.confidence(&feature_vec);
@@ -863,13 +919,16 @@ impl LiveScanner {
                     xgb_prob = format_args!("{:.1}%", xgb_prob * 100.0),
                     xgb_conf = format_args!("{:.0}%", xgb_conf * 100.0),
                     price = format_args!("{:.1}%", current_price * 100.0),
+                    news = news_count,
                     "XGBoost prediction"
                 );
             }
 
-            // --- LLM prediction (slow, costs money — skip if XGBoost is confident) ---
-            let (prob, confidence, combined_lr, reasoning) = if let Some((xgb_prob, xgb_conf)) =
-                xgb_estimate
+            // --- Signal source: XGBoost primary, LLM fallback ---
+            let (prob, confidence, combined_lr, reasoning, source) = if let Some((
+                xgb_prob,
+                xgb_conf,
+            )) = xgb_estimate
             {
                 // Use XGBoost as primary; construct a synthetic LR from the probability shift
                 let lr = if *current_price > 0.01 && *current_price < 0.99 {
@@ -882,13 +941,15 @@ impl LiveScanner {
                     xgb_conf,
                     lr,
                     format!(
-                        "XGBoost: {:.1}% (market {:.1}%)",
+                        "XGBoost: {:.1}% (market {:.1}%, {} news)",
                         xgb_prob * 100.0,
-                        current_price * 100.0
+                        current_price * 100.0,
+                        news_count
                     ),
+                    SignalSource::XgBoost,
                 )
             } else {
-                // No model — fall back to LLM
+                // No model — fall back to LLM for news assessment only
                 if i > 0 {
                     tracing::info!("Waiting 21s for rate limit between candidates...");
                     tokio::time::sleep(Duration::from_secs(21)).await;
@@ -904,7 +965,7 @@ impl LiveScanner {
                     )
                     .await
                 {
-                    Ok(r) => r,
+                    Ok(r) => (r.0, r.1, r.2, r.3, SignalSource::LlmConsensus),
                     Err(e) => {
                         tracing::warn!(market = %nm.market.market_id, err = %e, "LLM assessment failed");
                         continue;
@@ -978,19 +1039,29 @@ impl LiveScanner {
                 combined_lr: Some(combined_lr),
             };
 
-            // Use permissive gate; individual strategies apply their own thresholds
-            if effective_edge < 0.03 {
-                let reason = format!("edge {:.1}% < 3%", effective_edge * 100.0);
+            // Gate thresholds: trust XGBoost more (lower edge gate, lower confidence floor)
+            let (min_edge, min_kelly, min_conf) = match source {
+                SignalSource::XgBoost => (0.02, 0.003, 0.25),
+                SignalSource::LlmConsensus => (0.03, 0.005, 0.30),
+            };
+
+            if effective_edge < min_edge {
+                let reason = format!(
+                    "edge {:.1}% < {:.0}%",
+                    effective_edge * 100.0,
+                    min_edge * 100.0
+                );
                 tracing::info!(
                     market = %nm.market.question,
                     eff_edge = format_args!("+{:.1}%", effective_edge * 100.0),
-                    "REJECTED: effective edge below 3% gate"
+                    source = source.label(),
+                    "REJECTED: effective edge below gate"
                 );
                 rejections.push(reject(reason));
                 continue;
             }
-            if kelly_size <= 0.005 {
-                let reason = format!("kelly {:.3} < 0.005", kelly_size);
+            if kelly_size <= min_kelly {
+                let reason = format!("kelly {:.3} < {:.3}", kelly_size, min_kelly);
                 tracing::info!(
                     market = %nm.market.question,
                     kelly = format_args!("{:.3}", kelly_size),
@@ -999,12 +1070,12 @@ impl LiveScanner {
                 rejections.push(reject(reason));
                 continue;
             }
-            if confidence < 0.30 {
-                let reason = format!("conf {:.0}% < 30%", confidence * 100.0);
+            if confidence < min_conf {
+                let reason = format!("conf {:.0}% < {:.0}%", confidence * 100.0, min_conf * 100.0);
                 tracing::info!(
                     market = %nm.market.question,
                     conf = format_args!("{:.0}%", confidence * 100.0),
-                    "REJECTED: confidence below 30% gate"
+                    "REJECTED: confidence below gate"
                 );
                 rejections.push(reject(reason));
                 continue;
@@ -1016,6 +1087,7 @@ impl LiveScanner {
                 eff_edge = format_args!("+{:.1}%", effective_edge * 100.0),
                 kelly = format_args!("{:.1}%", kelly_size * 100.0),
                 conf = format_args!("{:.0}%", confidence * 100.0),
+                source = source.label(),
                 "ACCEPTED as signal — passing to strategies"
             );
 
@@ -1036,6 +1108,7 @@ impl LiveScanner {
                 prior: *current_price,
                 combined_lr,
                 news_matched_count: nm.news.len(),
+                source,
                 context: BetContext {
                     btc_price: 0.0,
                     eth_price: 0.0,
@@ -1369,6 +1442,7 @@ mod tests {
             prior: 0.50,
             combined_lr: 2.33,
             news_matched_count: 3,
+            source: SignalSource::LlmConsensus,
             context: BetContext::default(),
         };
         let expected = 0.20 * 0.80 * 0.10;

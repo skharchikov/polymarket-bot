@@ -308,9 +308,10 @@ mod tests {
 
         // Test prediction with a typical market feature vector
         // [yes_price, momentum_1h, momentum_24h, volatility_24h, rsi,
-        //  log_volume, log_liquidity, days_to_expiry, is_crypto, is_politics, is_sports]
+        //  log_volume, log_liquidity, days_to_expiry, is_crypto, is_politics, is_sports,
+        //  news_count, best_news_score, avg_news_age_hours]
         let features = vec![
-            0.55, 0.02, -0.05, 0.03, 0.6, 12.0, 10.0, 15.0, 1.0, 0.0, 0.0,
+            0.55, 0.02, -0.05, 0.03, 0.6, 12.0, 10.0, 15.0, 1.0, 0.0, 0.0, 3.0, 0.75, 2.0,
         ];
         let prob = model.predict_prob(&features);
         assert!(

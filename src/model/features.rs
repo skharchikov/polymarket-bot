@@ -17,6 +17,10 @@ pub struct MarketFeatures {
     pub is_crypto: f64,
     pub is_politics: f64,
     pub is_sports: f64,
+    // News features (from BM25/embedding match pipeline)
+    pub news_count: f64,
+    pub best_news_score: f64,
+    pub avg_news_age_hours: f64,
 }
 
 impl MarketFeatures {
@@ -33,6 +37,9 @@ impl MarketFeatures {
         "is_crypto",
         "is_politics",
         "is_sports",
+        "news_count",
+        "best_news_score",
+        "avg_news_age_hours",
     ];
 
     /// Convert to fixed-order f64 vector for model input.
@@ -49,10 +56,29 @@ impl MarketFeatures {
             self.is_crypto,
             self.is_politics,
             self.is_sports,
+            self.news_count,
+            self.best_news_score,
+            self.avg_news_age_hours,
         ]
     }
 
-    /// Build features from a market and its price history.
+    /// Build features from a market, price history, and matched news.
+    pub fn from_market_and_news(
+        market: &GammaMarket,
+        current_price: f64,
+        history: &[PriceTick],
+        news_count: usize,
+        best_news_score: f64,
+        avg_news_age_hours: f64,
+    ) -> Self {
+        let mut features = Self::from_market_and_history(market, current_price, history);
+        features.news_count = news_count as f64;
+        features.best_news_score = best_news_score;
+        features.avg_news_age_hours = avg_news_age_hours;
+        features
+    }
+
+    /// Build features from a market and its price history (no news data).
     pub fn from_market_and_history(
         market: &GammaMarket,
         current_price: f64,
@@ -128,6 +154,10 @@ impl MarketFeatures {
             is_crypto,
             is_politics,
             is_sports,
+            // Default news features to 0 (XGBoost handles missing/zero natively)
+            news_count: 0.0,
+            best_news_score: 0.0,
+            avg_news_age_hours: 0.0,
         }
     }
 }
@@ -278,6 +308,9 @@ mod tests {
             is_crypto: 1.0,
             is_politics: 0.0,
             is_sports: 0.0,
+            news_count: 3.0,
+            best_news_score: 0.85,
+            avg_news_age_hours: 2.5,
         };
         assert_eq!(features.to_vec().len(), MarketFeatures::NAMES.len());
     }

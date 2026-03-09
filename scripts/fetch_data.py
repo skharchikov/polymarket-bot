@@ -272,6 +272,10 @@ def _extract_snapshot(prices: np.ndarray, timestamps: np.ndarray,
         "liquidity": liquidity,
         "days_to_expiry": days_to_expiry,
         "category": category,
+        # News features (0 for historical data — XGBoost handles missing natively)
+        "news_count": 0,
+        "best_news_score": 0.0,
+        "avg_news_age_hours": 0.0,
         # Label
         "outcome_yes": market["outcome_yes"],
         # Metadata

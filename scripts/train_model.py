@@ -49,7 +49,7 @@ except ImportError:
     print("Warning: LightGBM not installed, using sklearn only")
 
 
-# Feature columns in fixed order — must match Rust inference
+# Feature columns in fixed order — must match Rust inference (MarketFeatures::NAMES)
 FEATURE_COLS = [
     "yes_price",
     "momentum_1h",
@@ -62,6 +62,9 @@ FEATURE_COLS = [
     "is_crypto",
     "is_politics",
     "is_sports",
+    "news_count",
+    "best_news_score",
+    "avg_news_age_hours",
 ]
 
 N_FEATURES = len(FEATURE_COLS)
@@ -90,6 +93,13 @@ def load_data(path: str) -> pd.DataFrame:
     # Fill NaN momentum with 0 (no price reference available)
     for col in ["momentum_1h", "momentum_24h", "price_1h_ago", "price_6h_ago", "price_24h_ago"]:
         if col in df.columns:
+            df[col] = df[col].fillna(0.0)
+
+    # News features (0 for historical data without news — XGBoost handles this natively)
+    for col in ["news_count", "best_news_score", "avg_news_age_hours"]:
+        if col not in df.columns:
+            df[col] = 0.0
+        else:
             df[col] = df[col].fillna(0.0)
 
     # Sort by snapshot time for proper time-series splits
