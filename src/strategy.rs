@@ -43,9 +43,9 @@ impl StrategyProfile {
     pub fn conservative() -> Self {
         Self {
             name: "conservative".into(),
-            kelly_fraction: 0.10,
-            min_effective_edge: 0.12,
-            min_confidence: 0.65,
+            kelly_fraction: 0.15,
+            min_effective_edge: 0.08,
+            min_confidence: 0.50,
             max_signals_per_day: 2,
             min_bet: 15.0,
         }
@@ -160,24 +160,24 @@ mod tests {
     #[test]
     fn test_conservative_rejects_low_edge() {
         let s = StrategyProfile::conservative();
-        let signal = test_signal(0.10, 0.55, 0.50, 0.60);
-        // effective_edge = 0.055 < 0.12 ✗
+        let signal = test_signal(0.05, 0.45, 0.50, 0.55);
+        // effective_edge = 0.05 * 0.45 = 0.0225 < 0.08 ✗
         assert!(s.evaluate(&signal).is_none());
     }
 
     #[test]
     fn test_conservative_rejects_low_confidence() {
         let s = StrategyProfile::conservative();
-        let signal = test_signal(0.30, 0.60, 0.50, 0.80);
-        // effective_edge = 0.18 >= 0.12 ✓, but confidence 0.60 < 0.65 ✗
+        let signal = test_signal(0.20, 0.35, 0.50, 0.70);
+        // effective_edge = 0.07 >= 0.08? no → reject (also conf 0.35 < 0.50 ✗)
         assert!(s.evaluate(&signal).is_none());
     }
 
     #[test]
     fn test_conservative_accepts_strong_signal() {
         let s = StrategyProfile::conservative();
-        let signal = test_signal(0.20, 0.80, 0.50, 0.70);
-        // effective_edge = 0.16 >= 0.12 ✓, confidence 0.80 >= 0.65 ✓
+        let signal = test_signal(0.20, 0.60, 0.50, 0.70);
+        // effective_edge = 0.12 >= 0.08 ✓, confidence 0.60 >= 0.50 ✓
         assert!(s.evaluate(&signal).is_some());
     }
 

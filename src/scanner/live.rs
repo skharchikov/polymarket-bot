@@ -1098,11 +1098,17 @@ impl LiveScanner {
                 "Model candidate"
             );
 
-            // Compute edge
+            // Bayesian update: anchor model prediction to market price.
+            // Market price is the prior (encodes all public info),
+            // model's LR is dampened by its confidence before updating.
+            let dampened_lr = bayesian::dampen_lr(lr, ml_conf);
+            let prior_odds = bayesian::prob_to_odds(c.current_price);
+            let posterior = bayesian::odds_to_prob(prior_odds * dampened_lr);
+
             let estimate = BayesianEstimate {
                 prior: c.current_price,
-                posterior: ml_prob,
-                combined_lr: 0.0,
+                posterior,
+                combined_lr: dampened_lr,
                 confidence: ml_conf,
                 reasoning: reasoning.clone(),
             };

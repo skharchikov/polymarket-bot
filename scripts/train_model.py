@@ -116,14 +116,14 @@ def load_data(path: str) -> pd.DataFrame:
     return df
 
 
-def build_feature_matrix(df: pd.DataFrame) -> np.ndarray:
-    """Extract feature matrix in fixed column order."""
+def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
+    """Extract feature matrix in fixed column order as a DataFrame."""
     # Fill missing columns with 0 (backward compat with old training data)
     for col in FEATURE_COLS:
         if col not in df.columns:
             df[col] = 0.0
-    X = df[FEATURE_COLS].values.astype(np.float64)
-    X = np.nan_to_num(X, nan=0.0, posinf=1.0, neginf=0.0)
+    X = df[FEATURE_COLS].astype(np.float64).copy()
+    X = X.fillna(0.0).replace([np.inf, -np.inf], [1.0, 0.0])
     return X
 
 
@@ -210,7 +210,7 @@ def evaluate_folds(model, X, y, prices, n_splits=5, market_ids=None):
     results = []
 
     for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
-        X_train, X_test = X[train_idx], X[test_idx]
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
         y_train, y_test = y[train_idx], y[test_idx]
         p_test = prices[test_idx]
 
@@ -404,9 +404,9 @@ def main():
     print(f"\nFeature matrix: {X.shape[0]} samples x {X.shape[1]} features")
     print(f"Class balance: {y.mean():.1%} YES / {1-y.mean():.1%} NO")
 
-    # Scale features
+    # Scale features (preserve DataFrame with column names)
     scaler = RobustScaler()
-    X_scaled = scaler.fit_transform(X)
+    X_scaled = pd.DataFrame(scaler.fit_transform(X), columns=FEATURE_COLS)
 
     # Build ensemble
     print("\nBuilding ensemble model...")
@@ -446,7 +446,7 @@ def main():
 
     # Final evaluation on last 20% (held out by time)
     split_idx = int(len(X_scaled) * 0.8)
-    X_test_all = X_scaled[split_idx:]
+    X_test_all = X_scaled.iloc[split_idx:]
     y_test_all = y[split_idx:]
     p_test_all = prices[split_idx:]
 
