@@ -455,6 +455,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     let hb_notifier = Arc::clone(&notifier);
     let hb_cfg = Arc::clone(&cfg);
     let hb_stats = Arc::clone(&stats);
+    let hb_strategies = Arc::clone(&strategies);
     let heartbeat = tokio::spawn(async move {
         if hb_interval == 0 {
             // Disabled — park forever
@@ -463,7 +464,15 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         }
         loop {
             tokio::time::sleep(Duration::from_secs(hb_interval * 60)).await;
-            if let Err(e) = heartbeat_cycle(&hb_portfolio, &hb_notifier, &hb_cfg, &hb_stats).await {
+            if let Err(e) = heartbeat_cycle(
+                &hb_portfolio,
+                &hb_notifier,
+                &hb_cfg,
+                &hb_stats,
+                &hb_strategies,
+            )
+            .await
+            {
                 tracing::error!(err = %e, "Heartbeat failed");
             }
         }
@@ -523,10 +532,26 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     let al_cfg = Arc::clone(&cfg);
     let al_token_map = Arc::clone(&token_map);
     let alert_loop = tokio::spawn(async move {
-        // Throttle: don't re-assess same market within 5 minutes
+        // Throttle: don't re-assess same market within 15 minutes
         let mut last_assessed: HashMap<String, std::time::Instant> = HashMap::new();
+        // Global WS cooldown: max 1 WS-triggered bet per 10 minutes
+        let mut last_ws_bet = std::time::Instant::now() - Duration::from_secs(600);
+        // Max WS bets per day
+        let mut ws_bets_today: usize = 0;
+        let mut ws_bets_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        const MAX_WS_BETS_PER_DAY: usize = 3;
 
         while let Some(alert) = alert_rx.recv().await {
+            // Reset daily counter
+            let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            if today != ws_bets_date {
+                ws_bets_today = 0;
+                ws_bets_date = today;
+            }
+            if ws_bets_today >= MAX_WS_BETS_PER_DAY {
+                continue;
+            }
+
             let map = al_token_map.read().await;
             let market_id = match map.get(&alert.asset_id) {
                 Some(id) => id.clone(),
@@ -534,11 +559,15 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             };
             drop(map);
 
-            // Throttle
+            // Per-market throttle: 15 minutes
             let now = std::time::Instant::now();
             if let Some(last) = last_assessed.get(&market_id)
-                && now.duration_since(*last) < Duration::from_secs(300)
+                && now.duration_since(*last) < Duration::from_secs(900)
             {
+                continue;
+            }
+            // Global cooldown: 10 minutes between any WS bets
+            if now.duration_since(last_ws_bet) < Duration::from_secs(600) {
                 continue;
             }
             last_assessed.insert(market_id.clone(), now);
@@ -619,6 +648,8 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
 
                         match al_portfolio.place_bet(&new_bet).await {
                             Ok(_) => {
+                                last_ws_bet = std::time::Instant::now();
+                                ws_bets_today += 1;
                                 let new_bankroll = al_portfolio
                                     .strategy_bankroll(&strat.name)
                                     .await
@@ -1162,10 +1193,26 @@ async fn heartbeat_cycle(
     notifier: &telegram::notifier::TelegramNotifier,
     cfg: &AppConfig,
     stats: &ScanStats,
+    strategies: &[StrategyProfile],
 ) -> Result<()> {
     let bankroll = portfolio.bankroll().await?;
     let open_count = portfolio.open_bets().await?.len();
     let signals_today = portfolio.signals_sent_today().await?;
+
+    // Per-strategy bankroll breakdown
+    let mut strat_lines = String::new();
+    for s in strategies {
+        let sb = portfolio.strategy_bankroll(&s.name).await.unwrap_or(0.0);
+        let sent = portfolio.strategy_signals_today(&s.name).await.unwrap_or(0);
+        strat_lines.push_str(&format!(
+            "\n  {} {}: `€{:.2}` ({}/{})",
+            s.label(),
+            s.name,
+            sb,
+            sent,
+            s.max_signals_per_day,
+        ));
+    }
 
     // Read and reset counters
     let scans = stats.scans_completed.swap(0, Ordering::Relaxed);
@@ -1180,9 +1227,8 @@ async fn heartbeat_cycle(
          🔍 {markets} markets scanned\n\
          📰 {news_total} news items ({news_new} new)\n\
          🎯 {signals} signals found\n\n\
-         💰 Bankroll: `€{bankroll:.2}`\n\
-         📊 Open bets: {open}\n\
-         🆕 New bets today: {today}/{max}",
+         💰 Total: `€{bankroll:.2}` | Open: {open} | Today: {today}/{max}\n\
+         📊 Strategies:{strat_lines}",
         interval = cfg.heartbeat_interval_mins,
         open = open_count,
         today = signals_today,

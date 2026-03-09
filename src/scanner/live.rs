@@ -1446,8 +1446,8 @@ impl LiveScanner {
         let kelly_size = fractional_kelly(bet_prob, bet_price, 1.0);
         let effective_edge = edge * xgb_conf;
 
-        // Use XGBoost thresholds (trust the model)
-        if effective_edge < 0.02 || kelly_size <= 0.003 || xgb_conf < 0.25 {
+        // WS-triggered: stricter thresholds (fires frequently, avoid noise)
+        if effective_edge < 0.05 || kelly_size <= 0.01 || xgb_conf < 0.40 {
             return Ok(None);
         }
 

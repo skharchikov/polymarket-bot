@@ -58,6 +58,11 @@ impl PgPortfolio {
             .execute(&self.pool)
             .await
             .context("failed to run telegram_users migration")?;
+        let reset = include_str!("../../migrations/006_reset_bankroll.sql");
+        sqlx::raw_sql(reset)
+            .execute(&self.pool)
+            .await
+            .context("failed to run reset_bankroll migration")?;
         Ok(())
     }
 
