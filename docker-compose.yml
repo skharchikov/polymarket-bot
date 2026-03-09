@@ -31,6 +31,11 @@ services:
     build:
       context: scripts
     command: ["/bin/sh", "retrain.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://bot:bot@postgres:5432/polymarket
     volumes:
       - model:/model
     restart: "no"

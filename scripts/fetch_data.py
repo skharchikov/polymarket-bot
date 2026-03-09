@@ -11,6 +11,7 @@ Usage:
 
 import argparse
 import json
+import os
 import time
 import sys
 from datetime import datetime, timedelta
@@ -304,42 +305,180 @@ def _compute_rsi(prices: np.ndarray, period: int = 14) -> float:
     return 1.0 - (1.0 / (1.0 + rs))
 
 
+def fetch_bet_snapshots(database_url: str, scraper: PolymarketScraper,
+                        verbose: bool = False) -> list[dict]:
+    """
+    Pull resolved bets from our own DB and build snapshots from their
+    price history at the time the bet was placed.
+
+    These are the highest-quality training samples — we know the exact
+    outcome AND had a specific thesis (edge, confidence) when entering.
+    """
+    try:
+        import psycopg2
+    except ImportError:
+        print("  psycopg2 not installed, skipping DB bets (pip install psycopg2-binary)")
+        return []
+
+    try:
+        conn = psycopg2.connect(database_url)
+    except Exception as e:
+        print(f"  Could not connect to DB: {e}")
+        return []
+
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT market_id, side, entry_price, estimated_prob, confidence,
+               edge, won, placed_at, end_date, context
+        FROM bets
+        WHERE resolved = TRUE AND won IS NOT NULL
+        ORDER BY placed_at
+    """)
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        print("  No resolved bets in DB")
+        return []
+
+    print(f"  Found {len(rows)} resolved bets in DB")
+    snapshots = []
+
+    for i, row in enumerate(rows):
+        market_id, side, entry_price, est_prob, confidence, edge, won, placed_at, end_date, ctx = row
+        outcome_yes = won if side == "Yes" else not won
+
+        # Try to get token ID from context JSON
+        token_id = None
+        if ctx and isinstance(ctx, dict):
+            token_id = ctx.get("yes_token_id")
+
+        if not token_id:
+            # Fetch market from Gamma API to get token
+            market_data = scraper._get(f"{GAMMA_URL}/markets/{market_id}")
+            if market_data:
+                tokens_raw = market_data.get("clobTokenIds", "")
+                try:
+                    tokens = json.loads(tokens_raw) if isinstance(tokens_raw, str) else tokens_raw
+                    token_id = tokens[0] if tokens else None
+                except (json.JSONDecodeError, IndexError):
+                    pass
+
+        if not token_id:
+            continue
+
+        if verbose:
+            print(f"  [{i+1}/{len(rows)}] Bet on {market_id[:20]}... won={won}")
+
+        history = scraper.fetch_price_history(token_id)
+        if len(history) < 20:
+            continue
+
+        ticks = []
+        for tick in history:
+            try:
+                ticks.append({"t": int(tick["t"]), "p": float(tick["p"])})
+            except (KeyError, ValueError):
+                continue
+
+        if len(ticks) < 20:
+            continue
+
+        ticks.sort(key=lambda x: x["t"])
+        prices = np.array([t["p"] for t in ticks])
+        timestamps = np.array([t["t"] for t in ticks])
+
+        # Find the tick closest to when we placed the bet
+        bet_ts = int(placed_at.timestamp()) if hasattr(placed_at, "timestamp") else int(placed_at)
+        bet_idx = int(np.searchsorted(timestamps, bet_ts))
+        bet_idx = min(bet_idx, len(ticks) - 2)
+        bet_idx = max(bet_idx, 20)  # Need enough history
+
+        # Parse volume/liquidity from context if available
+        volume = ctx.get("volume", 0) if ctx and isinstance(ctx, dict) else 0
+        liquidity = ctx.get("liquidity", 0) if ctx and isinstance(ctx, dict) else 0
+
+        market_stub = {
+            "market_id": market_id,
+            "question": "",
+            "category": ctx.get("category", "") if ctx and isinstance(ctx, dict) else "",
+            "outcome_yes": outcome_yes,
+            "volume": volume,
+            "liquidity": liquidity,
+            "end_date": end_date,
+        }
+
+        snap = _extract_snapshot(prices, timestamps, bet_idx, market_stub)
+        if snap:
+            # Override with our actual entry data for higher fidelity
+            snap["yes_price"] = entry_price
+            snap["source"] = "own_bet"
+            snap["our_estimated_prob"] = est_prob
+            snap["our_confidence"] = confidence
+            snap["our_edge"] = edge
+            snapshots.append(snap)
+
+    return snapshots
+
+
 def main():
     parser = argparse.ArgumentParser(description="Fetch Polymarket training data")
     parser.add_argument("--markets", type=int, default=500,
                         help="Number of resolved markets to fetch")
     parser.add_argument("--output", type=str, default="model/training_data.json",
                         help="Output file path")
+    parser.add_argument("--db", type=str, default=None,
+                        help="DATABASE_URL to pull our own resolved bets")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
+
+    # Try DATABASE_URL from env if not passed
+    database_url = args.db or os.environ.get("DATABASE_URL")
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     scraper = PolymarketScraper(verbose=args.verbose)
 
-    print(f"Fetching {args.markets} resolved markets...")
+    # 1. Fetch resolved markets from Polymarket API
+    print(f"Fetching {args.markets} resolved markets from Polymarket...")
     markets = scraper.fetch_resolved_markets(limit=args.markets)
     print(f"  Found {len(markets)} resolved markets with volume > $1k")
 
     print(f"Building feature snapshots from price history...")
     snapshots = build_snapshots(scraper, markets, verbose=args.verbose)
-    print(f"  Generated {len(snapshots)} training snapshots")
+    print(f"  Generated {len(snapshots)} API snapshots")
+
+    # 2. Pull our own resolved bets from DB
+    if database_url:
+        print(f"\nFetching our own resolved bets from DB...")
+        bet_snapshots = fetch_bet_snapshots(database_url, scraper, verbose=args.verbose)
+        if bet_snapshots:
+            # Weight our own bets higher by including them 3x
+            # (they have ground-truth entry price + known outcome)
+            print(f"  Adding {len(bet_snapshots)} bet snapshots (3x weighted)")
+            for _ in range(3):
+                snapshots.extend(bet_snapshots)
+    else:
+        print("\nNo DATABASE_URL — skipping own bet data. "
+              "Pass --db or set DATABASE_URL env var to include.")
 
     # Save
     with open(output_path, "w") as f:
         json.dump({
-            "generated_at": datetime.utcnow().isoformat(),
+            "generated_at": datetime.now(tz=None).isoformat(),
             "n_markets": len(markets),
             "n_snapshots": len(snapshots),
             "snapshots": snapshots,
         }, f, indent=2)
 
-    print(f"Saved to {output_path}")
+    print(f"\nSaved to {output_path}")
 
     # Quick stats
     outcomes = [s["outcome_yes"] for s in snapshots]
     yes_pct = sum(outcomes) / len(outcomes) * 100 if outcomes else 0
+    own = sum(1 for s in snapshots if s.get("source") == "own_bet")
+    print(f"  Total: {len(snapshots)} snapshots ({own} from own bets)")
     print(f"  Class balance: {yes_pct:.1f}% YES / {100-yes_pct:.1f}% NO")
 
 

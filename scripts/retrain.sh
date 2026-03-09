@@ -3,7 +3,7 @@ set -e
 
 echo "$(date -Iseconds) Starting retrain cycle"
 
-echo "Fetching resolved markets..."
+echo "Fetching resolved markets + own bets..."
 python fetch_data.py --markets 1000 --output /model/training_data.json
 
 echo "Training model..."
