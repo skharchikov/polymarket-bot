@@ -15,7 +15,6 @@ mod telegram;
 
 use anyhow::Result;
 use config::AppConfig;
-use scanner::live::SignalSource;
 use scanner::ws::{ActivityAlert, MarketWatcher};
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -321,9 +320,24 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         0.0
     };
 
+    let version = env!("CARGO_PKG_VERSION");
+    let build_tag = env!("BUILD_TAG");
+    let changelog = env!("BUILD_CHANGELOG");
+    let version_line = if !build_tag.is_empty() && format!("v{version}") != build_tag {
+        format!("`v{version}` (since {build_tag})")
+    } else {
+        format!("`v{version}`")
+    };
+
+    let changelog_section = if changelog == "No changes since last release" {
+        String::new()
+    } else {
+        format!("\n\n📝 *Changes:*\n{changelog}")
+    };
+
     let _ = notifier
         .send(&format!(
-            "🤖 *Polymarket Signal Bot started*\n\n\
+            "🤖 *Polymarket Signal Bot* {version_line}\n\n\
              💰 Bankroll: `€{total_bankroll:.2}` (started: `€{starting:.2}`)\n\
              💵 PnL: `€{total_pnl:+.2}` | ROI: `{total_roi:+.1}%`\n\
              📊 Open: {open_count} | Record: {wins}W/{losses}L\n\n\
@@ -333,7 +347,8 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
              🎯 Max {max_sig} signals/day | Kelly: {kelly:.0}%\n\
              🔍 Min edge: {edge:.0}% | Min volume: ${vol:.0}\n\
              🧠 Pipeline: {pipeline}\n\
-             🛑 Stop-loss: {sl:.0}% | Exit: {exit_days}d before expiry",
+             🛑 Stop-loss: {sl:.0}% | Exit: {exit_days}d before expiry\
+             {changelog_section}",
             open_count = open_bets.len(),
             wins = resolved.iter().filter(|b| b.won == Some(true)).count(),
             losses = resolved.iter().filter(|b| b.won == Some(false)).count(),
@@ -685,10 +700,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                             continue;
                         }
 
-                        let source_str = match signal.source {
-                            SignalSource::XgBoost => "xgboost",
-                            SignalSource::LlmConsensus => "llm_consensus",
-                        };
+                        let source_str = signal.source.as_str();
                         let new_bet = NewBet {
                             market_id: signal.market_id.clone(),
                             question: signal.question.clone(),
@@ -710,14 +722,10 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                         };
 
                         // Log prediction for Brier score tracking
-                        let source = match signal.source {
-                            SignalSource::XgBoost => "xgboost",
-                            SignalSource::LlmConsensus => "llm_consensus",
-                        };
                         let _ = al_portfolio
                             .log_prediction(
                                 &signal.market_id,
-                                source,
+                                source_str,
                                 signal.prior,
                                 signal.estimated_prob,
                                 signal.estimated_prob,
@@ -1181,21 +1189,14 @@ async fn news_scan_cycle(
                         end_date: signal.end_date.clone(),
                         context: Some(signal.context.clone()),
                         strategy: strat.name.clone(),
-                        source: match signal.source {
-                            SignalSource::XgBoost => "xgboost".to_string(),
-                            SignalSource::LlmConsensus => "llm_consensus".to_string(),
-                        },
+                        source: signal.source.as_str().to_string(),
                     };
 
                     // Log prediction for Brier score tracking
-                    let source = match signal.source {
-                        SignalSource::XgBoost => "xgboost",
-                        SignalSource::LlmConsensus => "llm_consensus",
-                    };
                     let _ = portfolio
                         .log_prediction(
                             &signal.market_id,
-                            source,
+                            signal.source.as_str(),
                             signal.prior,
                             signal.estimated_prob,
                             signal.estimated_prob,

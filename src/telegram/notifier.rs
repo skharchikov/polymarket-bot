@@ -20,11 +20,6 @@ impl TelegramNotifier {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn owner_chat_id(&self) -> &str {
-        &self.chat_id
-    }
-
     pub async fn send(&self, message: &str) -> Result<()> {
         self.send_to(&self.chat_id, message).await
     }

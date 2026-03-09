@@ -190,15 +190,6 @@ impl PgPortfolio {
         Ok(())
     }
 
-    /// Get all tracked Telegram chat IDs (for future broadcast).
-    #[allow(dead_code)]
-    pub async fn telegram_chat_ids(&self) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as("SELECT chat_id FROM telegram_users")
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows.into_iter().map(|r| r.0).collect())
-    }
-
     /// Get subscriber chat IDs with their usernames for logging.
     pub async fn telegram_subscribers(&self) -> Result<Vec<(String, Option<String>)>> {
         let rows: Vec<(String, Option<String>)> =

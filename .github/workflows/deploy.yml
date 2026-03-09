@@ -17,6 +17,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history for changelog generation
+
+      - name: Generate changelog
+        run: |
+          TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$TAG" ]; then
+            RANGE="${TAG}..HEAD"
+          else
+            RANGE="HEAD~10..HEAD"
+          fi
+          {
+            echo "$TAG"
+            git log "$RANGE" --oneline --no-decorate | while read -r line; do
+              echo "• ${line#* }"
+            done
+          } > CHANGELOG.gen
 
       - name: Set up SSH
         env:
@@ -48,6 +65,8 @@ jobs:
             --include='Cargo.toml' \
             --include='Cargo.lock' \
             --include='rust-toolchain.toml' \
+            --include='build.rs' \
+            --include='CHANGELOG.gen' \
             --include='src/***' \
             --include='migrations/***' \
             --include='scripts/***' \

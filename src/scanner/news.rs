@@ -10,8 +10,6 @@ use crate::data::models::GammaMarket;
 pub struct NewsItem {
     pub title: String,
     pub source: String,
-    #[allow(dead_code)]
-    pub url: String,
     pub published: Option<DateTime<Utc>>,
     pub summary: String,
 }
@@ -112,7 +110,6 @@ impl NewsAggregator {
         let mut items = Vec::new();
         for item_block in text.split("<item>").skip(1) {
             let title = extract_tag(item_block, "title").unwrap_or_default();
-            let link = extract_tag(item_block, "link").unwrap_or_default();
             let pub_date = extract_tag(item_block, "pubDate");
             let description = extract_tag(item_block, "description").unwrap_or_default();
 
@@ -125,7 +122,6 @@ impl NewsAggregator {
                 items.push(NewsItem {
                     title,
                     source: source.to_string(),
-                    url: link,
                     published,
                     summary: truncate(&clean_desc, 200),
                 });
@@ -455,7 +451,6 @@ mod tests {
         NewsItem {
             title: title.to_string(),
             source: "test".to_string(),
-            url: String::new(),
             published: None,
             summary: summary.to_string(),
         }

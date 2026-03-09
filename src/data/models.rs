@@ -54,7 +54,6 @@ pub struct GammaMarket {
     #[serde(default)]
     pub outcome_prices: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub outcomes: Option<String>,
     #[serde(default)]
     pub slug: Option<String>,

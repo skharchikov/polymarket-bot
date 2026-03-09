@@ -2,7 +2,7 @@
 .env
 .venv
 portfolio_state.json
-model/training_data.json
-model/xgb_model.json
-model/xgb_model.scaler.json
-model/xgb_model.meta.json
+model/
+__pycache__/
+*.pyc
+CHANGELOG.gen

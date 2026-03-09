@@ -30,11 +30,10 @@ pub enum SignalSource {
 }
 
 impl SignalSource {
-    #[allow(dead_code)]
-    pub fn label(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
-            Self::XgBoost => "XGBoost Model",
-            Self::LlmConsensus => "LLM Consensus",
+            Self::XgBoost => "xgboost",
+            Self::LlmConsensus => "llm_consensus",
         }
     }
 }
@@ -1083,7 +1082,6 @@ impl LiveScanner {
             let posterior = bayesian::odds_to_prob(prior_odds * dampened_lr);
 
             let estimate = BayesianEstimate {
-                prior: c.current_price,
                 posterior,
                 combined_lr: dampened_lr,
                 confidence: ml_conf,
@@ -1366,7 +1364,6 @@ impl LiveScanner {
             };
 
             let estimate = BayesianEstimate {
-                prior: *current_price,
                 posterior: prob,
                 combined_lr: 0.0,
                 confidence,
@@ -1522,7 +1519,6 @@ impl LiveScanner {
         };
 
         let estimate = BayesianEstimate {
-            prior: current_price,
             posterior: ml_prob,
             combined_lr: 0.0,
             confidence: ml_conf,
@@ -1642,7 +1638,6 @@ enum LlmEstimate {
         confidence: f64,
         reasoning: String,
     },
-    #[allow(dead_code)]
     RawProbability {
         probability: f64,
         confidence: f64,

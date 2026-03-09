@@ -57,8 +57,6 @@ pub struct AgentAssessment {
 /// Result of Bayesian updating across multiple agents.
 #[derive(Debug, Clone)]
 pub struct BayesianEstimate {
-    #[allow(dead_code)]
-    pub prior: f64,
     pub posterior: f64,
     pub combined_lr: f64,
     pub confidence: f64,
@@ -70,7 +68,6 @@ pub struct BayesianEstimate {
 pub fn bayesian_update(prior: f64, assessments: &[AgentAssessment]) -> BayesianEstimate {
     if assessments.is_empty() {
         return BayesianEstimate {
-            prior,
             posterior: prior,
             combined_lr: 1.0,
             confidence: 0.0,
@@ -119,7 +116,6 @@ pub fn bayesian_update(prior: f64, assessments: &[AgentAssessment]) -> BayesianE
     ));
 
     BayesianEstimate {
-        prior,
         posterior,
         combined_lr,
         confidence,
@@ -494,7 +490,6 @@ mod tests {
     #[test]
     fn test_edge_yes_side() {
         let est = BayesianEstimate {
-            prior: 0.5,
             posterior: 0.7,
             combined_lr: 2.33,
             confidence: 0.8,
@@ -510,7 +505,6 @@ mod tests {
     #[test]
     fn test_edge_no_side() {
         let est = BayesianEstimate {
-            prior: 0.5,
             posterior: 0.3,
             combined_lr: 0.43,
             confidence: 0.8,
@@ -526,7 +520,6 @@ mod tests {
     #[test]
     fn test_edge_none_when_no_edge() {
         let est = BayesianEstimate {
-            prior: 0.5,
             posterior: 0.5,
             combined_lr: 1.0,
             confidence: 0.5,
@@ -538,7 +531,6 @@ mod tests {
     #[test]
     fn test_edge_small_yes_edge() {
         let est = BayesianEstimate {
-            prior: 0.5,
             posterior: 0.52,
             combined_lr: 1.08,
             confidence: 0.6,

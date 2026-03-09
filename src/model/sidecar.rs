@@ -39,8 +39,6 @@ struct BatchResponse {
 
 #[derive(Deserialize)]
 struct HealthResponse {
-    #[allow(dead_code)]
-    status: String,
     model_loaded: bool,
 }
 
