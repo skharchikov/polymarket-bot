@@ -91,13 +91,13 @@ impl TelegramNotifier {
             "https://api.telegram.org/bot{}/sendAnimation",
             self.bot_token
         );
+        let form = reqwest::multipart::Form::new()
+            .text("chat_id", chat_id.to_string())
+            .text("animation", gif_url.to_string());
         let resp = self
             .client
             .post(&url)
-            .json(&serde_json::json!({
-                "chat_id": chat_id,
-                "animation": gif_url,
-            }))
+            .multipart(form)
             .send()
             .await
             .context("failed to send telegram animation")?;
