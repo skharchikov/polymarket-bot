@@ -460,6 +460,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                     tracing::warn!(err = %e, "Failed to upsert telegram user");
                 }
 
+                tracing::info!(cmd = cmd.as_str(), chat_id, "Handling Telegram command");
                 let reply = match cmd.as_str() {
                     "start" => {
                         let name = first_name.as_deref().unwrap_or("there");

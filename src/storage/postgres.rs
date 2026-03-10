@@ -205,6 +205,7 @@ impl PgPortfolio {
     }
 
     /// Build a stats summary string for /stats command.
+    #[tracing::instrument(skip(self))]
     pub async fn stats_summary(&self) -> Result<String> {
         let starting = self.starting_bankroll().await?;
         let resolved = self.resolved_bets().await?;
@@ -333,6 +334,7 @@ impl PgPortfolio {
     }
 
     /// Build a summary of open bets for /open command.
+    #[tracing::instrument(skip(self))]
     pub async fn open_bets_summary(&self) -> Result<String> {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
@@ -383,8 +385,9 @@ impl PgPortfolio {
                 .unwrap_or_default();
 
             // Fetch market data: current price + slug for URL
+            let market_id = &bet.market_id;
             let market_data: Option<(f64, String)> = async {
-                let url = format!("https://gamma-api.polymarket.com/markets/{}", bet.market_id);
+                let url = format!("https://gamma-api.polymarket.com/markets/{market_id}");
                 let text = http.get(&url).send().await.ok()?.text().await.ok()?;
                 let v: serde_json::Value = serde_json::from_str(&text).ok()?;
                 let prices_str = v["outcomePrices"].as_str()?;
@@ -402,11 +405,17 @@ impl PgPortfolio {
                         }
                         _ => format!("https://polymarket.com/event/{ev}"),
                     },
-                    None => String::new(),
+                    None => {
+                        tracing::warn!(market_id, "Gamma API: no event_slug found");
+                        String::new()
+                    }
                 };
                 Some((yes_price, poly_url))
             }
             .await;
+            if market_data.is_none() {
+                tracing::warn!(market_id, question = %bet.question, "Failed to fetch market data from Gamma API");
+            }
 
             let (pnl_str, link) = if let Some((yes_price, poly_url)) = &market_data {
                 let current = match bet.side {
@@ -475,6 +484,7 @@ impl PgPortfolio {
     }
 
     /// Build a model accuracy summary for /brier command.
+    #[tracing::instrument(skip(self))]
     pub async fn brier_summary(&self) -> Result<String> {
         match self.brier_score().await? {
             Some((model_brier, n, market_brier)) => {
@@ -691,6 +701,7 @@ impl PgPortfolio {
             .await
     }
 
+    #[tracing::instrument(skip(self, bet), fields(market_id = %bet.market_id, strategy = %bet.strategy))]
     pub async fn place_bet(&self, bet: &NewBet) -> Result<i32> {
         let side_str = match bet.side {
             BetSide::Yes => "Yes",
@@ -740,6 +751,7 @@ impl PgPortfolio {
         Ok(row.0)
     }
 
+    #[tracing::instrument(skip(self))]
     pub async fn resolve_bet(&self, market_id: &str, yes_won: bool) -> Result<Option<ResolvedBet>> {
         // Find unresolved bet for this market
         #[derive(sqlx::FromRow)]
@@ -859,6 +871,7 @@ impl PgPortfolio {
 
     /// Early exit: sell a position at current market price (paper trade).
     /// Returns the same ResolvedBet struct as resolve_bet for consistent messaging.
+    #[tracing::instrument(skip(self))]
     pub async fn early_exit(
         &self,
         bet_id: i32,
@@ -1031,6 +1044,7 @@ impl PgPortfolio {
     }
 
     /// Generate daily stats summary — same format as before.
+    #[tracing::instrument(skip(self))]
     pub async fn daily_summary(&self) -> Result<String> {
         let bankroll = self.bankroll().await?;
         let starting = self.starting_bankroll().await?;
@@ -1104,6 +1118,7 @@ impl PgPortfolio {
     }
 
     /// Deep learning summary for LLM — delegates to the same logic from portfolio module.
+    #[tracing::instrument(skip(self))]
     pub async fn learning_summary(&self) -> Result<String> {
         use super::portfolio::PortfolioState;
         // Build a temporary PortfolioState from DB data for the analysis logic
