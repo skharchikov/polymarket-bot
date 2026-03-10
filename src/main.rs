@@ -970,7 +970,10 @@ async fn housekeeping_cycle(
                     loss_pct * 100.0,
                     stop_loss_pct * 100.0
                 ))
-            } else if days_left <= exit_days_before_expiry && loss_pct >= 0.10 {
+            } else if exit_days_before_expiry > 0
+                && days_left <= exit_days_before_expiry
+                && loss_pct >= 0.10
+            {
                 Some(format!(
                     "expiry exit ({days_left}d left, {:.0}% underwater)",
                     loss_pct * 100.0
