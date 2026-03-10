@@ -22,6 +22,9 @@ pub struct ResolvedBet {
     pub total_wins: usize,
     pub total_losses: usize,
     pub total_pnl: f64,
+    pub strat_wins: usize,
+    pub strat_losses: usize,
+    pub strat_pnl: f64,
     pub strategy: String,
     pub source: String,
     pub market_id: String,
@@ -783,6 +786,16 @@ impl PgPortfolio {
         let wins = resolved.iter().filter(|b| b.won == Some(true)).count();
         let losses = resolved.iter().filter(|b| b.won == Some(false)).count();
         let total_pnl: f64 = resolved.iter().filter_map(|b| b.pnl).sum();
+        let strat_resolved: Vec<_> = resolved.iter().filter(|b| b.strategy == strategy).collect();
+        let strat_wins = strat_resolved
+            .iter()
+            .filter(|b| b.won == Some(true))
+            .count();
+        let strat_losses = strat_resolved
+            .iter()
+            .filter(|b| b.won == Some(false))
+            .count();
+        let strat_pnl: f64 = strat_resolved.iter().filter_map(|b| b.pnl).sum();
 
         Ok(Some(ResolvedBet {
             question,
@@ -798,6 +811,9 @@ impl PgPortfolio {
             total_wins: wins,
             total_losses: losses,
             total_pnl,
+            strat_wins,
+            strat_losses,
+            strat_pnl,
             strategy,
             source,
             market_id: market_id.to_string(),
@@ -882,6 +898,19 @@ impl PgPortfolio {
         let wins = resolved.iter().filter(|b| b.won == Some(true)).count();
         let losses = resolved.iter().filter(|b| b.won == Some(false)).count();
         let total_pnl: f64 = resolved.iter().filter_map(|b| b.pnl).sum();
+        let strat_resolved: Vec<_> = resolved
+            .iter()
+            .filter(|b| b.strategy == r.strategy)
+            .collect();
+        let strat_wins = strat_resolved
+            .iter()
+            .filter(|b| b.won == Some(true))
+            .count();
+        let strat_losses = strat_resolved
+            .iter()
+            .filter(|b| b.won == Some(false))
+            .count();
+        let strat_pnl: f64 = strat_resolved.iter().filter_map(|b| b.pnl).sum();
 
         Ok(Some(ResolvedBet {
             question: r.question,
@@ -897,6 +926,9 @@ impl PgPortfolio {
             total_wins: wins,
             total_losses: losses,
             total_pnl,
+            strat_wins,
+            strat_losses,
+            strat_pnl,
             strategy: r.strategy,
             source: r.source,
             market_id: r.market_id,

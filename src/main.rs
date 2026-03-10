@@ -884,7 +884,7 @@ async fn housekeeping_cycle(
                          {src_icon} Edge: `+{edge:.1}%` | Conf: `{conf:.0}%`\n\
                          💵 Stake: `€{cost:.2}` → PnL: `€{pnl:+.2}` ({roi:+.0}%)\n\n\
                          💰 Strategy bankroll: `€{bankroll:.2}`\n\
-                         📊 Record: {wins}W / {losses}L | Total PnL: `€{total_pnl:+.2}`",
+                         📊 Strategy: {sw}W/{sl}L `€{sp:+.2}` | All: {wins}W/{losses}L `€{total_pnl:+.2}`",
                         strat = r.strategy,
                         question = r.question,
                         side = side_emoji,
@@ -895,6 +895,9 @@ async fn housekeeping_cycle(
                         cost = r.cost,
                         pnl = r.pnl,
                         bankroll = r.bankroll,
+                        sw = r.strat_wins,
+                        sl = r.strat_losses,
+                        sp = r.strat_pnl,
                         wins = r.total_wins,
                         losses = r.total_losses,
                         total_pnl = r.total_pnl,
@@ -1021,7 +1024,7 @@ async fn housekeeping_cycle(
                              💡 Reason: {reason}\n\
                              💵 PnL: `€{pnl:+.2}`\n\n\
                              💰 Strategy bankroll: `€{bankroll:.2}`\n\
-                             📊 Record: {wins}W / {losses}L | Total PnL: `€{total_pnl:+.2}`",
+                             📊 Strategy: {sw}W/{sl}L `€{sp:+.2}` | All: {wins}W/{losses}L `€{total_pnl:+.2}`",
                             strat = r.strategy,
                             question = r.question,
                             side = side_emoji,
@@ -1030,6 +1033,9 @@ async fn housekeeping_cycle(
                             now = current * 100.0,
                             pnl = r.pnl,
                             bankroll = r.bankroll,
+                            sw = r.strat_wins,
+                            sl = r.strat_losses,
+                            sp = r.strat_pnl,
                             wins = r.total_wins,
                             losses = r.total_losses,
                             total_pnl = r.total_pnl,
