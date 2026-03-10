@@ -1,5 +1,7 @@
 # Polymarket Signal Bot
 
+> **Research project only.** This bot is built for learning and experimentation. It is not intended for production use, and you should not risk real money with it. Use at your own risk.
+
 Automated prediction market trading bot that combines an XGBoost/ensemble ML model with Bayesian updating to find alpha on Polymarket. The model continuously retrains on its own resolved bets, improving over time.
 
 ## Architecture
