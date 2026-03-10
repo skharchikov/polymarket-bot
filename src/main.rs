@@ -659,9 +659,27 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             }
             last_assessed.insert(market_id.clone(), now);
 
-            // Check not already bet on
-            let skip_ids = al_portfolio.open_bet_market_ids().await.unwrap_or_default();
-            if skip_ids.contains(&market_id) {
+            // If we already have an open bet, notify about the move but don't bet again
+            let open_bets = al_portfolio.open_bets().await.unwrap_or_default();
+            let open_bet = open_bets.iter().find(|b| b.market_id == market_id);
+            if let Some(bet) = open_bet {
+                let delta_pct = (alert.price - alert.prev_price) * 100.0;
+                let trade_info = alert
+                    .trade_size
+                    .map(|s| format!(" | Trade: `${s:.0}`"))
+                    .unwrap_or_default();
+                let arrow = if delta_pct > 0.0 { "📈" } else { "📉" };
+                let q = format::truncate(&bet.question, 50);
+                let msg = format!(
+                    "{arrow} *Price Move* on open bet\n\n\
+                     📋 _{q}_\n\
+                     💰 `{prev:.1}¢` → `{now:.1}¢` ({delta:+.1}%){trade}",
+                    prev = alert.prev_price * 100.0,
+                    now = alert.price * 100.0,
+                    delta = delta_pct,
+                    trade = trade_info,
+                );
+                let _ = al_notifier.send(&msg).await;
                 continue;
             }
 
