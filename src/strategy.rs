@@ -33,10 +33,10 @@ impl StrategyProfile {
         Self {
             name: "balanced".into(),
             kelly_fraction: 0.25,
-            min_effective_edge: 0.08,
-            min_confidence: 0.50,
+            min_effective_edge: 0.06,
+            min_confidence: 0.40,
             max_signals_per_day: 5,
-            min_bet: 10.0,
+            min_bet: 5.0,
         }
     }
 

@@ -453,40 +453,52 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                     tracing::warn!(err = %e, "Failed to upsert telegram user");
                 }
 
-                let reply = match cmd.as_str() {
+                let (reply, html) = match cmd.as_str() {
                     "start" => {
                         let name = first_name.as_deref().unwrap_or("there");
-                        format!(
-                            "👋 Hi {name}! I'm the Polymarket Signal Bot.\n\n\
+                        (
+                            format!(
+                                "👋 Hi {name}! I'm the Polymarket Signal Bot.\n\n\
                              Commands:\n\
                              /stats — portfolio statistics\n\
                              /open — open positions\n\
                              /brier — model accuracy\n\
                              /health — bot health\n\
                              /help — show commands"
+                            ),
+                            false,
                         )
                     }
-                    "stats" => match cmd_portfolio.stats_summary().await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::warn!(err = %e, "Failed to build stats");
-                            "⚠️ Failed to load stats".to_string()
-                        }
-                    },
-                    "open" => match cmd_portfolio.open_bets_summary().await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::warn!(err = %e, "Failed to build open bets");
-                            "⚠️ Failed to load open bets".to_string()
-                        }
-                    },
-                    "brier" => match cmd_portfolio.brier_summary().await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::warn!(err = %e, "Failed to build brier");
-                            "⚠️ Failed to load model accuracy".to_string()
-                        }
-                    },
+                    "stats" => (
+                        match cmd_portfolio.stats_summary().await {
+                            Ok(s) => s,
+                            Err(e) => {
+                                tracing::warn!(err = %e, "Failed to build stats");
+                                "⚠️ Failed to load stats".to_string()
+                            }
+                        },
+                        false,
+                    ),
+                    "open" => (
+                        match cmd_portfolio.open_bets_summary().await {
+                            Ok(s) => s,
+                            Err(e) => {
+                                tracing::warn!(err = %e, "Failed to build open bets");
+                                "⚠️ Failed to load open bets".to_string()
+                            }
+                        },
+                        true,
+                    ),
+                    "brier" => (
+                        match cmd_portfolio.brier_summary().await {
+                            Ok(s) => s,
+                            Err(e) => {
+                                tracing::warn!(err = %e, "Failed to build brier");
+                                "⚠️ Failed to load model accuracy".to_string()
+                            }
+                        },
+                        false,
+                    ),
                     "health" => {
                         let uptime = cmd_start.elapsed();
                         let hours = uptime.as_secs() / 3600;
@@ -495,26 +507,39 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                         let mkts = cmd_stats.markets_scanned.load(Ordering::Relaxed);
                         let sigs = cmd_stats.signals_found.load(Ordering::Relaxed);
                         let news = cmd_stats.news_new.load(Ordering::Relaxed);
-                        format!(
-                            "🏥 *Bot Health*\n\n\
+                        (
+                            format!(
+                                "🏥 *Bot Health*\n\n\
                              ⏱ Uptime: {hours}h {mins}m\n\
                              🔄 Scans completed: {scans}\n\
                              🔍 Markets scanned: {mkts}\n\
                              📡 Signals found: {sigs}\n\
                              📰 News processed: {news}",
+                            ),
+                            false,
                         )
                     }
-                    "help" => "📖 *Commands*\n\n\
+                    "help" => (
+                        "📖 *Commands*\n\n\
                          /stats — portfolio statistics\n\
                          /open — open positions\n\
                          /brier — model accuracy\n\
                          /health — bot health & uptime\n\
                          /help — this message"
-                        .to_string(),
-                    _ => format!("❓ Unknown command: /{cmd}\nTry /help"),
+                            .to_string(),
+                        false,
+                    ),
+                    _ => (format!("❓ Unknown command: /{cmd}\nTry /help"), false),
                 };
 
-                if let Err(e) = cmd_notifier.send_to(chat_id, &reply).await {
+                let send_result = if html {
+                    cmd_notifier
+                        .send_to_with_mode(chat_id, &reply, "HTML")
+                        .await
+                } else {
+                    cmd_notifier.send_to(chat_id, &reply).await
+                };
+                if let Err(e) = send_result {
                     tracing::warn!(err = %e, chat_id = chat_id, "Failed to reply to command");
                 }
             }

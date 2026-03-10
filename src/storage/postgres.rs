@@ -417,7 +417,7 @@ impl PgPortfolio {
                     0.0
                 };
                 let pnl = format!(
-                    " | PnL `€{unrealized:+.2}` ({pnl_pct:+.0}%) @ `{cur:.1}¢`",
+                    " | PnL <code>€{unrealized:+.2}</code> ({pnl_pct:+.0}%) @ <code>{cur:.1}¢</code>",
                     cur = current * 100.0,
                 );
                 (pnl, poly_url.clone())
@@ -426,22 +426,17 @@ impl PgPortfolio {
             };
 
             let q = truncate(&bet.question, 50);
-            // Strip chars that break Telegram Markdown v1 links
-            let q_safe: String = q
-                .chars()
-                .filter(|c| !matches!(c, '[' | ']' | '(' | ')'))
-                .collect();
             let q_link = if link.is_empty() {
-                q_safe
+                q.to_string()
             } else {
-                format!("[{q_safe}]({link})")
+                format!("<a href=\"{link}\">{q}</a>")
             };
 
             total_cost += bet.cost;
             lines.push(format!(
-                "{label} *{side}* `€{cost:.2}` → {shares:.1} shares @ `{price:.1}¢`\n\
+                "{label} <b>{side}</b> <code>€{cost:.2}</code> → {shares:.1} shares @ <code>{price:.1}¢</code>\n\
                  \u{00a0}\u{00a0}📋 {q_link}\n\
-                 \u{00a0}\u{00a0}{src} Edge: `{edge:+.1}%` | Conf: `{conf:.0}%`{pnl}\n\
+                 \u{00a0}\u{00a0}{src} Edge: <code>{edge:+.1}%</code> | Conf: <code>{conf:.0}%</code>{pnl}\n\
                  \u{00a0}\u{00a0}⏰ {expires} ({age:.0}d ago)",
                 side = side_emoji,
                 cost = bet.cost,
@@ -462,8 +457,8 @@ impl PgPortfolio {
         };
 
         Ok(format!(
-            "🔓 *Open Bets* ({count})\n\
-             💰 At risk: `€{total_cost:.2}` | Unrealized: `€{total_unrealized:+.2}` ({unrealized_pct:+.1}%)\n\n\
+            "🔓 <b>Open Bets</b> ({count})\n\
+             💰 At risk: <code>€{total_cost:.2}</code> | Unrealized: <code>€{total_unrealized:+.2}</code> ({unrealized_pct:+.1}%)\n\n\
              {details}",
             count = open.len(),
             details = lines.join("\n\n"),

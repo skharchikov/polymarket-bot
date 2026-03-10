@@ -780,6 +780,20 @@ impl LiveScanner {
 
         let markets_scanned = eligible.len();
 
+        if eligible.is_empty() {
+            tracing::info!("No eligible markets, skipping scan");
+            return Ok(ScanResult {
+                signals: vec![],
+                rejections: vec![],
+                markets_scanned: 0,
+                news_total: 0,
+                news_new: 0,
+                news_matched: 0,
+                llm_assessed: 0,
+                source_counts: vec![],
+            });
+        }
+
         // If we have a model, use MODEL-FIRST funnel.
         // Otherwise fall back to NEWS-FIRST funnel (LLM).
         if self.has_model() {

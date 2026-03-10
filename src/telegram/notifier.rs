@@ -42,10 +42,23 @@ impl TelegramNotifier {
     }
 
     pub async fn send_to(&self, chat_id: &str, message: &str) -> Result<()> {
+        self.send_to_with_mode(chat_id, message, "Markdown").await
+    }
+
+    pub async fn send_to_with_mode(
+        &self,
+        chat_id: &str,
+        message: &str,
+        parse_mode: &str,
+    ) -> Result<()> {
         let url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
 
-        let full_message =
-            format!("{message}\n\n_This is not financial advice. Do your own research._");
+        let disclaimer = if parse_mode == "HTML" {
+            "<i>This is not financial advice. Do your own research.</i>"
+        } else {
+            "_This is not financial advice. Do your own research._"
+        };
+        let full_message = format!("{message}\n\n{disclaimer}");
 
         let resp = self
             .client
@@ -53,7 +66,7 @@ impl TelegramNotifier {
             .json(&serde_json::json!({
                 "chat_id": chat_id,
                 "text": full_message,
-                "parse_mode": "Markdown",
+                "parse_mode": parse_mode,
                 "disable_web_page_preview": true,
             }))
             .send()
