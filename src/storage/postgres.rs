@@ -354,18 +354,44 @@ impl PgPortfolio {
                 let market_id = &bet.market_id;
                 async move {
                     let url = format!("https://gamma-api.polymarket.com/markets/{market_id}");
-                    let result: Option<f64> = async {
-                        let text = http.get(&url).send().await.ok()?.text().await.ok()?;
-                        let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-                        let prices_str = v["outcomePrices"].as_str()?;
-                        let prices: Vec<String> = serde_json::from_str(prices_str).ok()?;
-                        prices.first()?.parse::<f64>().ok()
+                    let resp = http.get(&url).send().await;
+                    let text = match resp {
+                        Ok(r) => match r.text().await {
+                            Ok(t) => t,
+                            Err(e) => {
+                                tracing::warn!(market_id, err = %e, "Gamma API body read failed");
+                                return None;
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!(market_id, err = %e, "Gamma API request failed");
+                            return None;
+                        }
+                    };
+                    let v: serde_json::Value = match serde_json::from_str(&text) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(
+                                market_id,
+                                err = %e,
+                                body = &text[..200.min(text.len())],
+                                "Gamma API parse failed"
+                            );
+                            return None;
+                        }
+                    };
+                    let prices_str = v["outcomePrices"].as_str();
+                    let price = prices_str
+                        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                        .and_then(|p| p.first()?.parse::<f64>().ok());
+                    if price.is_none() {
+                        tracing::warn!(
+                            market_id,
+                            outcome_prices = ?prices_str,
+                            "Gamma API: missing or unparseable outcomePrices"
+                        );
                     }
-                    .await;
-                    if result.is_none() {
-                        tracing::warn!(market_id, "Failed to fetch price from Gamma API");
-                    }
-                    result
+                    price
                 }
             })
             .collect();
