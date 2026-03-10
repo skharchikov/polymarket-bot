@@ -877,6 +877,57 @@ impl PgPortfolio {
         }))
     }
 
+    /// Backfill missing URLs for existing bets from Gamma API.
+    pub async fn backfill_urls(&self) -> Result<usize> {
+        let rows: Vec<(i32, String)> =
+            sqlx::query_as("SELECT id, market_id FROM bets WHERE url = '' OR url IS NULL")
+                .fetch_all(&self.pool)
+                .await?;
+        if rows.is_empty() {
+            return Ok(0);
+        }
+
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()?;
+
+        let mut filled = 0usize;
+        for (id, market_id) in &rows {
+            let url: Option<String> = async {
+                let api_url = format!("https://gamma-api.polymarket.com/markets/{market_id}");
+                let text = http.get(&api_url).send().await.ok()?.text().await.ok()?;
+                let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+                let event_slug = v["events"]
+                    .as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|e| e["slug"].as_str());
+                let market_slug = v["slug"].as_str();
+                match event_slug {
+                    Some(ev) => match market_slug {
+                        Some(mk) if mk != ev => {
+                            Some(format!("https://polymarket.com/event/{ev}/{mk}"))
+                        }
+                        _ => Some(format!("https://polymarket.com/event/{ev}")),
+                    },
+                    None => None,
+                }
+            }
+            .await;
+
+            if let Some(url) = url {
+                sqlx::query("UPDATE bets SET url = $1 WHERE id = $2")
+                    .bind(&url)
+                    .bind(id)
+                    .execute(&self.pool)
+                    .await?;
+                filled += 1;
+            }
+        }
+
+        tracing::info!(total = rows.len(), filled, "Backfilled bet URLs");
+        Ok(filled)
+    }
+
     pub async fn open_bet_market_ids(&self) -> Result<Vec<String>> {
         let rows: Vec<(String,)> =
             sqlx::query_as("SELECT market_id FROM bets WHERE resolved = false")

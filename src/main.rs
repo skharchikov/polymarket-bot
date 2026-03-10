@@ -253,6 +253,11 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     portfolio.run_migrations().await?;
     tracing::info!("Database connected and migrations applied");
 
+    // Backfill URLs for any bets that were placed before the url column existed
+    if let Err(e) = portfolio.backfill_urls().await {
+        tracing::warn!(err = %e, "URL backfill failed (non-fatal)");
+    }
+
     let notifier = Arc::new(telegram::notifier::TelegramNotifier::new(
         &cfg.telegram_bot_token,
         &cfg.telegram_chat_id,
