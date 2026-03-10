@@ -119,13 +119,15 @@ impl GammaMarket {
     pub fn polymarket_url(&self) -> String {
         let event_slug = self.events.first().map(|e| e.slug.as_str());
         let market_slug = self.slug.as_deref();
-        match (event_slug, market_slug) {
-            (Some(ev), Some(mk)) => {
-                format!("https://polymarket.com/event/{ev}/{mk}")
-            }
-            (Some(ev), None) => format!("https://polymarket.com/event/{ev}"),
-            (None, Some(slug)) => format!("https://polymarket.com/event/{slug}"),
-            (None, None) => format!("https://polymarket.com/event/{}", self.market_id),
+        match event_slug {
+            Some(ev) => match market_slug {
+                Some(mk) if mk != ev => format!("https://polymarket.com/event/{ev}/{mk}"),
+                _ => format!("https://polymarket.com/event/{ev}"),
+            },
+            None => match market_slug {
+                Some(slug) => format!("https://polymarket.com/event/{slug}"),
+                None => format!("https://polymarket.com/event/{}", self.market_id),
+            },
         }
     }
 

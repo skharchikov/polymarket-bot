@@ -390,11 +390,14 @@ impl PgPortfolio {
                     .and_then(|a| a.first())
                     .and_then(|e| e["slug"].as_str());
                 let market_slug = v["slug"].as_str();
-                let poly_url = match (event_slug, market_slug) {
-                    (Some(ev), Some(mk)) => format!("https://polymarket.com/event/{ev}/{mk}"),
-                    (Some(ev), None) => format!("https://polymarket.com/event/{ev}"),
-                    (None, Some(mk)) => format!("https://polymarket.com/event/{mk}"),
-                    (None, None) => String::new(),
+                let poly_url = match event_slug {
+                    Some(ev) => match market_slug {
+                        Some(mk) if mk != ev => {
+                            format!("https://polymarket.com/event/{ev}/{mk}")
+                        }
+                        _ => format!("https://polymarket.com/event/{ev}"),
+                    },
+                    None => String::new(),
                 };
                 Some((yes_price, poly_url))
             }
