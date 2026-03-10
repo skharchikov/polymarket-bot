@@ -71,6 +71,7 @@ services:
       MODEL_SIDECAR_URL: http://model-server:8000
     volumes:
       - model:/app/model
+    stop_grace_period: 15s
     restart: unless-stopped
 
 volumes:
