@@ -49,6 +49,7 @@ pub struct NewBet {
     pub context: Option<BetContext>,
     pub strategy: String,
     pub source: String,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +76,8 @@ pub struct Bet {
     pub strategy: String,
     #[serde(default = "default_source")]
     pub source: String,
+    #[serde(default)]
+    pub url: String,
     pub placed_at: DateTime<Utc>,
     pub resolved: bool,
     pub won: Option<bool>,

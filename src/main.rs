@@ -728,6 +728,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                             context: Some(signal.context.clone()),
                             strategy: strat.name.clone(),
                             source: source_str.to_string(),
+                            url: signal.polymarket_url.clone(),
                         };
 
                         // Log prediction for Brier score tracking
@@ -1201,6 +1202,7 @@ async fn news_scan_cycle(
                         context: Some(signal.context.clone()),
                         strategy: strat.name.clone(),
                         source: signal.source.as_str().to_string(),
+                        url: signal.polymarket_url.clone(),
                     };
 
                     // Log prediction for Brier score tracking

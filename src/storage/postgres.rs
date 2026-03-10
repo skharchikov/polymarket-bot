@@ -349,48 +349,33 @@ impl PgPortfolio {
         let mut views = Vec::with_capacity(open.len());
 
         for bet in &open {
+            // Fetch current price from Gamma API
             let market_id = &bet.market_id;
-            let market_data: Option<(f64, String)> = async {
+            let yes_price: Option<f64> = async {
                 let url = format!("https://gamma-api.polymarket.com/markets/{market_id}");
                 let text = http.get(&url).send().await.ok()?.text().await.ok()?;
                 let v: serde_json::Value = serde_json::from_str(&text).ok()?;
                 let prices_str = v["outcomePrices"].as_str()?;
                 let prices: Vec<String> = serde_json::from_str(prices_str).ok()?;
-                let yes_price = prices.first()?.parse::<f64>().ok()?;
-                let event_slug = v["events"]
-                    .as_array()
-                    .and_then(|a| a.first())
-                    .and_then(|e| e["slug"].as_str());
-                let market_slug = v["slug"].as_str();
-                let poly_url = match event_slug {
-                    Some(ev) => match market_slug {
-                        Some(mk) if mk != ev => {
-                            format!("https://polymarket.com/event/{ev}/{mk}")
-                        }
-                        _ => format!("https://polymarket.com/event/{ev}"),
-                    },
-                    None => {
-                        tracing::warn!(market_id, "Gamma API: no event_slug found");
-                        String::new()
-                    }
-                };
-                Some((yes_price, poly_url))
+                prices.first()?.parse::<f64>().ok()
             }
             .await;
 
-            if market_data.is_none() {
-                tracing::warn!(market_id, question = %bet.question, "Failed to fetch market data from Gamma API");
+            if yes_price.is_none() {
+                tracing::warn!(market_id, question = %bet.question, "Failed to fetch price from Gamma API");
             }
 
-            let (price, url) = match market_data {
-                Some((p, u)) => (Some(p), Some(u)),
-                None => (None, None),
+            // URL is stored in the bet itself
+            let poly_url = if bet.url.is_empty() {
+                None
+            } else {
+                Some(bet.url.clone())
             };
 
             views.push(OpenBetView {
                 bet,
-                current_yes_price: price,
-                poly_url: url,
+                current_yes_price: yes_price,
+                poly_url,
             });
         }
 
@@ -628,8 +613,8 @@ impl PgPortfolio {
 
         let row: (i32,) = sqlx::query_as(
             "INSERT INTO bets (market_id, question, side, entry_price, slipped_price, shares, cost, fee_paid, \
-             estimated_prob, confidence, edge, kelly_size, reasoning, end_date, context, strategy, source) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id",
+             estimated_prob, confidence, edge, kelly_size, reasoning, end_date, context, strategy, source, url) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id",
         )
         .bind(&bet.market_id)
         .bind(&bet.question)
@@ -648,6 +633,7 @@ impl PgPortfolio {
         .bind(ctx_json)
         .bind(&bet.strategy)
         .bind(&bet.source)
+        .bind(&bet.url)
         .fetch_one(&self.pool)
         .await?;
 
@@ -1074,6 +1060,7 @@ struct BetRow {
     context: Option<serde_json::Value>,
     strategy: String,
     source: String,
+    url: String,
     placed_at: DateTime<Utc>,
     resolved: bool,
     won: Option<bool>,
@@ -1109,6 +1096,7 @@ impl BetRow {
             context,
             strategy: self.strategy,
             source: self.source,
+            url: self.url,
             placed_at: self.placed_at,
             resolved: self.resolved,
             won: self.won,
