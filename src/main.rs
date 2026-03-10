@@ -52,6 +52,16 @@ fn random_victory_gif() -> &'static str {
     VICTORY_GIFS[seed % VICTORY_GIFS.len()]
 }
 
+/// ~30% chance of sending a victory GIF.
+fn should_send_gif() -> bool {
+    use std::time::SystemTime;
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    nanos % 100 < 30
+}
+
 /// Shared scan stats for heartbeat reporting.
 struct ScanStats {
     scans_completed: AtomicU64,
@@ -952,7 +962,7 @@ async fn housekeeping_cycle(
                         total_pnl = r.total_pnl,
                     );
                     broadcast(notifier, portfolio, &msg).await;
-                    if r.won {
+                    if r.won && should_send_gif() {
                         let gif = random_victory_gif();
                         let subs = portfolio.telegram_subscribers().await.unwrap_or_default();
                         notifier.broadcast_animation(&subs, gif).await;
