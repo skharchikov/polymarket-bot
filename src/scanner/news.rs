@@ -134,7 +134,7 @@ impl NewsAggregator {
     /// Sports news from free RSS feeds — covers NBA, NFL, MLB, soccer, etc.
     async fn sports_news(&self) -> Result<Vec<NewsItem>> {
         let feeds = [
-            ("https://www.espn.com/espn/rss/news", "ESPN"),
+            ("https://www.cbssports.com/rss/headlines/", "CBS Sports"),
             (
                 "https://news.google.com/rss/search?q=sports+NBA+NFL+MLB&hl=en-US&gl=US&ceid=US:en",
                 "Sports (Google)",
