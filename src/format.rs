@@ -162,3 +162,174 @@ pub fn truncate(s: &str, max: usize) -> String {
         format!("{truncated}...")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn make_bet(question: &str, side: BetSide, cost: f64, shares: f64, entry: f64) -> Bet {
+        Bet {
+            id: 1,
+            market_id: "abc123".to_string(),
+            question: question.to_string(),
+            side,
+            entry_price: entry,
+            slipped_price: entry,
+            shares,
+            cost,
+            fee_paid: 0.0,
+            estimated_prob: 0.6,
+            confidence: 0.5,
+            edge: 0.1,
+            kelly_size: 0.05,
+            reasoning: String::new(),
+            end_date: None,
+            context: None,
+            strategy: "aggressive".to_string(),
+            source: "xgboost".to_string(),
+            url: String::new(),
+            placed_at: Utc::now(),
+            resolved: false,
+            won: None,
+            pnl: None,
+            resolved_at: None,
+        }
+    }
+
+    #[test]
+    fn test_empty_views() {
+        assert_eq!(format_open_bets(&[], false), "📭 No open bets");
+        assert_eq!(format_open_bets(&[], true), "📭 No open bets");
+    }
+
+    #[test]
+    fn test_truncate_short() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_exact() {
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_long() {
+        assert_eq!(truncate("hello world", 5), "hello...");
+    }
+
+    #[test]
+    fn test_truncate_unicode() {
+        assert_eq!(truncate("héllo wörld", 5), "héllo...");
+    }
+
+    #[test]
+    fn test_unrealized_yes_profit() {
+        let bet = make_bet("Test?", BetSide::Yes, 10.0, 20.0, 0.5);
+        let view = OpenBetView {
+            bet: &bet,
+            current_yes_price: Some(0.6),
+            poly_url: None,
+        };
+        // 20 shares * 0.6 - 10.0 = 2.0
+        assert!((view.unrealized().unwrap() - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_unrealized_no_bet() {
+        let bet = make_bet("Test?", BetSide::No, 10.0, 20.0, 0.5);
+        let view = OpenBetView {
+            bet: &bet,
+            current_yes_price: Some(0.4),
+            poly_url: None,
+        };
+        // NO side price = 1 - 0.4 = 0.6, value = 20 * 0.6 - 10 = 2.0
+        assert!((view.unrealized().unwrap() - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_unrealized_none_when_no_price() {
+        let bet = make_bet("Test?", BetSide::Yes, 10.0, 20.0, 0.5);
+        let view = OpenBetView {
+            bet: &bet,
+            current_yes_price: None,
+            poly_url: None,
+        };
+        assert!(view.unrealized().is_none());
+    }
+
+    #[test]
+    fn test_compact_format_contains_arrow() {
+        let bet = make_bet("Will it rain?", BetSide::Yes, 5.0, 10.0, 0.5);
+        let view = OpenBetView {
+            bet: &bet,
+            current_yes_price: Some(0.6),
+            poly_url: None,
+        };
+        let output = format_open_bets(&[view], true);
+        assert!(output.contains("📈")); // price up
+        assert!(output.contains("Will it rain?"));
+        assert!(output.contains("🔓 *Open Bets* (1)"));
+    }
+
+    #[test]
+    fn test_full_format_contains_link() {
+        let bet = make_bet("Will it rain?", BetSide::Yes, 5.0, 10.0, 0.5);
+        let view = OpenBetView {
+            bet: &bet,
+            current_yes_price: Some(0.6),
+            poly_url: Some("https://polymarket.com/event/rain".to_string()),
+        };
+        let output = format_open_bets(&[view], false);
+        assert!(output.contains("[Will it rain?](https://polymarket.com/event/rain)"));
+        assert!(output.contains("🤖")); // xgboost source
+        assert!(output.contains("🔥")); // aggressive strategy
+    }
+
+    #[test]
+    fn test_full_format_no_link_when_empty_url() {
+        let bet = make_bet("Will it rain?", BetSide::Yes, 5.0, 10.0, 0.5);
+        let view = OpenBetView {
+            bet: &bet,
+            current_yes_price: Some(0.6),
+            poly_url: None,
+        };
+        let output = format_open_bets(&[view], false);
+        assert!(output.contains("📋 Will it rain?"));
+        assert!(!output.contains("]("));
+    }
+
+    #[test]
+    fn test_question_special_chars_stripped() {
+        let bet = make_bet("Will [Trump] win (2026)?", BetSide::Yes, 5.0, 10.0, 0.5);
+        let view = OpenBetView {
+            bet: &bet,
+            current_yes_price: Some(0.6),
+            poly_url: Some("https://example.com".to_string()),
+        };
+        let output = format_open_bets(&[view], false);
+        // Brackets and parens stripped from question in link text
+        assert!(output.contains("[Will Trump win 2026?]"));
+    }
+
+    #[test]
+    fn test_multiple_bets_totals() {
+        let bet1 = make_bet("Bet A", BetSide::Yes, 10.0, 20.0, 0.5);
+        let bet2 = make_bet("Bet B", BetSide::No, 15.0, 30.0, 0.5);
+        let views = vec![
+            OpenBetView {
+                bet: &bet1,
+                current_yes_price: Some(0.6),
+                poly_url: None,
+            },
+            OpenBetView {
+                bet: &bet2,
+                current_yes_price: Some(0.4),
+                poly_url: None,
+            },
+        ];
+        let output = format_open_bets(&views, true);
+        assert!(output.contains("(2)"));
+        assert!(output.contains("€25.00")); // total cost
+    }
+}
