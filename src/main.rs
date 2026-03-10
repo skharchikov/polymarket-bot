@@ -816,6 +816,9 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     });
 
     tokio::select! {
+        _ = shutdown_signal() => {
+            tracing::info!("Shutdown signal received, stopping gracefully...");
+        }
         r = housekeeping => {
             tracing::error!("Housekeeping loop exited: {:?}", r);
         }
@@ -839,7 +842,28 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         }
     }
 
+    tracing::info!("Sending shutdown notification...");
+    let _ = notifier.send("🛑 Bot shutting down gracefully").await;
+
     Ok(())
+}
+
+/// Wait for SIGINT (Ctrl-C) or SIGTERM (docker stop).
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await.ok();
+    }
 }
 
 /// Housekeeping: resolve bets, daily reports, reset counters.
