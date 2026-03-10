@@ -423,25 +423,82 @@ impl PgPortfolio {
     /// Build a model accuracy summary for /brier command.
     #[tracing::instrument(skip(self))]
     pub async fn brier_summary(&self) -> Result<String> {
-        match self.brier_score().await? {
-            Some((model_brier, n, market_brier)) => {
-                let skill = if market_brier > 0.0 {
-                    (1.0 - model_brier / market_brier) * 100.0
-                } else {
-                    0.0
-                };
-                let skill_emoji = if skill > 0.0 { "✅" } else { "❌" };
-                Ok(format!(
-                    "🎯 *Model Accuracy*\n\n\
-                     📊 Predictions: {n}\n\
-                     🤖 Model Brier: `{model_brier:.4}` (lower = better)\n\
-                     📈 Market Brier: `{market_brier:.4}`\n\
-                     {skill_emoji} Skill vs market: `{skill:+.1}%`\n\n\
-                     _Brier score: 0 = perfect, 0.25 = random_",
-                ))
-            }
-            None => Ok("🎯 *Model Accuracy*\n\nNo resolved predictions yet.".to_string()),
+        #[derive(sqlx::FromRow)]
+        struct PredRow {
+            source: String,
+            posterior: f64,
+            market_price: f64,
+            outcome: Option<bool>,
         }
+
+        let rows: Vec<PredRow> = sqlx::query_as(
+            "SELECT source, posterior, market_price, outcome FROM prediction_log \
+             WHERE resolved = true AND outcome IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        if rows.is_empty() {
+            return Ok("🎯 *Model Accuracy*\n\nNo resolved predictions yet.".to_string());
+        }
+
+        let n = rows.len();
+        let mut model_sum = 0.0_f64;
+        let mut market_sum = 0.0_f64;
+
+        for r in &rows {
+            let actual = if r.outcome.unwrap_or(false) { 1.0 } else { 0.0 };
+            model_sum += (r.posterior - actual).powi(2);
+            market_sum += (r.market_price - actual).powi(2);
+        }
+
+        let model_brier = model_sum / n as f64;
+        let market_brier = market_sum / n as f64;
+        let skill = if market_brier > 0.0 {
+            (1.0 - model_brier / market_brier) * 100.0
+        } else {
+            0.0
+        };
+        let skill_emoji = if skill > 0.0 { "✅" } else { "❌" };
+
+        // Per-source breakdown
+        let mut source_lines = String::new();
+        for source in &["xgboost", "llm_consensus"] {
+            let src_rows: Vec<&PredRow> = rows.iter().filter(|r| r.source == *source).collect();
+            if src_rows.is_empty() {
+                continue;
+            }
+            let sn = src_rows.len();
+            let mut sm = 0.0_f64;
+            let mut smk = 0.0_f64;
+            for r in &src_rows {
+                let actual = if r.outcome.unwrap_or(false) { 1.0 } else { 0.0 };
+                sm += (r.posterior - actual).powi(2);
+                smk += (r.market_price - actual).powi(2);
+            }
+            let sb = sm / sn as f64;
+            let smb = smk / sn as f64;
+            let ss = if smb > 0.0 {
+                (1.0 - sb / smb) * 100.0
+            } else {
+                0.0
+            };
+            let icon = if *source == "xgboost" { "🤖" } else { "🧠" };
+            let se = if ss > 0.0 { "✅" } else { "❌" };
+            source_lines.push_str(&format!(
+                "\n{icon} _{source}_: `{sb:.4}` ({sn}) {se} `{ss:+.1}%`"
+            ));
+        }
+
+        Ok(format!(
+            "🎯 *Model Accuracy*\n\n\
+             📊 Predictions: {n}\n\
+             🤖 Model Brier: `{model_brier:.4}` (lower = better)\n\
+             📈 Market Brier: `{market_brier:.4}`\n\
+             {skill_emoji} Skill vs market: `{skill:+.1}%`\n\
+             {source_lines}\n\n\
+             _Brier score: 0 = perfect, 0.25 = random_",
+        ))
     }
 
     // --- meta helpers ---
