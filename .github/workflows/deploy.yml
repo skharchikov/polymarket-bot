@@ -67,11 +67,13 @@ jobs:
       - name: Pull image and restart
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
         run: |
           ssh -i ~/.ssh/deploy_key \
             -o ServerAliveInterval=15 \
             -o ServerAliveCountMax=40 \
             "deploy@$DEPLOY_HOST" "\
+            echo $GHCR_PAT | docker login ghcr.io -u skharchikov --password-stdin && \
             cd $DEPLOY_DIR && \
             docker pull $IMAGE && \
             docker compose up -d && \
