@@ -662,6 +662,8 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         let mut ws_bets_today: usize = 0;
         let mut ws_bets_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
         const MAX_WS_BETS_PER_DAY: usize = 3;
+        // Cooldown for open-bet price move notifications (1h per market)
+        let mut last_price_alert: HashMap<String, std::time::Instant> = HashMap::new();
 
         while let Some(alert) = alert_rx.recv().await {
             // Reset daily counter
@@ -699,6 +701,17 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             let open_bet = open_bets.iter().find(|b| b.market_id == market_id);
             if let Some(bet) = open_bet {
                 let delta_pct = (alert.price - alert.prev_price) * 100.0;
+                // Only alert on 5%+ moves with 1h cooldown per market
+                if delta_pct.abs() < 5.0 {
+                    continue;
+                }
+                if let Some(last) = last_price_alert.get(&market_id)
+                    && now.duration_since(*last) < Duration::from_secs(3600)
+                {
+                    continue;
+                }
+                last_price_alert.insert(market_id.clone(), now);
+
                 let trade_info = alert
                     .trade_size
                     .map(|s| format!(" | Trade: `${s:.0}`"))
