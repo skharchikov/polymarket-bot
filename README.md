@@ -42,7 +42,7 @@ scripts/
 
 ### ML-First Pipeline
 
-1. **News scan loop** (every 10 min) fetches breaking news from Google News RSS, Reddit, CoinDesk, Reuters, and Polymarket trending
+1. **News scan loop** (every 10 min) fetches breaking news from Google News RSS, ESPN, CoinDesk, Reuters/AP/BBC, and sports feeds
 2. Matches news to eligible markets by keyword relevance (volume, expiry, price filters)
 3. **XGBoost ensemble** scores all eligible markets on 15+ features (price momentum, volatility, volume trends, order book depth, time to expiry)
 4. **Bayesian anchoring**: model predictions are anchored to market price as prior, with the model's likelihood ratio dampened by confidence (`LR^confidence`) — prevents overconfident predictions
@@ -64,8 +64,8 @@ As more bets resolve, the model sees more of its own data and improves predictio
 
 ### Risk Management
 
-- **Stop-loss** (default 30%): exits positions when unrealized loss exceeds threshold
-- **Expiry exit** (default 2 days): exits underwater positions approaching expiry
+- **Stop-loss** (default disabled): exits positions when unrealized loss exceeds threshold
+- **Expiry exit** (default disabled): exits underwater positions (≥10% loss) approaching expiry
 - **Terminal risk scaling**: reduces position size as market approaches expiry (`sqrt(days/14)`)
 - **Per-strategy bankrolls**: each strategy has independent bankroll isolation
 
@@ -79,9 +79,9 @@ Three strategies run simultaneously, each with independent bankrolls (default �
 
 | Strategy | Kelly | Min Edge | Min Confidence | Max Signals/Day |
 |---|---|---|---|---|
-| **Aggressive** 🔥 | 50% | 5% | 40% | 5 |
-| **Balanced** ⚖️ | 25% | 8% | 50% | 3 |
-| **Conservative** 🛡️ | 15% | 8% | 50% | 2 |
+| **Aggressive** 🔥 | 50% | 5% | 40% | 10 |
+| **Balanced** ⚖️ | 25% | 6% | 40% | 5 |
+| **Conservative** 🛡️ | 15% | 8% | 50% | 3 |
 
 XGBoost signals get relaxed thresholds (50% lower edge gate, 30% lower confidence gate) since the model has demonstrated calibration.
 
@@ -90,7 +90,7 @@ XGBoost signals get relaxed thresholds (50% lower edge gate, 30% lower confidenc
 | Command | Description |
 |---|---|
 | `/stats` | Portfolio statistics with per-strategy breakdown |
-| `/open` | Current open positions with cost and age |
+| `/open` | Open positions with side, PnL, edge, links |
 | `/brier` | Model accuracy (Brier score vs market baseline) |
 | `/health` | Bot uptime, scan counts, signals found |
 | `/help` | List commands |
@@ -145,12 +145,12 @@ All settings via environment variables with sensible defaults:
 | `LLM_MODEL` | `gpt-4o` | LLM model for news assessment fallback |
 | `STRATEGIES` | `aggressive,balanced,conservative` | Active strategy profiles |
 | `STRATEGY_BANKROLL` | `300.0` | Starting bankroll per strategy (EUR) |
-| `STOP_LOSS_PCT` | `0.30` | Stop-loss threshold (30%) |
-| `EXIT_DAYS_BEFORE_EXPIRY` | `2` | Exit underwater positions N days before expiry |
+| `STRATEGY_MAX_SIGNALS` | `` | Per-strategy daily caps (e.g. `aggressive:10,balanced:5`) |
+| `STOP_LOSS_PCT` | `1.0` | Stop-loss threshold (1.0 = disabled) |
+| `EXIT_DAYS_BEFORE_EXPIRY` | `0` | Exit underwater positions N days before expiry (0 = disabled) |
 | `CONSENSUS_AGENTS` | `2` | Number of LLM agents for fallback (1-3) |
 | `SCAN_INTERVAL_MINS` | `30` | Housekeeping loop interval |
 | `NEWS_SCAN_INTERVAL_MINS` | `10` | News scan loop interval |
-| `MAX_SIGNALS_PER_DAY` | `3` | Global max signals per day |
 | `MAX_MODEL_CANDIDATES` | `15` | Top N markets from XGBoost ranking |
 | `MAX_LLM_CANDIDATES` | `1` | Markets assessed by LLM per cycle |
 | `MIN_VOLUME` | `1000.0` | Min market volume filter |

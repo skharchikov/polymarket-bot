@@ -46,18 +46,18 @@ impl NewsAggregator {
         let mut source_counts = Vec::new();
 
         // Parallel fetch from multiple sources
-        let (google, reddit, crypto, reuters) = tokio::join!(
+        let (google, crypto, reuters, sports) = tokio::join!(
             self.google_news_top(),
-            self.reddit_news(),
             self.crypto_news(),
             self.reuters_news(),
+            self.sports_news(),
         );
 
         for (name, result) in [
             ("Google News", google),
-            ("Reddit", reddit),
             ("Crypto", crypto),
             ("Reuters", reuters),
+            ("Sports", sports),
         ] {
             match result {
                 Ok(items) => {
@@ -131,21 +131,30 @@ impl NewsAggregator {
         Ok(items)
     }
 
-    /// Reddit content via Google News search (Reddit blocks server IPs directly).
-    async fn reddit_news(&self) -> Result<Vec<NewsItem>> {
-        let mut items = Vec::new();
-        let queries = [
-            "site:reddit.com+news",
-            "site:reddit.com+politics",
-            "site:reddit.com+crypto",
+    /// Sports news from free RSS feeds — covers NBA, NFL, MLB, soccer, etc.
+    async fn sports_news(&self) -> Result<Vec<NewsItem>> {
+        let feeds = [
+            ("https://www.espn.com/espn/rss/news", "ESPN"),
+            (
+                "https://news.google.com/rss/search?q=sports+NBA+NFL+MLB&hl=en-US&gl=US&ceid=US:en",
+                "Sports (Google)",
+            ),
+            (
+                "https://news.google.com/rss/search?q=UFC+MMA+boxing&hl=en-US&gl=US&ceid=US:en",
+                "Combat Sports",
+            ),
+            (
+                "https://news.google.com/rss/search?q=soccer+football+UEFA+FIFA&hl=en-US&gl=US&ceid=US:en",
+                "Football (Google)",
+            ),
+            ("https://www.sportingnews.com/us/rss", "Sporting News"),
         ];
 
-        for query in &queries {
-            let url =
-                format!("https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en");
-            match self.fetch_rss(&url, "Reddit").await {
+        let mut items = Vec::new();
+        for (url, source) in feeds {
+            match self.fetch_rss(url, source).await {
                 Ok(feed_items) => items.extend(feed_items),
-                Err(e) => tracing::debug!(query = query, err = %e, "Reddit via Google failed"),
+                Err(e) => tracing::debug!(source = source, err = %e, "Sports RSS failed"),
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
