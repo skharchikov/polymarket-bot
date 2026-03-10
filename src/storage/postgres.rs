@@ -346,38 +346,47 @@ impl PgPortfolio {
             return Ok("📭 No open bets".to_string());
         }
 
-        let mut views = Vec::with_capacity(open.len());
+        // Fetch all prices concurrently
+        let price_futures: Vec<_> = open
+            .iter()
+            .map(|bet| {
+                let http = &http;
+                let market_id = &bet.market_id;
+                async move {
+                    let url = format!("https://gamma-api.polymarket.com/markets/{market_id}");
+                    let result: Option<f64> = async {
+                        let text = http.get(&url).send().await.ok()?.text().await.ok()?;
+                        let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+                        let prices_str = v["outcomePrices"].as_str()?;
+                        let prices: Vec<String> = serde_json::from_str(prices_str).ok()?;
+                        prices.first()?.parse::<f64>().ok()
+                    }
+                    .await;
+                    if result.is_none() {
+                        tracing::warn!(market_id, "Failed to fetch price from Gamma API");
+                    }
+                    result
+                }
+            })
+            .collect();
+        let prices = futures_util::future::join_all(price_futures).await;
 
-        for bet in &open {
-            // Fetch current price from Gamma API
-            let market_id = &bet.market_id;
-            let yes_price: Option<f64> = async {
-                let url = format!("https://gamma-api.polymarket.com/markets/{market_id}");
-                let text = http.get(&url).send().await.ok()?.text().await.ok()?;
-                let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-                let prices_str = v["outcomePrices"].as_str()?;
-                let prices: Vec<String> = serde_json::from_str(prices_str).ok()?;
-                prices.first()?.parse::<f64>().ok()
-            }
-            .await;
-
-            if yes_price.is_none() {
-                tracing::warn!(market_id, question = %bet.question, "Failed to fetch price from Gamma API");
-            }
-
-            // URL is stored in the bet itself
-            let poly_url = if bet.url.is_empty() {
-                None
-            } else {
-                Some(bet.url.clone())
-            };
-
-            views.push(OpenBetView {
-                bet,
-                current_yes_price: yes_price,
-                poly_url,
-            });
-        }
+        let views: Vec<OpenBetView> = open
+            .iter()
+            .zip(prices)
+            .map(|(bet, yes_price)| {
+                let poly_url = if bet.url.is_empty() {
+                    None
+                } else {
+                    Some(bet.url.clone())
+                };
+                OpenBetView {
+                    bet,
+                    current_yes_price: yes_price,
+                    poly_url,
+                }
+            })
+            .collect();
 
         Ok(format::format_open_bets(&views, false))
     }
