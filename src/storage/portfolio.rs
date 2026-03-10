@@ -143,69 +143,74 @@ impl PortfolioState {
 
         let mut s = format!(
             "=== LEARNING FROM {total} PAST BETS ===\n\
-             Record: {}W/{}L ({win_rate:.0}% win rate), Total PnL: \u{20ac}{total_pnl:+.2}\n\n",
+             Record: {}W/{}L ({win_rate:.0}% win rate), Total PnL: \u{20ac}{total_pnl:+.2}\n\
+             IMPORTANT: Focus on LOSSES below. Wins do NOT validate your approach — \
+             they may be luck. Losses reveal blind spots. Be skeptical of patterns \
+             that only appear in wins.\n\n",
             wins.len(),
             losses.len(),
         );
 
-        // Recent bet details with context
+        // Loss deep-dive — show ALL losses with full detail (most valuable for learning)
+        if !losses.is_empty() {
+            s.push_str("⚠️ LOSS DEEP-DIVE (learn from every mistake):\n");
+            for bet in losses.iter().rev() {
+                let pnl = bet.pnl.unwrap_or(0.0);
+                let duration = bet
+                    .resolved_at
+                    .map(|r| {
+                        let hours = (r - bet.placed_at).num_hours();
+                        if hours < 24 {
+                            format!("{hours}h")
+                        } else {
+                            format!("{}d", hours / 24)
+                        }
+                    })
+                    .unwrap_or_default();
+
+                s.push_str(&format!(
+                    "- LOST: \"{q}\" | {side} @ {price:.0}c, est {est:.0}%, edge +{edge:.1}%, conf {conf:.0}% | €{pnl:+.2} ({duration})\n",
+                    q = truncate(&bet.question, 55),
+                    side = bet.side,
+                    price = bet.entry_price * 100.0,
+                    est = bet.estimated_prob * 100.0,
+                    edge = bet.edge * 100.0,
+                    conf = bet.confidence * 100.0,
+                ));
+                s.push_str(&format!("  Reasoning: {}\n", truncate(&bet.reasoning, 150)));
+                // What went wrong: model said X% but market was right
+                let market_was = if bet.side == BetSide::Yes {
+                    "NO"
+                } else {
+                    "YES"
+                };
+                s.push_str(&format!(
+                    "  Post-mortem: Model estimated {est:.0}% {side}, but {market} won. Edge was illusory.\n",
+                    est = bet.estimated_prob * 100.0,
+                    side = bet.side,
+                    market = market_was,
+                ));
+            }
+            s.push('\n');
+        }
+
+        // Recent bets overview — wins brief (avoid bias), losses reference deep-dive above
         s.push_str("RECENT BETS (newest first):\n");
-        for bet in resolved.iter().rev().take(15) {
+        for bet in resolved.iter().rev().take(10) {
             let outcome = match bet.won {
                 Some(true) => "WON",
                 Some(false) => "LOST",
                 None => "PENDING",
             };
             let pnl = bet.pnl.unwrap_or(0.0);
-            let duration = bet
-                .resolved_at
-                .map(|r| {
-                    let hours = (r - bet.placed_at).num_hours();
-                    if hours < 24 {
-                        format!("{hours}h")
-                    } else {
-                        format!("{}d", hours / 24)
-                    }
-                })
-                .unwrap_or_default();
-
             s.push_str(&format!(
-                "- \"{q}\" | {side} @ {price:.0}c, est {est:.0}%, edge +{edge:.1}%, conf {conf:.0}% | {outcome} \u{20ac}{pnl:+.2} ({duration})\n",
+                "- {outcome}: \"{q}\" | {side} @ {price:.0}c, edge +{edge:.1}%, conf {conf:.0}% | \u{20ac}{pnl:+.2}\n",
                 q = truncate(&bet.question, 55),
                 side = bet.side,
                 price = bet.entry_price * 100.0,
-                est = bet.estimated_prob * 100.0,
                 edge = bet.edge * 100.0,
                 conf = bet.confidence * 100.0,
             ));
-            s.push_str(&format!("  Reasoning: {}\n", truncate(&bet.reasoning, 120)));
-            if let Some(ctx) = &bet.context {
-                let mut ctx_parts = Vec::new();
-                if ctx.btc_price > 0.0 {
-                    ctx_parts.push(format!(
-                        "BTC ${:.0} ({:+.1}%)",
-                        ctx.btc_price, ctx.btc_24h_change
-                    ));
-                }
-                if ctx.btc_funding_rate != 0.0 {
-                    ctx_parts.push(format!("funding {:.4}%", ctx.btc_funding_rate * 100.0));
-                }
-                if !ctx.fear_greed.is_empty() {
-                    ctx_parts.push(ctx.fear_greed.clone());
-                }
-                if ctx.book_depth > 0.0 {
-                    ctx_parts.push(format!("depth ${:.0}", ctx.book_depth));
-                }
-                if !ctx_parts.is_empty() {
-                    s.push_str(&format!("  Context: {}\n", ctx_parts.join(", ")));
-                }
-                if !ctx.news_headlines.is_empty() {
-                    s.push_str(&format!(
-                        "  News at bet time: {}\n",
-                        ctx.news_headlines.join("; ")
-                    ));
-                }
-            }
         }
 
         // Calibration analysis

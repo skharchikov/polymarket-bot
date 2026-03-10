@@ -433,6 +433,7 @@ def fetch_bet_snapshots(database_url: str, scraper: PolymarketScraper,
             snap["our_estimated_prob"] = est_prob
             snap["our_confidence"] = confidence
             snap["our_edge"] = edge
+            snap["our_bet_won"] = bool(won)
             snapshots.append(snap)
 
     return snapshots
@@ -471,11 +472,16 @@ def main():
         print(f"\nFetching our own resolved bets from DB...")
         bet_snapshots = fetch_bet_snapshots(database_url, scraper, verbose=args.verbose)
         if bet_snapshots:
-            # Weight our own bets higher by including them 3x
-            # (they have ground-truth entry price + known outcome)
-            print(f"  Adding {len(bet_snapshots)} bet snapshots (3x weighted)")
-            for _ in range(3):
-                snapshots.extend(bet_snapshots)
+            # Asymmetric weighting: losses 5x, wins 1x
+            # Losses reveal model blind spots and deserve extra weight.
+            # Wins included once — no upweighting to avoid confirmation bias.
+            losses = [s for s in bet_snapshots if not s.get("our_bet_won", True)]
+            wins = [s for s in bet_snapshots if s.get("our_bet_won", True)]
+            print(f"  Adding {len(bet_snapshots)} bet snapshots "
+                  f"({len(wins)} wins × 1, {len(losses)} losses × 5)")
+            snapshots.extend(wins)
+            for _ in range(5):
+                snapshots.extend(losses)
     else:
         print("\nNo DATABASE_URL — skipping own bet data. "
               "Pass --db or set DATABASE_URL env var to include.")
