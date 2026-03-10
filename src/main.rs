@@ -6,6 +6,7 @@ mod bayesian;
 mod calibration;
 mod config;
 mod data;
+mod format;
 mod model;
 mod pricing;
 mod scanner;
@@ -911,23 +912,31 @@ async fn housekeeping_cycle(
     // Check open positions for early exit and report unrealized P&L
     let open_bets = portfolio.open_bets().await?;
     if !open_bets.is_empty() {
-        let mut lines = Vec::new();
-        let mut total_unrealized = 0.0;
-        let mut total_cost = 0.0;
+        let mut views = Vec::new();
 
         for bet in &open_bets {
             tokio::time::sleep(Duration::from_millis(200)).await;
             let current = match scanner.fetch_current_price(&bet.market_id).await {
                 Ok(Some(p)) => p,
-                Ok(None) => continue,
+                Ok(None) => {
+                    views.push(format::OpenBetView {
+                        bet,
+                        current_yes_price: None,
+                        poly_url: None,
+                    });
+                    continue;
+                }
                 Err(e) => {
                     tracing::debug!(market = %bet.market_id, err = %e, "Price fetch failed");
+                    views.push(format::OpenBetView {
+                        bet,
+                        current_yes_price: None,
+                        poly_url: None,
+                    });
                     continue;
                 }
             };
 
-            // For YES bets: value = shares * current_price
-            // For NO bets: value = shares * (1 - current_price)
             let current_value = match bet.side {
                 BetSide::Yes => bet.shares * current,
                 BetSide::No => bet.shares * (1.0 - current),
@@ -1013,50 +1022,22 @@ async fn housekeeping_cycle(
                 continue; // Skip adding to open positions report
             }
 
-            total_unrealized += unrealized;
-            total_cost += bet.cost;
-
-            let price_change = current - bet.entry_price;
-            let arrow = if price_change > 0.01 {
-                "📈"
-            } else if price_change < -0.01 {
-                "📉"
-            } else {
-                "➡️"
-            };
-
-            lines.push(format!(
-                "{arrow} {side} _{q}_ `{entry:.0}¢→{now:.0}¢` `€{pnl:+.2}`",
-                side = bet.side,
-                q = truncate_str(&bet.question, 35),
-                entry = bet.entry_price * 100.0,
-                now = current * 100.0,
-                pnl = unrealized,
-            ));
-        }
-
-        let roi = if total_cost > 0.0 {
-            total_unrealized / total_cost * 100.0
-        } else {
-            0.0
-        };
-
-        let mut msg = format!(
-            "📋 *Open Positions* ({count})\n\n\
-             💰 Unrealized: `€{pnl:+.2}` ({roi:+.1}%)\n",
-            count = open_bets.len(),
-            pnl = total_unrealized,
-        );
-        for line in &lines {
-            msg.push_str(&format!("\n{line}"));
+            views.push(format::OpenBetView {
+                bet,
+                current_yes_price: Some(current),
+                poly_url: None,
+            });
         }
 
         // Cache unrealized PnL for /stats command
+        let total_unrealized: f64 = views.iter().filter_map(|v| v.unrealized()).sum();
+        let total_cost: f64 = views.iter().map(|v| v.bet.cost).sum();
         let _ = portfolio
             .upsert_f64_pub("unrealized_pnl", total_unrealized)
             .await;
         let _ = portfolio.upsert_f64_pub("open_exposure", total_cost).await;
 
+        let msg = format::format_open_bets(&views, true);
         broadcast(notifier, portfolio, &msg).await;
     }
 
@@ -1150,7 +1131,7 @@ async fn news_scan_cycle(
                             strategy_rejections.push(format!(
                                 "{} {}: edge {:.1}%/conf {:.0}%",
                                 strat.label(),
-                                truncate_str(&signal.question, 40),
+                                format::truncate(&signal.question, 40),
                                 eff_edge * 100.0,
                                 signal.confidence * 100.0,
                             ));
@@ -1170,7 +1151,7 @@ async fn news_scan_cycle(
                         strategy_rejections.push(format!(
                             "{} {}: kelly €{:.2} < min €{:.2}",
                             strat.label(),
-                            truncate_str(&signal.question, 40),
+                            format::truncate(&signal.question, 40),
                             raw_bet,
                             strat.min_bet,
                         ));
@@ -1192,7 +1173,7 @@ async fn news_scan_cycle(
                         strategy_rejections.push(format!(
                             "{} {}: cost €{:.2} > bankroll €{:.2}",
                             strat.label(),
-                            truncate_str(&signal.question, 40),
+                            format::truncate(&signal.question, 40),
                             total_cost,
                             strat_bankroll,
                         ));
@@ -1252,7 +1233,7 @@ async fn news_scan_cycle(
                             bets_placed.push(format!(
                                 "{} {} €{:.2}",
                                 strat.label(),
-                                truncate_str(&signal.question, 40),
+                                format::truncate(&signal.question, 40),
                                 bet_amount,
                             ));
 
@@ -1262,7 +1243,7 @@ async fn news_scan_cycle(
                                     .news_headlines
                                     .iter()
                                     .take(3)
-                                    .map(|h| format!("  • _{}_", truncate_str(h, 80)))
+                                    .map(|h| format!("  • _{}_", format::truncate(h, 80)))
                                     .collect();
                                 format!("\n📰 *Triggered by:*\n{}\n", headlines.join("\n"))
                             } else {
@@ -1416,8 +1397,7 @@ async fn heartbeat_cycle(
         max = strategies
             .iter()
             .map(|s| s.max_signals_per_day)
-            .max()
-            .unwrap_or(0),
+            .sum::<usize>(),
     );
 
     broadcast(notifier, portfolio, &msg).await;
@@ -1433,13 +1413,4 @@ async fn broadcast(
 ) {
     let subs = portfolio.telegram_subscribers().await.unwrap_or_default();
     notifier.broadcast(&subs, message).await;
-}
-
-fn truncate_str(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max).collect();
-        format!("{truncated}...")
-    }
 }

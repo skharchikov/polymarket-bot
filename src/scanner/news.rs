@@ -123,7 +123,7 @@ impl NewsAggregator {
                     title,
                     source: source.to_string(),
                     published,
-                    summary: truncate(&clean_desc, 200),
+                    summary: crate::format::truncate(&clean_desc, 200),
                 });
             }
         }
@@ -441,15 +441,6 @@ pub fn dedup_news(items: &mut Vec<NewsItem>) {
             .collect::<String>();
         seen.insert(key)
     });
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max).collect();
-        format!("{truncated}...")
-    }
 }
 
 #[cfg(test)]

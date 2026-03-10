@@ -170,14 +170,17 @@ impl PortfolioState {
 
                 s.push_str(&format!(
                     "- LOST: \"{q}\" | {side} @ {price:.0}c, est {est:.0}%, edge +{edge:.1}%, conf {conf:.0}% | €{pnl:+.2} ({duration})\n",
-                    q = truncate(&bet.question, 55),
+                    q = crate::format::truncate(&bet.question, 55),
                     side = bet.side,
                     price = bet.entry_price * 100.0,
                     est = bet.estimated_prob * 100.0,
                     edge = bet.edge * 100.0,
                     conf = bet.confidence * 100.0,
                 ));
-                s.push_str(&format!("  Reasoning: {}\n", truncate(&bet.reasoning, 150)));
+                s.push_str(&format!(
+                    "  Reasoning: {}\n",
+                    crate::format::truncate(&bet.reasoning, 150)
+                ));
                 // What went wrong: model said X% but market was right
                 let market_was = if bet.side == BetSide::Yes {
                     "NO"
@@ -205,7 +208,7 @@ impl PortfolioState {
             let pnl = bet.pnl.unwrap_or(0.0);
             s.push_str(&format!(
                 "- {outcome}: \"{q}\" | {side} @ {price:.0}c, edge +{edge:.1}%, conf {conf:.0}% | \u{20ac}{pnl:+.2}\n",
-                q = truncate(&bet.question, 55),
+                q = crate::format::truncate(&bet.question, 55),
                 side = bet.side,
                 price = bet.entry_price * 100.0,
                 edge = bet.edge * 100.0,
@@ -450,14 +453,5 @@ impl PortfolioState {
         }
 
         s
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max).collect();
-        format!("{truncated}...")
     }
 }

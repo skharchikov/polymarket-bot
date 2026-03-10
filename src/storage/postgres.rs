@@ -336,6 +336,8 @@ impl PgPortfolio {
     /// Build a summary of open bets for /open command.
     #[tracing::instrument(skip(self))]
     pub async fn open_bets_summary(&self) -> Result<String> {
+        use crate::format::{self, OpenBetView};
+
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()?;
@@ -344,47 +346,9 @@ impl PgPortfolio {
             return Ok("📭 No open bets".to_string());
         }
 
-        let mut lines = Vec::new();
-        let mut total_cost = 0.0_f64;
-
-        let mut total_unrealized = 0.0_f64;
+        let mut views = Vec::with_capacity(open.len());
 
         for bet in &open {
-            let age_days = (Utc::now() - bet.placed_at).num_hours() as f64 / 24.0;
-            let label = match bet.strategy.as_str() {
-                "aggressive" => "🔥",
-                "balanced" => "⚖️",
-                "conservative" => "🛡️",
-                _ => "📊",
-            };
-            let side_emoji = match bet.side {
-                BetSide::Yes => "🟢 YES",
-                BetSide::No => "🔴 NO",
-            };
-            let source_icon = if bet.source == "xgboost" {
-                "🤖"
-            } else {
-                "🧠"
-            };
-            let expires = bet
-                .end_date
-                .as_ref()
-                .and_then(|d| {
-                    chrono::DateTime::parse_from_rfc3339(d)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .or_else(|_| {
-                            chrono::NaiveDateTime::parse_from_str(d, "%Y-%m-%dT%H:%M:%SZ")
-                                .map(|n| n.and_utc())
-                        })
-                        .ok()
-                })
-                .map(|dt| {
-                    let days_left = (dt - Utc::now()).num_days();
-                    format!("{days_left}d left")
-                })
-                .unwrap_or_default();
-
-            // Fetch market data: current price + slug for URL
             let market_id = &bet.market_id;
             let market_data: Option<(f64, String)> = async {
                 let url = format!("https://gamma-api.polymarket.com/markets/{market_id}");
@@ -413,74 +377,24 @@ impl PgPortfolio {
                 Some((yes_price, poly_url))
             }
             .await;
+
             if market_data.is_none() {
                 tracing::warn!(market_id, question = %bet.question, "Failed to fetch market data from Gamma API");
             }
 
-            let (pnl_str, link) = if let Some((yes_price, poly_url)) = &market_data {
-                let current = match bet.side {
-                    BetSide::Yes => *yes_price,
-                    BetSide::No => 1.0 - yes_price,
-                };
-                let current_value = bet.shares * current;
-                let unrealized = current_value - bet.cost;
-                total_unrealized += unrealized;
-                let pnl_pct = if bet.cost > 0.0 {
-                    unrealized / bet.cost * 100.0
-                } else {
-                    0.0
-                };
-                let pnl = format!(
-                    " | PnL `€{unrealized:+.2}` ({pnl_pct:+.0}%) @ `{cur:.1}¢`",
-                    cur = current * 100.0,
-                );
-                (pnl, poly_url.clone())
-            } else {
-                (String::new(), String::new())
+            let (price, url) = match market_data {
+                Some((p, u)) => (Some(p), Some(u)),
+                None => (None, None),
             };
 
-            let q = truncate(&bet.question, 50);
-            let q_safe: String = q
-                .chars()
-                .filter(|c| !matches!(c, '[' | ']' | '(' | ')'))
-                .collect();
-            let q_link = if link.is_empty() {
-                q_safe
-            } else {
-                format!("[{q_safe}]({link})")
-            };
-
-            total_cost += bet.cost;
-            lines.push(format!(
-                "{label} *{side}* `€{cost:.2}` → {shares:.1} shares @ `{price:.1}¢`\n\
-                 \u{00a0}\u{00a0}📋 {q_link}\n\
-                 \u{00a0}\u{00a0}{src} Edge: `{edge:+.1}%` | Conf: `{conf:.0}%`{pnl}\n\
-                 \u{00a0}\u{00a0}⏰ {expires} ({age:.0}d ago)",
-                side = side_emoji,
-                cost = bet.cost,
-                shares = bet.shares,
-                price = bet.entry_price * 100.0,
-                src = source_icon,
-                edge = bet.edge * 100.0,
-                conf = bet.confidence * 100.0,
-                pnl = pnl_str,
-                age = age_days,
-            ));
+            views.push(OpenBetView {
+                bet,
+                current_yes_price: price,
+                poly_url: url,
+            });
         }
 
-        let unrealized_pct = if total_cost > 0.0 {
-            total_unrealized / total_cost * 100.0
-        } else {
-            0.0
-        };
-
-        Ok(format!(
-            "🔓 *Open Bets* ({count})\n\
-             💰 At risk: `€{total_cost:.2}` | Unrealized: `€{total_unrealized:+.2}` ({unrealized_pct:+.1}%)\n\n\
-             {details}",
-            count = open.len(),
-            details = lines.join("\n\n"),
-        ))
+        Ok(format::format_open_bets(&views, false))
     }
 
     /// Build a model accuracy summary for /brier command.
@@ -1105,7 +1019,7 @@ impl PgPortfolio {
             for bet in &open {
                 msg.push_str(&format!(
                     "\u{2022} _{question}_ \u{2014} {side} \u{20ac}{cost:.2} @ {price:.0}\u{00a2} (edge +{edge:.0}%)\n",
-                    question = truncate(&bet.question, 50),
+                    question = crate::format::truncate(&bet.question, 50),
                     side = bet.side,
                     cost = bet.cost,
                     price = bet.slipped_price * 100.0,
@@ -1201,14 +1115,5 @@ impl BetRow {
             pnl: self.pnl,
             resolved_at: self.resolved_at,
         }
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max).collect();
-        format!("{truncated}...")
     }
 }
