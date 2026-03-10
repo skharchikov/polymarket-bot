@@ -23,10 +23,6 @@ pub struct AppConfig {
     pub news_scan_interval_mins: u64,
 
     // --- Betting ---
-    /// Max signals (bets) per day.
-    #[config(env = "MAX_SIGNALS_PER_DAY", default = 3)]
-    pub max_signals_per_day: usize,
-
     /// Slippage assumption as a fraction (0.01 = 1%).
     #[config(env = "SLIPPAGE_PCT", default = 0.01)]
     pub slippage_pct: f64,

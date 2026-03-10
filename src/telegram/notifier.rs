@@ -45,7 +45,7 @@ impl TelegramNotifier {
         self.send_to_with_mode(chat_id, message, "Markdown").await
     }
 
-    pub async fn send_to_with_mode(
+    async fn send_to_with_mode(
         &self,
         chat_id: &str,
         message: &str,
