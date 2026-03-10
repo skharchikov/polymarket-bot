@@ -6,19 +6,16 @@ on:
 
 env:
   DEPLOY_DIR: /opt/polymarket-bot
+  IMAGE: ghcr.io/skharchikov/polymarket-bot:latest
 
 jobs:
-  ci:
-    uses: ./.github/workflows/ci.yml
-
   deploy:
     name: Deploy to Hetzner
-    needs: ci
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # full history for changelog generation
+          fetch-depth: 0
 
       - name: Generate changelog
         run: |
@@ -61,19 +58,13 @@ jobs:
           rsync -az --delete \
             -e "ssh -i ~/.ssh/deploy_key" \
             --include='docker-compose.yml' \
-            --include='Dockerfile' \
-            --include='Cargo.toml' \
-            --include='Cargo.lock' \
-            --include='rust-toolchain.toml' \
-            --include='build.rs' \
             --include='CHANGELOG.gen' \
-            --include='src/***' \
-            --include='migrations/***' \
             --include='scripts/***' \
+            --include='migrations/***' \
             --exclude='*' \
             ./ "deploy@$DEPLOY_HOST:$DEPLOY_DIR/"
 
-      - name: Build and restart
+      - name: Pull image and restart
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
@@ -82,6 +73,6 @@ jobs:
             -o ServerAliveCountMax=40 \
             "deploy@$DEPLOY_HOST" "\
             cd $DEPLOY_DIR && \
-            docker compose build --no-cache && \
+            docker pull $IMAGE && \
             docker compose up -d && \
             docker compose logs --tail=20 bot"

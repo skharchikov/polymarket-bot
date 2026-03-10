@@ -59,7 +59,7 @@ services:
     restart: unless-stopped
 
   bot:
-    build: .
+    image: ghcr.io/skharchikov/polymarket-bot:latest
     depends_on:
       postgres:
         condition: service_healthy
