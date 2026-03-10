@@ -682,19 +682,6 @@ impl PgPortfolio {
         Ok(())
     }
 
-    pub async fn increment_signals(&self) -> Result<()> {
-        let cur = self.get_f64("signals_sent_today").await?;
-        self.set_f64("signals_sent_today", cur + 1.0).await
-    }
-
-    pub async fn increment_strategy_signals(&self, strategy: &str) -> Result<()> {
-        let cur = self
-            .get_f64(&format!("signals_sent_today:{strategy}"))
-            .await?;
-        self.set_f64(&format!("signals_sent_today:{strategy}"), cur + 1.0)
-            .await
-    }
-
     #[tracing::instrument(skip(self, bet), fields(market_id = %bet.market_id, strategy = %bet.strategy))]
     pub async fn place_bet(&self, bet: &NewBet) -> Result<i32> {
         let side_str = match bet.side {
@@ -732,16 +719,23 @@ impl PgPortfolio {
         .fetch_one(&self.pool)
         .await?;
 
-        // Deduct from strategy bankroll
-        let strat_bankroll = self.strategy_bankroll(&bet.strategy).await?;
-        self.set_strategy_bankroll(&bet.strategy, strat_bankroll - bet.cost - bet.fee)
-            .await?;
-        self.increment_strategy_signals(&bet.strategy).await?;
-
-        // Also update global bankroll
-        let bankroll = self.bankroll().await?;
-        self.set_bankroll(bankroll - bet.cost - bet.fee).await?;
-        self.increment_signals().await?;
+        // Batch update: deduct bankrolls and increment signal counters in one query
+        let strat_bankroll_key = format!("bankroll:{}", bet.strategy);
+        let strat_signals_key = format!("signals_sent_today:{}", bet.strategy);
+        let total_deduction = bet.cost + bet.fee;
+        sqlx::query(
+            "UPDATE portfolio SET \
+               value_f64 = CASE \
+                 WHEN key IN ($1, 'bankroll') THEN value_f64 - $2 \
+                 WHEN key IN ($3, 'signals_sent_today') THEN value_f64 + 1 \
+               END \
+             WHERE key IN ($1, 'bankroll', $3, 'signals_sent_today')",
+        )
+        .bind(&strat_bankroll_key)
+        .bind(total_deduction)
+        .bind(&strat_signals_key)
+        .execute(&self.pool)
+        .await?;
 
         Ok(row.0)
     }
@@ -1083,14 +1077,26 @@ impl PgPortfolio {
     }
 
     pub async fn take_snapshot(&self) -> Result<()> {
-        let resolved = self.resolved_bets().await?;
-        let open_count = self.open_bets().await?.len();
-        let total_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM bets")
-            .fetch_one(&self.pool)
-            .await?;
-        let wins = resolved.iter().filter(|b| b.won == Some(true)).count();
-        let losses = resolved.iter().filter(|b| b.won == Some(false)).count();
-        let total_pnl: f64 = resolved.iter().filter_map(|b| b.pnl).sum();
+        #[derive(sqlx::FromRow)]
+        struct SnapshotAgg {
+            total: i64,
+            open_count: i64,
+            wins: i64,
+            losses: i64,
+            total_pnl: f64,
+        }
+        let agg: SnapshotAgg = sqlx::query_as(
+            "SELECT \
+               COUNT(*) AS total, \
+               COUNT(*) FILTER (WHERE NOT resolved) AS open_count, \
+               COUNT(*) FILTER (WHERE won = true) AS wins, \
+               COUNT(*) FILTER (WHERE won = false) AS losses, \
+               COALESCE(SUM(pnl) FILTER (WHERE resolved), 0) AS total_pnl \
+             FROM bets",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
         let starting = self.starting_bankroll().await?;
         let bankroll = self.bankroll().await?;
         let roi = if starting > 0.0 {
@@ -1106,11 +1112,11 @@ impl PgPortfolio {
         )
         .bind(&today)
         .bind(bankroll)
-        .bind(open_count as i32)
-        .bind(total_count.0 as i32)
-        .bind(wins as i32)
-        .bind(losses as i32)
-        .bind(total_pnl)
+        .bind(agg.open_count as i32)
+        .bind(agg.total as i32)
+        .bind(agg.wins as i32)
+        .bind(agg.losses as i32)
+        .bind(agg.total_pnl)
         .bind(roi)
         .execute(&self.pool)
         .await?;
@@ -1123,26 +1129,44 @@ impl PgPortfolio {
     pub async fn daily_summary(&self) -> Result<String> {
         let bankroll = self.bankroll().await?;
         let starting = self.starting_bankroll().await?;
-        let resolved = self.resolved_bets().await?;
-        let open = self.open_bets().await?;
-        let all_bets = self.all_bets().await?;
 
-        let wins = resolved.iter().filter(|b| b.won == Some(true)).count();
-        let losses = resolved.iter().filter(|b| b.won == Some(false)).count();
-        let total_pnl: f64 = resolved.iter().filter_map(|b| b.pnl).sum();
-        let total_fees: f64 = all_bets.iter().map(|b| b.fee_paid).sum();
-        // ROI from actual bankroll delta (most accurate, includes all fees)
+        // Single aggregate query instead of 3 separate SELECT * fetches
+        #[derive(sqlx::FromRow)]
+        struct DailyAgg {
+            total: i64,
+            resolved_count: i64,
+            wins: i64,
+            losses: i64,
+            total_pnl: f64,
+            total_fees: f64,
+            open_count: i64,
+            open_exposure: f64,
+        }
+        let agg: DailyAgg = sqlx::query_as(
+            "SELECT \
+               COUNT(*) AS total, \
+               COUNT(*) FILTER (WHERE resolved) AS resolved_count, \
+               COUNT(*) FILTER (WHERE won = true) AS wins, \
+               COUNT(*) FILTER (WHERE won = false) AS losses, \
+               COALESCE(SUM(pnl) FILTER (WHERE resolved), 0) AS total_pnl, \
+               COALESCE(SUM(fee_paid), 0) AS total_fees, \
+               COUNT(*) FILTER (WHERE NOT resolved) AS open_count, \
+               COALESCE(SUM(cost) FILTER (WHERE NOT resolved), 0) AS open_exposure \
+             FROM bets",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
         let roi = if starting > 0.0 {
             (bankroll - starting) / starting * 100.0
         } else {
             0.0
         };
-        let win_rate = if wins + losses > 0 {
-            wins as f64 / (wins + losses) as f64 * 100.0
+        let win_rate = if agg.wins + agg.losses > 0 {
+            agg.wins as f64 / (agg.wins + agg.losses) as f64 * 100.0
         } else {
             0.0
         };
-        let open_exposure: f64 = open.iter().map(|b| b.cost).sum();
 
         let mut msg = format!(
             "\u{1f4ca} *Daily Portfolio Report*\n\n\
@@ -1156,9 +1180,14 @@ impl PgPortfolio {
              Resolved: {resolved_count} (\u{2705} {wins}W / \u{274c} {losses}L)\n\
              Win rate: {win_rate:.0}%\n\
              Open: {open_count} (\u{20ac}{open_exposure:.2} exposed)\n",
-            total = all_bets.len(),
-            resolved_count = resolved.len(),
-            open_count = open.len(),
+            total_pnl = agg.total_pnl,
+            total_fees = agg.total_fees,
+            total = agg.total,
+            resolved_count = agg.resolved_count,
+            wins = agg.wins,
+            losses = agg.losses,
+            open_count = agg.open_count,
+            open_exposure = agg.open_exposure,
         );
 
         // Brier score — model accuracy vs market
@@ -1175,13 +1204,30 @@ impl PgPortfolio {
             ));
         }
 
-        if !open.is_empty() {
+        // Only fetch open bets for the listing (lightweight — typically <20 rows)
+        if agg.open_count > 0 {
+            #[derive(sqlx::FromRow)]
+            struct OpenBetBrief {
+                question: String,
+                side: String,
+                cost: f64,
+                slipped_price: f64,
+                edge: f64,
+            }
+            let open_list: Vec<OpenBetBrief> = sqlx::query_as(
+                "SELECT question, side, cost, slipped_price, edge \
+                 FROM bets WHERE NOT resolved ORDER BY placed_at DESC",
+            )
+            .fetch_all(&self.pool)
+            .await?;
+
             msg.push_str("\n\u{1f513} *Open bets:*\n");
-            for bet in &open {
+            for bet in &open_list {
+                let side_str = if bet.side == "No" { "NO" } else { "YES" };
                 msg.push_str(&format!(
                     "\u{2022} _{question}_ \u{2014} {side} \u{20ac}{cost:.2} @ {price:.0}\u{00a2} (edge +{edge:.0}%)\n",
                     question = crate::format::truncate(&bet.question, 50),
-                    side = bet.side,
+                    side = side_str,
                     cost = bet.cost,
                     price = bet.slipped_price * 100.0,
                     edge = bet.edge * 100.0,
@@ -1196,8 +1242,8 @@ impl PgPortfolio {
     #[tracing::instrument(skip(self))]
     pub async fn learning_summary(&self) -> Result<String> {
         use super::portfolio::PortfolioState;
-        // Build a temporary PortfolioState from DB data for the analysis logic
-        let bets = self.all_bets().await?;
+        // Only fetch resolved bets — learning analysis doesn't use open bets
+        let bets = self.resolved_bets().await?;
         let starting = self.starting_bankroll().await?;
         let bankroll = self.bankroll().await?;
         let state = PortfolioState {
