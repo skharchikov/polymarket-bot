@@ -85,6 +85,43 @@ impl TelegramNotifier {
         Ok(())
     }
 
+    /// Send a GIF animation to a chat.
+    pub async fn send_animation(&self, chat_id: &str, gif_url: &str) -> Result<()> {
+        let url = format!(
+            "https://api.telegram.org/bot{}/sendAnimation",
+            self.bot_token
+        );
+        let resp = self
+            .client
+            .post(&url)
+            .json(&serde_json::json!({
+                "chat_id": chat_id,
+                "animation": gif_url,
+            }))
+            .send()
+            .await
+            .context("failed to send telegram animation")?;
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(chat_id, body, "Telegram sendAnimation failed");
+        }
+        Ok(())
+    }
+
+    /// Send a GIF to owner + all subscribers.
+    pub async fn broadcast_animation(
+        &self,
+        subscribers: &[(String, Option<String>)],
+        gif_url: &str,
+    ) {
+        let _ = self.send_animation(&self.chat_id, gif_url).await;
+        for (id, _) in subscribers {
+            if id != &self.chat_id {
+                let _ = self.send_animation(id, gif_url).await;
+            }
+        }
+    }
+
     /// Poll for new commands. Returns (chat_id, command, username, first_name).
     pub async fn poll_commands(&self) -> Vec<(String, String, Option<String>, Option<String>)> {
         let offset = self.last_update_id.load(Ordering::Relaxed);

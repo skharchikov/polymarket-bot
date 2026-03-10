@@ -27,6 +27,31 @@ use storage::postgres::PgPortfolio;
 use strategy::StrategyProfile;
 use tokio::sync::{RwLock, mpsc};
 
+/// Curated victory GIFs sent on winning bets.
+const VICTORY_GIFS: &[&str] = &[
+    "https://media.giphy.com/media/GBtcj090cj3bBSwgJB/giphy.gif",
+    "https://media.giphy.com/media/Ud0jIDEksXLhSwufo7/giphy.gif",
+    "https://media.giphy.com/media/l4Ep5XhbkPJrgN6JG/giphy.gif",
+    "https://media.giphy.com/media/ddHhhUBn25cuQ/giphy.gif",
+    "https://media.giphy.com/media/iJgoGwkqb1mmH1mES3/giphy.gif",
+    "https://media.giphy.com/media/GxIdtANXpn3qL1FG25/giphy.gif",
+    "https://media.giphy.com/media/fUQ4rhUZJYiQsas6WD/giphy.gif",
+    "https://media.giphy.com/media/1dMNqVx9Kb12EBjFrc/giphy.gif",
+    "https://media.giphy.com/media/RPwrO4b46mOdy/giphy.gif",
+    "https://media.giphy.com/media/yoJC2JaiEMoxIhQhY4/giphy.gif",
+    "https://media.giphy.com/media/Vu5UbNpjpqfMq2UFg0/giphy.gif",
+    "https://media.giphy.com/media/IbZbQr1BiYyOwxySzW/giphy.gif",
+];
+
+fn random_victory_gif() -> &'static str {
+    use std::time::SystemTime;
+    let seed = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as usize;
+    VICTORY_GIFS[seed % VICTORY_GIFS.len()]
+}
+
 /// Shared scan stats for heartbeat reporting.
 struct ScanStats {
     scans_completed: AtomicU64,
@@ -927,6 +952,11 @@ async fn housekeeping_cycle(
                         total_pnl = r.total_pnl,
                     );
                     broadcast(notifier, portfolio, &msg).await;
+                    if r.won {
+                        let gif = random_victory_gif();
+                        let subs = portfolio.telegram_subscribers().await.unwrap_or_default();
+                        notifier.broadcast_animation(&subs, gif).await;
+                    }
                     tracing::info!(
                         market = %market_id,
                         strategy = %r.strategy,
