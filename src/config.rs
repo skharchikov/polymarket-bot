@@ -103,13 +103,13 @@ pub struct AppConfig {
     #[config(env = "STRATEGY_MAX_SIGNALS", default = "")]
     pub strategy_max_signals: String,
 
-    // --- Early exit ---
+    // --- Early exit (disabled by default — let all bets resolve for learning) ---
     /// Stop-loss: exit if unrealized loss exceeds this fraction of cost.
-    /// Set to 1.0 to disable (let all bets run to resolution for Brier data).
-    #[config(env = "STOP_LOSS_PCT", default = 1.0)]
+    /// Set to 999.0 to disable. E.g. 0.5 = exit at 50% loss.
+    #[config(env = "STOP_LOSS_PCT", default = 999.0)]
     pub stop_loss_pct: f64,
 
-    /// Exit if position is underwater and fewer than this many days to expiry.
+    /// Exit if position is underwater (≥10% loss) and fewer than this many days to expiry.
     /// Set to 0 to disable expiry exits.
     #[config(env = "EXIT_DAYS_BEFORE_EXPIRY", default = 0)]
     pub exit_days_before_expiry: i64,
