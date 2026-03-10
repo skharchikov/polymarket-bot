@@ -8,11 +8,12 @@ Automated prediction market trading bot that combines an XGBoost/ensemble ML mod
 
 ```
 src/
-├── main.rs              # Entry point, multi-loop orchestration
+├── main.rs              # Entry point, multi-loop orchestration, graceful shutdown
 ├── bayesian.rs          # Bayesian updating with likelihood ratios
 ├── config.rs            # Env-var configuration (confique)
 ├── strategy.rs          # Strategy profiles (aggressive/balanced/conservative)
 ├── calibration.rs       # Calibration curve from resolved LLM estimates
+├── format.rs            # Shared Telegram message formatting (open bets, truncation)
 ├── scanner/
 │   ├── live.rs          # ML-first scanning, Bayesian consensus, signals
 │   ├── ws.rs            # WebSocket price alerts for real-time triggers
@@ -20,6 +21,10 @@ src/
 ├── data/
 │   ├── models.rs        # GammaMarket, PriceTick data structures
 │   └── crawler.rs       # Historical data crawler for backtesting
+├── model/
+│   ├── features.rs      # Feature engineering (momentum, volatility, RSI)
+│   ├── xgb.rs           # Local XGBoost inference
+│   └── sidecar.rs       # HTTP client for ensemble model server
 ├── pricing/
 │   └── kelly.rs         # Kelly Criterion position sizing
 ├── storage/
@@ -30,22 +35,23 @@ src/
 │   ├── metrics.rs       # Sharpe ratio, Brier score, max drawdown
 │   └── portfolio.rs     # In-memory portfolio for backtesting
 └── telegram/
-    └── notifier.rs      # Telegram alerts, commands, daily reports
+    └── notifier.rs      # Telegram alerts, commands, broadcasts, GIF celebrations
 
 scripts/
 ├── fetch_data.py        # Fetches resolved markets + own bets for training
 ├── train_model.py       # Trains XGBoost/stacking ensemble
 ├── serve_model.py       # HTTP model server (sidecar)
 ├── retrain.sh           # Continuous retraining loop (every 24h)
-└── backtest.py          # Python backtest with stop-loss simulation
+├── backtest.py          # Python backtest with stop-loss simulation
+└── test_predictions.py  # Prediction validation tests
 ```
 
 ## How It Works
 
 ### ML-First Pipeline
 
-1. **News scan loop** (every 10 min) fetches breaking news from Google News RSS, ESPN, CoinDesk, Reuters/AP/BBC, and sports feeds
-2. Matches news to eligible markets by keyword relevance (volume, expiry, price filters)
+1. **News scan loop** (every 10 min) fetches breaking news from Google News RSS, CBS Sports, CoinDesk, CoinTelegraph, Reuters/AP/BBC, and 15+ other feeds
+2. Matches news to eligible markets by keyword relevance and embedding similarity (volume, expiry, price filters)
 3. **XGBoost ensemble** scores all eligible markets on 15+ features (price momentum, volatility, volume trends, order book depth, time to expiry)
 4. **Bayesian anchoring**: model predictions are anchored to market price as prior, with the model's likelihood ratio dampened by confidence (`LR^confidence`) — prevents overconfident predictions
 5. Top candidates enriched with order book and price history data
@@ -54,7 +60,7 @@ scripts/
 
 ### WebSocket Alerts
 
-A parallel WebSocket connection monitors real-time price movements. Significant moves trigger instant reassessment through the XGBoost model, enabling faster reaction than the 10-minute scan cycle.
+A parallel WebSocket connection monitors real-time price movements on eligible markets. Significant moves (3%+) trigger instant reassessment through the XGBoost model, enabling faster reaction than the 10-minute scan cycle. Open bet price alerts use a higher threshold (5%+ with 1h cooldown) to reduce noise.
 
 ### Continuous Learning
 
@@ -67,9 +73,10 @@ As more bets resolve, the model sees more of its own data and improves predictio
 ### Risk Management
 
 - **Stop-loss** (default disabled): exits positions when unrealized loss exceeds threshold
-- **Expiry exit** (default disabled): exits underwater positions (≥10% loss) approaching expiry
+- **Expiry exit** (default disabled): exits underwater positions approaching expiry (guarded: 0 = off)
 - **Terminal risk scaling**: reduces position size as market approaches expiry (`sqrt(days/14)`)
 - **Per-strategy bankrolls**: each strategy has independent bankroll isolation
+- **Graceful shutdown**: handles SIGTERM/SIGINT, sends Telegram notification before exit
 
 ### Housekeeping Loop
 
@@ -81,21 +88,34 @@ Three strategies run simultaneously, each with independent bankrolls (default �
 
 | Strategy | Kelly | Min Edge | Min Confidence | Max Signals/Day |
 |---|---|---|---|---|
-| **Aggressive** 🔥 | 50% | 5% | 40% | 10 |
-| **Balanced** ⚖️ | 25% | 6% | 40% | 5 |
-| **Conservative** 🛡️ | 15% | 8% | 50% | 3 |
+| **Aggressive** | 50% | 5% | 40% | 10 |
+| **Balanced** | 25% | 6% | 40% | 5 |
+| **Conservative** | 15% | 8% | 50% | 3 |
 
 XGBoost signals get relaxed thresholds (50% lower edge gate, 30% lower confidence gate) since the model has demonstrated calibration.
 
-## Telegram Commands
+## Telegram
+
+### Commands
 
 | Command | Description |
 |---|---|
 | `/stats` | Portfolio statistics with per-strategy breakdown |
-| `/open` | Open positions with side, PnL, edge, links |
-| `/brier` | Model accuracy (Brier score vs market baseline) |
+| `/open` | Open positions with live prices, PnL, Polymarket links |
+| `/brier` | Model accuracy per source (Brier score vs market baseline) |
 | `/health` | Bot uptime, scan counts, signals found |
 | `/help` | List commands |
+
+### Notifications
+
+- **New bet**: strategy, side, stake, edge, confidence, reasoning
+- **Bet resolved**: outcome, PnL, per-strategy record + random victory GIF on ~30% of wins
+- **Price moves**: alerts on 5%+ moves on open bets (1h cooldown per market)
+- **WS-triggered bets**: real-time bets from WebSocket price alerts
+- **Heartbeat**: hourly summary with open bets, scan stats, strategy performance
+- **Daily report**: full portfolio breakdown with Brier score
+
+Subscribers receive all broadcasts. Shutdown notifications go to owner only.
 
 ## Setup
 
@@ -114,7 +134,7 @@ Starts 4 services:
 - **postgres**: data persistence
 - **trainer**: continuous model retraining (every 24h)
 - **model-server**: HTTP sidecar serving ensemble predictions
-- **bot**: main Rust application (~3.5 MB binary)
+- **bot**: pre-built Rust binary from GHCR (`ghcr.io/skharchikov/polymarket-bot:latest`)
 
 ### Local Development
 
@@ -141,14 +161,14 @@ All settings via environment variables with sensible defaults:
 |---|---|---|
 | `DATABASE_URL` | *required* | Postgres connection string |
 | `TELEGRAM_BOT_TOKEN` | *required* | Telegram bot token |
-| `TELEGRAM_CHAT_ID` | *required* | Telegram chat ID |
+| `TELEGRAM_CHAT_ID` | *required* | Telegram chat ID (owner) |
 | `OPENAI_API_KEY` | *required* | OpenAI API key (LLM fallback) |
 | `MODEL_SIDECAR_URL` | `` | ML model server URL (auto in Docker) |
 | `LLM_MODEL` | `gpt-4o` | LLM model for news assessment fallback |
 | `STRATEGIES` | `aggressive,balanced,conservative` | Active strategy profiles |
 | `STRATEGY_BANKROLL` | `300.0` | Starting bankroll per strategy (EUR) |
 | `STRATEGY_MAX_SIGNALS` | `` | Per-strategy daily caps (e.g. `aggressive:10,balanced:5`) |
-| `STOP_LOSS_PCT` | `1.0` | Stop-loss threshold (1.0 = disabled) |
+| `STOP_LOSS_PCT` | `999.0` | Stop-loss threshold (999.0 = disabled) |
 | `EXIT_DAYS_BEFORE_EXPIRY` | `0` | Exit underwater positions N days before expiry (0 = disabled) |
 | `CONSENSUS_AGENTS` | `2` | Number of LLM agents for fallback (1-3) |
 | `SCAN_INTERVAL_MINS` | `30` | Housekeeping loop interval |
@@ -165,23 +185,18 @@ All settings via environment variables with sensible defaults:
 
 ## Prediction Tracking
 
-Every prediction is logged to a `prediction_log` table with market price, model posterior, confidence, and edge. When markets resolve, Brier scores are computed:
+Every prediction is logged to a `prediction_log` table with market price, model posterior, confidence, and edge. When markets resolve, Brier scores are computed per source (XGBoost vs LLM):
 
 - **Model Brier** vs **Market Brier** shows whether the model adds value over just using market prices
 - **Skill metric**: `1 - (model_brier / market_brier)` — positive means the model outperforms the market
 
-## Docker Image
-
-Built with Alpine musl for a static binary, compressed with UPX:
-
-- `strip = true`, `lto = true`, `codegen-units = 1`
-- mimalloc allocator (musl's malloc is slow)
-- Runs as unprivileged user (UID 10001)
-
 ## CI/CD
 
-GitHub Actions:
+GitHub Actions with GHCR-based deployment:
 
-- **CI** (on push/PR): `cargo fmt --check`, `cargo clippy`, `cargo build --release`, `cargo test`
-- **Release** (manual `workflow_dispatch`): pick patch/minor/major → bumps version, tags, creates GitHub release → auto-deploys to Hetzner
-- **Deploy**: runs automatically after release, or manually via `workflow_dispatch`
+- **CI** (on push/PR): `cargo fmt --check` → `cargo clippy` → `cargo test` in a single job
+- **Docker** (on main push): builds musl release binary → pushes to `ghcr.io/skharchikov/polymarket-bot`
+- **Release** (manual `workflow_dispatch`): bumps version, tags, creates GitHub release → triggers deploy
+- **Deploy** (after release or manual): pulls image from GHCR, restarts services on Hetzner via SSH
+
+The bot image is built once in CI (not on the server), cutting deploy time significantly.
