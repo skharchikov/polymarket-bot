@@ -24,21 +24,22 @@ impl TelegramNotifier {
         self.send_to(&self.chat_id, message).await
     }
 
-    /// Send to owner + all subscribers (deduped). Logs usernames.
+    /// Send to owner + all subscribers (deduped).
     pub async fn broadcast(&self, subscribers: &[(String, Option<String>)], message: &str) {
+        let recipients = 1 + subscribers
+            .iter()
+            .filter(|(id, _)| id != &self.chat_id)
+            .count();
         let _ = self.send(message).await;
-        tracing::info!(chat_id = %self.chat_id, "Sent to owner");
         for (id, username) in subscribers {
             if id != &self.chat_id {
                 let label = username.as_deref().unwrap_or("unknown");
-                match self.send_to(id, message).await {
-                    Ok(()) => tracing::info!(chat_id = %id, username = label, "Sent to subscriber"),
-                    Err(e) => {
-                        tracing::warn!(chat_id = %id, username = label, err = %e, "Failed to send to subscriber")
-                    }
+                if let Err(e) = self.send_to(id, message).await {
+                    tracing::warn!(chat_id = %id, username = label, err = %e, "Failed to send to subscriber");
                 }
             }
         }
+        tracing::debug!(recipients = recipients, "Broadcast complete");
     }
 
     pub async fn send_to(&self, chat_id: &str, message: &str) -> Result<()> {
@@ -79,7 +80,8 @@ impl TelegramNotifier {
             anyhow::bail!("Telegram API error: {body}");
         }
 
-        tracing::info!("Telegram signal sent");
+        let preview = message.chars().take(60).collect::<String>();
+        tracing::info!(chat_id = chat_id, len = message.len(), preview = %preview, "Telegram message sent");
         Ok(())
     }
 

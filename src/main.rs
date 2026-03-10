@@ -262,7 +262,10 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             .expect("failed to init scanner"),
     );
 
-    let strategies = Arc::new(StrategyProfile::from_config(&cfg.strategies));
+    let strategies = Arc::new(StrategyProfile::from_config(
+        &cfg.strategies,
+        &cfg.strategy_max_signals,
+    ));
     portfolio
         .init_strategy_bankrolls(&strategies, cfg.strategy_bankroll)
         .await?;
@@ -842,16 +845,24 @@ async fn housekeeping_cycle(
                     } else {
                         0.0
                     };
+                    let strat_label = strategy::strategy_label(&r.strategy);
+                    let src_icon = strategy::source_icon(&r.source);
+                    let side_emoji = match r.side {
+                        BetSide::Yes => "🟢 YES",
+                        BetSide::No => "🔴 NO",
+                    };
                     let msg = format!(
-                        "{emoji} *Bet {result_label}*\n\n\
+                        "{emoji} *Bet {result_label}* ({strat_label} {strat})\n\n\
                          📋 _{question}_\n\
-                         🎲 Side: *{side}* @ `{price:.1}¢`\n\
-                         📈 Edge: `+{edge:.1}%` | Confidence: `{conf:.0}%`\n\
+                         🎲 Side: *{side}* — {shares:.1} shares @ `{price:.1}¢`\n\
+                         {src_icon} Edge: `+{edge:.1}%` | Conf: `{conf:.0}%`\n\
                          💵 Stake: `€{cost:.2}` → PnL: `€{pnl:+.2}` ({roi:+.0}%)\n\n\
-                         💰 Bankroll: `€{bankroll:.2}`\n\
+                         💰 Strategy bankroll: `€{bankroll:.2}`\n\
                          📊 Record: {wins}W / {losses}L | Total PnL: `€{total_pnl:+.2}`",
+                        strat = r.strategy,
                         question = r.question,
-                        side = r.side,
+                        side = side_emoji,
+                        shares = r.shares,
                         price = r.entry_price * 100.0,
                         edge = r.edge * 100.0,
                         conf = r.confidence * 100.0,
@@ -865,6 +876,8 @@ async fn housekeeping_cycle(
                     broadcast(notifier, portfolio, &msg).await;
                     tracing::info!(
                         market = %market_id,
+                        strategy = %r.strategy,
+                        source = %r.source,
                         result = result_label,
                         pnl = format_args!("€{:+.2}", r.pnl),
                         bankroll = format_args!("€{:.2}", r.bankroll),
@@ -959,16 +972,23 @@ async fn housekeeping_cycle(
             if let Some(reason) = exit_reason {
                 match portfolio.early_exit(bet.id, current, &reason).await {
                     Ok(Some(r)) => {
+                        let strat_label = strategy::strategy_label(&r.strategy);
+                        let side_emoji = match r.side {
+                            BetSide::Yes => "🟢 YES",
+                            BetSide::No => "🔴 NO",
+                        };
                         let msg = format!(
-                            "\u{1f6a8} *Early Exit*\n\n\
-                             \u{1f4cb} _{question}_\n\
-                             \u{1f3b2} Side: *{side}* @ `{entry:.1}\u{00a2}` \u{2192} `{now:.1}\u{00a2}`\n\
-                             \u{1f4a1} Reason: {reason}\n\
-                             \u{1f4b5} PnL: `\u{20ac}{pnl:+.2}`\n\n\
-                             \u{1f4b0} Bankroll: `\u{20ac}{bankroll:.2}`\n\
-                             \u{1f4ca} Record: {wins}W / {losses}L | Total PnL: `\u{20ac}{total_pnl:+.2}`",
+                            "🚨 *Early Exit* ({strat_label} {strat})\n\n\
+                             📋 _{question}_\n\
+                             🎲 Side: *{side}* — {shares:.1} shares @ `{entry:.1}¢` → `{now:.1}¢`\n\
+                             💡 Reason: {reason}\n\
+                             💵 PnL: `€{pnl:+.2}`\n\n\
+                             💰 Strategy bankroll: `€{bankroll:.2}`\n\
+                             📊 Record: {wins}W / {losses}L | Total PnL: `€{total_pnl:+.2}`",
+                            strat = r.strategy,
                             question = r.question,
-                            side = r.side,
+                            side = side_emoji,
+                            shares = r.shares,
                             entry = r.entry_price * 100.0,
                             now = current * 100.0,
                             pnl = r.pnl,
@@ -980,6 +1000,7 @@ async fn housekeeping_cycle(
                         broadcast(notifier, portfolio, &msg).await;
                         tracing::info!(
                             market = %bet.question,
+                            strategy = %r.strategy,
                             reason = %reason,
                             pnl = format_args!("€{:+.2}", r.pnl),
                             "Early exit executed"

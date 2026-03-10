@@ -52,7 +52,9 @@ impl StrategyProfile {
     }
 
     /// Parse active strategies from comma-separated string.
-    pub fn from_config(strategies_str: &str) -> Vec<Self> {
+    /// `max_signals_str` optionally overrides max_signals_per_day per strategy
+    /// (format: "aggressive:10,balanced:5,conservative:3").
+    pub fn from_config(strategies_str: &str, max_signals_str: &str) -> Vec<Self> {
         let mut profiles = Vec::new();
         for name in strategies_str.split(',').map(|s| s.trim().to_lowercase()) {
             match name.as_str() {
@@ -67,6 +69,20 @@ impl StrategyProfile {
         if profiles.is_empty() {
             tracing::warn!("No valid strategies configured, defaulting to all three");
             profiles = vec![Self::aggressive(), Self::balanced(), Self::conservative()];
+        }
+
+        // Apply per-strategy max signals overrides
+        if !max_signals_str.is_empty() {
+            for pair in max_signals_str.split(',').map(|s| s.trim()) {
+                if let Some((name, val)) = pair.split_once(':') {
+                    let name = name.trim().to_lowercase();
+                    if let Ok(max) = val.trim().parse::<usize>()
+                        && let Some(p) = profiles.iter_mut().find(|p| p.name == name)
+                    {
+                        p.max_signals_per_day = max;
+                    }
+                }
+            }
         }
 
         profiles
@@ -112,12 +128,26 @@ impl StrategyProfile {
     }
 
     pub fn label(&self) -> &str {
-        match self.name.as_str() {
-            "aggressive" => "🔥",
-            "balanced" => "⚖️",
-            "conservative" => "🛡️",
-            _ => "📊",
-        }
+        strategy_label(&self.name)
+    }
+}
+
+/// Get emoji label for a strategy name (usable without a full StrategyProfile).
+pub fn strategy_label(name: &str) -> &'static str {
+    match name {
+        "aggressive" => "🔥",
+        "balanced" => "⚖️",
+        "conservative" => "🛡️",
+        _ => "📊",
+    }
+}
+
+/// Get emoji icon for a signal source name.
+pub fn source_icon(source: &str) -> &'static str {
+    match source {
+        "xgboost" => "🤖",
+        "llm_consensus" => "🧠",
+        _ => "📊",
     }
 }
 
@@ -196,7 +226,7 @@ mod tests {
 
     #[test]
     fn test_from_config_parses() {
-        let profiles = StrategyProfile::from_config("aggressive, conservative");
+        let profiles = StrategyProfile::from_config("aggressive, conservative", "");
         assert_eq!(profiles.len(), 2);
         assert_eq!(profiles[0].name, "aggressive");
         assert_eq!(profiles[1].name, "conservative");
@@ -204,20 +234,20 @@ mod tests {
 
     #[test]
     fn test_from_config_unknown_fallback() {
-        let profiles = StrategyProfile::from_config("invalid");
+        let profiles = StrategyProfile::from_config("invalid", "");
         assert_eq!(profiles.len(), 3); // falls back to all three
     }
 
     #[test]
     fn test_from_config_single_strategy() {
-        let profiles = StrategyProfile::from_config("balanced");
+        let profiles = StrategyProfile::from_config("balanced", "");
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].name, "balanced");
     }
 
     #[test]
     fn test_from_config_trims_whitespace() {
-        let profiles = StrategyProfile::from_config("  Aggressive , BALANCED  ");
+        let profiles = StrategyProfile::from_config("  Aggressive , BALANCED  ", "");
         assert_eq!(profiles.len(), 2);
         assert_eq!(profiles[0].name, "aggressive");
         assert_eq!(profiles[1].name, "balanced");
@@ -256,5 +286,20 @@ mod tests {
         assert_eq!(StrategyProfile::aggressive().label(), "🔥");
         assert_eq!(StrategyProfile::balanced().label(), "⚖️");
         assert_eq!(StrategyProfile::conservative().label(), "🛡️");
+    }
+
+    #[test]
+    fn test_max_signals_override() {
+        let profiles =
+            StrategyProfile::from_config("aggressive,balanced", "aggressive:20,balanced:8");
+        assert_eq!(profiles[0].max_signals_per_day, 20);
+        assert_eq!(profiles[1].max_signals_per_day, 8);
+    }
+
+    #[test]
+    fn test_max_signals_partial_override() {
+        let profiles = StrategyProfile::from_config("aggressive,balanced", "balanced:12");
+        assert_eq!(profiles[0].max_signals_per_day, 10); // default
+        assert_eq!(profiles[1].max_signals_per_day, 12); // overridden
     }
 }

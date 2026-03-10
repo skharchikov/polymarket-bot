@@ -99,6 +99,10 @@ pub struct AppConfig {
     #[config(env = "STRATEGIES", default = "aggressive,balanced,conservative")]
     pub strategies: String,
 
+    /// Per-strategy max signals/day (e.g. "aggressive:10,balanced:5,conservative:3").
+    #[config(env = "STRATEGY_MAX_SIGNALS", default = "")]
+    pub strategy_max_signals: String,
+
     // --- Early exit ---
     /// Stop-loss: exit if unrealized loss exceeds this fraction of cost.
     /// Set to 1.0 to disable (let all bets run to resolution for Brier data).

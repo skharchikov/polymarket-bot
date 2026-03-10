@@ -7,12 +7,14 @@ use crate::scanner::live::RejectedSignal;
 use super::portfolio::{Bet, BetContext, BetSide, NewBet};
 
 /// Returned from resolve_bet with all context needed for a rich Telegram message.
+#[allow(dead_code)]
 pub struct ResolvedBet {
     pub question: String,
     pub side: BetSide,
     pub won: bool,
     pub entry_price: f64,
     pub cost: f64,
+    pub shares: f64,
     pub edge: f64,
     pub confidence: f64,
     pub pnl: f64,
@@ -20,6 +22,9 @@ pub struct ResolvedBet {
     pub total_wins: usize,
     pub total_losses: usize,
     pub total_pnl: f64,
+    pub strategy: String,
+    pub source: String,
+    pub market_id: String,
 }
 
 /// Postgres-backed portfolio state.
@@ -749,11 +754,12 @@ impl PgPortfolio {
             edge: f64,
             confidence: f64,
             strategy: String,
+            source: String,
         }
 
         let row: Option<OpenBetRow> = sqlx::query_as(
-            "SELECT id, side, shares, cost, fee_paid, question, entry_price, edge, confidence, strategy \
-             FROM bets WHERE market_id = $1 AND resolved = false LIMIT 1",
+            "SELECT id, side, shares, cost, fee_paid, question, entry_price, edge, confidence, \
+             strategy, source FROM bets WHERE market_id = $1 AND resolved = false LIMIT 1",
         )
         .bind(market_id)
         .fetch_optional(&self.pool)
@@ -773,6 +779,7 @@ impl PgPortfolio {
             edge,
             confidence,
             strategy,
+            source,
         ) = (
             r.id,
             r.side,
@@ -784,6 +791,7 @@ impl PgPortfolio {
             r.edge,
             r.confidence,
             r.strategy,
+            r.source,
         );
 
         let side = if side_str == "Yes" {
@@ -835,6 +843,7 @@ impl PgPortfolio {
             won: bet_won,
             entry_price,
             cost,
+            shares,
             edge,
             confidence,
             pnl,
@@ -842,6 +851,9 @@ impl PgPortfolio {
             total_wins: wins,
             total_losses: losses,
             total_pnl,
+            strategy,
+            source,
+            market_id: market_id.to_string(),
         }))
     }
 
@@ -856,6 +868,7 @@ impl PgPortfolio {
         #[derive(sqlx::FromRow)]
         struct OpenBetRow {
             id: i32,
+            market_id: String,
             side: String,
             shares: f64,
             cost: f64,
@@ -865,11 +878,12 @@ impl PgPortfolio {
             edge: f64,
             confidence: f64,
             strategy: String,
+            source: String,
         }
 
         let row: Option<OpenBetRow> = sqlx::query_as(
-            "SELECT id, side, shares, cost, fee_paid, question, entry_price, edge, confidence, strategy \
-             FROM bets WHERE id = $1 AND resolved = false LIMIT 1",
+            "SELECT id, market_id, side, shares, cost, fee_paid, question, entry_price, edge, \
+             confidence, strategy, source FROM bets WHERE id = $1 AND resolved = false LIMIT 1",
         )
         .bind(bet_id)
         .fetch_optional(&self.pool)
@@ -927,6 +941,7 @@ impl PgPortfolio {
             won: false,
             entry_price: r.entry_price,
             cost: r.cost,
+            shares: r.shares,
             edge: r.edge,
             confidence: r.confidence,
             pnl,
@@ -934,6 +949,9 @@ impl PgPortfolio {
             total_wins: wins,
             total_losses: losses,
             total_pnl,
+            strategy: r.strategy,
+            source: r.source,
+            market_id: r.market_id,
         }))
     }
 
