@@ -1,4 +1,5 @@
 target/
+!target/x86_64-unknown-linux-musl/release/polymarket-bot
 .env
 portfolio_state.json
 .git/
