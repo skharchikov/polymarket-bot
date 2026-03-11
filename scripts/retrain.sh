@@ -30,10 +30,10 @@ retrain_if_stale() {
     ls -lh /model/xgb_model.* /model/ensemble.joblib /model/scaler.joblib 2>/dev/null || true
 
     # Tell the sidecar to reload the new model
-    if command -v curl >/dev/null 2>&1; then
-        echo "Reloading model server..."
-        curl -sf -X POST http://model-server:8000/reload && echo " OK" || echo " (sidecar not reachable)"
-    fi
+    echo "Reloading model server..."
+    python -c "import urllib.request; r = urllib.request.urlopen(urllib.request.Request('http://model-server:8000/reload', method='POST')); print(r.read().decode())" \
+        && echo "Reload OK" \
+        || echo "Reload failed (sidecar not reachable)"
 }
 
 # Initial training (always run)
