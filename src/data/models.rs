@@ -169,4 +169,32 @@ impl GammaMarket {
         let q = self.question.to_lowercase();
         q.contains("up or down")
     }
+
+    /// Extract the YES outcome price from `outcomePrices` / `outcome_prices`.
+    pub fn yes_price(&self) -> Option<f64> {
+        let s = self.outcome_prices.as_ref()?;
+        let p: Vec<String> = serde_json::from_str(s).ok()?;
+        p.first().and_then(|v| v.parse::<f64>().ok())
+    }
+}
+
+const GAMMA_API: &str = "https://gamma-api.polymarket.com";
+
+/// Fetch current YES prices for a batch of market IDs concurrently.
+///
+/// Returns a `Vec<Option<f64>>` aligned with the input slice.
+pub async fn fetch_yes_prices(http: &reqwest::Client, market_ids: &[&str]) -> Vec<Option<f64>> {
+    let futs: Vec<_> = market_ids
+        .iter()
+        .map(|id| {
+            let url = format!("{GAMMA_API}/markets/{id}");
+            async move {
+                let resp = http.get(&url).send().await.ok()?;
+                let text = resp.text().await.ok()?;
+                let market: GammaMarket = serde_json::from_str(&text).ok()?;
+                market.yes_price()
+            }
+        })
+        .collect();
+    futures_util::future::join_all(futs).await
 }

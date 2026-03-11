@@ -342,6 +342,7 @@ impl PgPortfolio {
     /// Build a summary of open bets for /open command.
     #[tracing::instrument(skip(self))]
     pub async fn open_bets_summary(&self) -> Result<String> {
+        use crate::data::models::fetch_yes_prices;
         use crate::format::{self, OpenBetView};
 
         let http = reqwest::Client::builder()
@@ -352,56 +353,8 @@ impl PgPortfolio {
             return Ok("📭 No open bets".to_string());
         }
 
-        // Fetch all prices concurrently
-        let price_futures: Vec<_> = open
-            .iter()
-            .map(|bet| {
-                let http = &http;
-                let market_id = &bet.market_id;
-                async move {
-                    let url = format!("https://gamma-api.polymarket.com/markets/{market_id}");
-                    let resp = http.get(&url).send().await;
-                    let text = match resp {
-                        Ok(r) => match r.text().await {
-                            Ok(t) => t,
-                            Err(e) => {
-                                tracing::warn!(market_id, err = %e, "Gamma API body read failed");
-                                return None;
-                            }
-                        },
-                        Err(e) => {
-                            tracing::warn!(market_id, err = %e, "Gamma API request failed");
-                            return None;
-                        }
-                    };
-                    let v: serde_json::Value = match serde_json::from_str(&text) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::warn!(
-                                market_id,
-                                err = %e,
-                                body = &text[..200.min(text.len())],
-                                "Gamma API parse failed"
-                            );
-                            return None;
-                        }
-                    };
-                    let prices_str = v["outcomePrices"].as_str();
-                    let price = prices_str
-                        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
-                        .and_then(|p| p.first()?.parse::<f64>().ok());
-                    if price.is_none() {
-                        tracing::warn!(
-                            market_id,
-                            outcome_prices = ?prices_str,
-                            "Gamma API: missing or unparseable outcomePrices"
-                        );
-                    }
-                    price
-                }
-            })
-            .collect();
-        let prices = futures_util::future::join_all(price_futures).await;
+        let ids: Vec<&str> = open.iter().map(|b| b.market_id.as_str()).collect();
+        let prices = fetch_yes_prices(&http, &ids).await;
 
         let views: Vec<OpenBetView> = open
             .iter()
@@ -425,6 +378,7 @@ impl PgPortfolio {
 
     /// Fetch live unrealized PnL and exposure for open bets.
     async fn live_unrealized(&self) -> (f64, f64) {
+        use crate::data::models::fetch_yes_prices;
         use crate::storage::portfolio::BetSide;
 
         let open = match self.open_bets().await {
@@ -443,24 +397,8 @@ impl PgPortfolio {
             Err(_) => return (0.0, 0.0),
         };
 
-        let price_futures: Vec<_> = open
-            .iter()
-            .map(|bet| {
-                let http = &http;
-                let market_id = &bet.market_id;
-                async move {
-                    let url = format!("https://gamma-api.polymarket.com/markets/{market_id}");
-                    let resp = http.get(&url).send().await.ok()?;
-                    let text = resp.text().await.ok()?;
-                    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-                    v["outcomePrices"]
-                        .as_str()
-                        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
-                        .and_then(|p| p.first()?.parse::<f64>().ok())
-                }
-            })
-            .collect();
-        let prices = futures_util::future::join_all(price_futures).await;
+        let ids: Vec<&str> = open.iter().map(|b| b.market_id.as_str()).collect();
+        let prices = fetch_yes_prices(&http, &ids).await;
 
         let mut unrealized = 0.0_f64;
         let mut exposure = 0.0_f64;

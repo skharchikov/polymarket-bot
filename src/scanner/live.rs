@@ -506,9 +506,7 @@ impl LiveScanner {
     }
 
     fn get_yes_price(gm: &GammaMarket) -> Option<f64> {
-        let s = gm.outcome_prices.as_ref()?;
-        let p: Vec<String> = serde_json::from_str(s).ok()?;
-        p.first().and_then(|s| s.parse::<f64>().ok())
+        gm.yes_price()
     }
 
     /// Log an LLM estimate to the database for calibration tracking.
