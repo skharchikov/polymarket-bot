@@ -69,6 +69,10 @@ pub struct AppConfig {
     #[config(env = "HEARTBEAT_INTERVAL_MINS", default = 60)]
     pub heartbeat_interval_mins: u64,
 
+    /// Expected model retrain interval in hours (matches RETRAIN_MAX_AGE_HOURS).
+    #[config(env = "RETRAIN_INTERVAL_HOURS", default = 24)]
+    pub retrain_interval_hours: u64,
+
     // --- Multi-agent consensus ---
     /// Number of LLM agents for consensus (1=single, 2-3=multi-agent).
     #[config(env = "CONSENSUS_AGENTS", default = 2)]

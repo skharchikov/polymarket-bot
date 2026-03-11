@@ -655,29 +655,41 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         }
     });
 
-    // Spawn model retrain monitor — detects when the sidecar reloads a new model
+    // Spawn model retrain monitor — checks sidecar after expected retrain window
     let mr_scanner = Arc::clone(&scanner);
     let mr_notifier = Arc::clone(&notifier);
+    let retrain_interval = Duration::from_secs(cfg.retrain_interval_hours * 3600);
     let model_monitor = tokio::spawn(async move {
-        let mut last_age: Option<f64> = None;
-        // Wait for sidecar to be ready
+        // Get initial model age to know when next retrain is due
         tokio::time::sleep(Duration::from_secs(60)).await;
+        let mut last_age = mr_scanner.model_age_secs().await.unwrap_or(0.0);
+
         loop {
+            // Sleep until the model should have been retrained
+            let time_until_retrain =
+                retrain_interval.saturating_sub(Duration::from_secs_f64(last_age));
+            // Check 5 min after expected retrain
+            tokio::time::sleep(time_until_retrain + Duration::from_secs(300)).await;
+
             if let Some(age) = mr_scanner.model_age_secs().await {
-                if let Some(prev) = last_age {
-                    // Model age jumped backwards → retrain happened
-                    if age < prev - 60.0 {
-                        let h = (age / 3600.0) as u64;
-                        let m = ((age % 3600.0) / 60.0) as u64;
-                        let _ = mr_notifier
-                            .send(&format!("🧠 *Model retrained* (age: {h}h {m}m)"))
-                            .await;
-                        tracing::info!(age_secs = age, "Model retrain detected");
-                    }
+                if age < last_age {
+                    let h = (age / 3600.0) as u64;
+                    let m = ((age % 3600.0) / 60.0) as u64;
+                    let _ = mr_notifier
+                        .send(&format!("🧠 *Model retrained* (age: {h}h {m}m)"))
+                        .await;
+                    tracing::info!(age_secs = age, "Model retrain detected");
+                } else {
+                    let _ = mr_notifier
+                        .send("⚠️ *Model retrain overdue* — sidecar may have failed")
+                        .await;
+                    tracing::warn!(age_secs = age, "Model retrain overdue");
                 }
-                last_age = Some(age);
+                last_age = age;
+            } else {
+                let _ = mr_notifier.send("⚠️ *Model sidecar unreachable*").await;
+                last_age = 0.0;
             }
-            tokio::time::sleep(Duration::from_secs(30 * 60)).await;
         }
     });
 
