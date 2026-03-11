@@ -668,8 +668,8 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             // Sleep until the model should have been retrained
             let time_until_retrain =
                 retrain_interval.saturating_sub(Duration::from_secs_f64(last_age));
-            // Check 5 min after expected retrain
-            tokio::time::sleep(time_until_retrain + Duration::from_secs(300)).await;
+            // Check 20 min after expected retrain
+            tokio::time::sleep(time_until_retrain + Duration::from_secs(20 * 60)).await;
 
             if let Some(age) = mr_scanner.model_age_secs().await {
                 if age < last_age {
