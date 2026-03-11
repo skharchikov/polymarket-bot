@@ -316,9 +316,12 @@ impl PgPortfolio {
             format!("\n\n📡 *By Source*\n{}", source_lines.join("\n"))
         };
 
-        // Unrealized PnL (cached from housekeeping)
-        let unrealized = self.get_f64("unrealized_pnl").await.unwrap_or(0.0);
-        let exposure = self.get_f64("open_exposure").await.unwrap_or(0.0);
+        // Fetch live unrealized PnL from current market prices
+        let (unrealized, exposure) = if total_open > 0 {
+            self.live_unrealized().await
+        } else {
+            (0.0, 0.0)
+        };
         let unrealized_section = if total_open > 0 {
             format!("\n📈 Unrealized: `€{unrealized:+.2}` (€{exposure:.2} deployed)\n")
         } else {
@@ -418,6 +421,60 @@ impl PgPortfolio {
             .collect();
 
         Ok(format::format_open_bets(&views, false))
+    }
+
+    /// Fetch live unrealized PnL and exposure for open bets.
+    async fn live_unrealized(&self) -> (f64, f64) {
+        use crate::storage::portfolio::BetSide;
+
+        let open = match self.open_bets().await {
+            Ok(b) => b,
+            Err(_) => return (0.0, 0.0),
+        };
+        if open.is_empty() {
+            return (0.0, 0.0);
+        }
+
+        let http = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return (0.0, 0.0),
+        };
+
+        let price_futures: Vec<_> = open
+            .iter()
+            .map(|bet| {
+                let http = &http;
+                let market_id = &bet.market_id;
+                async move {
+                    let url = format!("https://gamma-api.polymarket.com/markets/{market_id}");
+                    let resp = http.get(&url).send().await.ok()?;
+                    let text = resp.text().await.ok()?;
+                    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+                    v["outcomePrices"]
+                        .as_str()
+                        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                        .and_then(|p| p.first()?.parse::<f64>().ok())
+                }
+            })
+            .collect();
+        let prices = futures_util::future::join_all(price_futures).await;
+
+        let mut unrealized = 0.0_f64;
+        let mut exposure = 0.0_f64;
+        for (bet, yes_price) in open.iter().zip(prices) {
+            exposure += bet.cost;
+            if let Some(yp) = yes_price {
+                let cur = match bet.side {
+                    BetSide::Yes => yp,
+                    BetSide::No => 1.0 - yp,
+                };
+                unrealized += bet.shares * cur - bet.cost;
+            }
+        }
+        (unrealized, exposure)
     }
 
     /// Build a model accuracy summary for /brier command.
