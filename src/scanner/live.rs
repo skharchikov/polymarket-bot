@@ -306,6 +306,12 @@ impl LiveScanner {
         self.sidecar.is_some()
     }
 
+    /// Get model age in seconds from the sidecar health endpoint.
+    pub async fn model_age_secs(&self) -> Option<f64> {
+        let sidecar = self.sidecar.as_ref()?;
+        sidecar.health().await?.model_age_secs
+    }
+
     /// Get prediction from the ML sidecar.
     async fn predict(&self, features: &[f64], market_price: f64) -> Option<(f64, f64)> {
         let sidecar = self.sidecar.as_ref()?;

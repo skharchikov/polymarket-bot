@@ -488,6 +488,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     let cmd_portfolio = Arc::clone(&portfolio);
     let cmd_notifier = Arc::clone(&notifier);
     let cmd_stats = Arc::clone(&stats);
+    let cmd_scanner = Arc::clone(&scanner);
     let cmd_start = std::time::Instant::now();
     let command_loop = tokio::spawn(async move {
         loop {
@@ -544,13 +545,21 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                         let mkts = cmd_stats.markets_scanned.load(Ordering::Relaxed);
                         let sigs = cmd_stats.signals_found.load(Ordering::Relaxed);
                         let news = cmd_stats.news_new.load(Ordering::Relaxed);
+                        let model_line = match cmd_scanner.model_age_secs().await {
+                            Some(age) => {
+                                let h = (age / 3600.0) as u64;
+                                let m = ((age % 3600.0) / 60.0) as u64;
+                                format!("\n🧠 Model age: {h}h {m}m")
+                            }
+                            None => "\n🧠 Model: unavailable".to_string(),
+                        };
                         format!(
                             "🏥 *Bot Health*\n\n\
                              ⏱ Uptime: {hours}h {mins}m\n\
                              🔄 Scans completed: {scans}\n\
                              🔍 Markets scanned: {mkts}\n\
                              📡 Signals found: {sigs}\n\
-                             📰 News processed: {news}",
+                             📰 News processed: {news}{model_line}",
                         )
                     }
                     "help" => "📖 *Commands*\n\n\
@@ -643,6 +652,32 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                 }
             }
             tokio::time::sleep(Duration::from_secs(30 * 60)).await;
+        }
+    });
+
+    // Spawn model retrain monitor — detects when the sidecar reloads a new model
+    let mr_scanner = Arc::clone(&scanner);
+    let mr_notifier = Arc::clone(&notifier);
+    let model_monitor = tokio::spawn(async move {
+        let mut last_age: Option<f64> = None;
+        // Wait for sidecar to be ready
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        loop {
+            if let Some(age) = mr_scanner.model_age_secs().await {
+                if let Some(prev) = last_age {
+                    // Model age jumped backwards → retrain happened
+                    if age < prev - 60.0 {
+                        let h = (age / 3600.0) as u64;
+                        let m = ((age % 3600.0) / 60.0) as u64;
+                        let _ = mr_notifier
+                            .send(&format!("🧠 *Model retrained* (age: {h}h {m}m)"))
+                            .await;
+                        tracing::info!(age_secs = age, "Model retrain detected");
+                    }
+                }
+                last_age = Some(age);
+            }
+            tokio::time::sleep(Duration::from_secs(5 * 60)).await;
         }
     });
 
@@ -887,6 +922,9 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         }
         r = alert_loop => {
             tracing::error!("Alert processing loop exited: {:?}", r);
+        }
+        r = model_monitor => {
+            tracing::error!("Model monitor loop exited: {:?}", r);
         }
     }
 

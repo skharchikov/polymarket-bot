@@ -38,8 +38,9 @@ struct BatchResponse {
 }
 
 #[derive(Deserialize)]
-struct HealthResponse {
-    model_loaded: bool,
+pub struct HealthResponse {
+    pub model_loaded: bool,
+    pub model_age_secs: Option<f64>,
 }
 
 impl SidecarClient {
@@ -56,15 +57,21 @@ impl SidecarClient {
 
     /// Check if the sidecar is up and has a model loaded.
     pub async fn is_healthy(&self) -> bool {
-        match self
+        self.health().await.is_some_and(|h| h.model_loaded)
+    }
+
+    /// Get detailed health info from the sidecar.
+    pub async fn health(&self) -> Option<HealthResponse> {
+        let resp = self
             .client
             .get(format!("{}/health", self.base_url))
             .send()
             .await
-        {
-            Ok(resp) => resp.status().is_success(),
-            Err(_) => false,
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
         }
+        resp.json::<HealthResponse>().await.ok()
     }
 
     /// Get prediction from the full ensemble, with retries.

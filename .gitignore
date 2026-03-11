@@ -2,7 +2,7 @@
 .env
 .venv
 portfolio_state.json
-model/
+/model/
 __pycache__/
 *.pyc
 CHANGELOG.gen
