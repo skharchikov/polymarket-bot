@@ -677,7 +677,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                 }
                 last_age = Some(age);
             }
-            tokio::time::sleep(Duration::from_secs(5 * 60)).await;
+            tokio::time::sleep(Duration::from_secs(30 * 60)).await;
         }
     });
 
