@@ -69,11 +69,44 @@ services:
     environment:
       DATABASE_URL: postgres://bot:bot@postgres:5432/polymarket
       MODEL_SIDECAR_URL: http://model-server:8000
+      METRICS_PORT: "9000"
     volumes:
       - model:/app/model
+    ports:
+      - "9000:9000"
     stop_grace_period: 15s
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
     restart: unless-stopped
 
 volumes:
   pgdata:
   model:
+  prometheus_data:
+  grafana_data:

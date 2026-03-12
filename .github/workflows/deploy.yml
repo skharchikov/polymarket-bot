@@ -61,6 +61,7 @@ jobs:
             --include='CHANGELOG.gen' \
             --include='scripts/***' \
             --include='migrations/***' \
+            --include='monitoring/***' \
             --exclude='*' \
             ./ "deploy@$DEPLOY_HOST:$DEPLOY_DIR/"
 

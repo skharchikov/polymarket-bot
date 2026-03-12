@@ -7,6 +7,7 @@ mod calibration;
 mod config;
 mod data;
 mod format;
+mod metrics;
 mod model;
 mod pricing;
 mod scanner;
@@ -268,6 +269,11 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         "Polymarket Signal Bot starting (dual-loop)..."
     );
 
+    // Start Prometheus metrics server and tokio runtime collector
+    metrics::init(cfg.metrics_port);
+    let runtime_monitor = tokio_metrics::RuntimeMonitor::new(&tokio::runtime::Handle::current());
+    metrics::spawn_tokio_collector(runtime_monitor);
+
     let pool = {
         let mut attempts = 0;
         loop {
@@ -363,6 +369,8 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     } else {
         0.0
     };
+    metrics::record_total_bankroll(total_bankroll);
+    metrics::record_open_bets(open_bets.len() as u64);
 
     let version = env!("CARGO_PKG_VERSION");
     let build_tag = env!("BUILD_TAG");
@@ -440,6 +448,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     let hk_exit_days = cfg.exit_days_before_expiry;
     let housekeeping = tokio::spawn(async move {
         loop {
+            let hk_start = std::time::Instant::now();
             if let Err(e) = housekeeping_cycle(
                 &hk_portfolio,
                 &hk_notifier,
@@ -451,6 +460,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             {
                 tracing::error!(err = %e, "Housekeeping cycle failed");
             }
+            metrics::record_duration("bot_housekeeping_duration_seconds", hk_start.elapsed());
             tokio::time::sleep(Duration::from_secs(hk_interval * 60)).await;
         }
     });
@@ -467,6 +477,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             std::collections::HashSet::new();
 
         loop {
+            let scan_start = std::time::Instant::now();
             if let Err(e) = news_scan_cycle(
                 &ns_portfolio,
                 &ns_notifier,
@@ -480,6 +491,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             {
                 tracing::error!(err = %e, "News scan cycle failed");
             }
+            metrics::record_duration("bot_scan_duration_seconds", scan_start.elapsed());
             tokio::time::sleep(Duration::from_secs(ns_cfg.news_scan_interval_mins * 60)).await;
         }
     });
@@ -787,6 +799,7 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
 
             match al_scanner.assess_alert(&market_id, alert.price).await {
                 Ok(Some(signal)) => {
+                    metrics::record_ws_alert(true);
                     tracing::info!(
                         market = %signal.question,
                         side = %signal.side,
@@ -898,12 +911,14 @@ async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                     }
                 }
                 Ok(None) => {
+                    metrics::record_ws_alert(false);
                     tracing::debug!(
                         market_id = &market_id[..16.min(market_id.len())],
                         "WS alert — no edge"
                     );
                 }
                 Err(e) => {
+                    metrics::record_ws_alert(false);
                     tracing::warn!(err = %e, "WS alert assessment failed");
                 }
             }
@@ -1030,6 +1045,8 @@ async fn housekeeping_cycle(
                         let subs = portfolio.telegram_subscribers().await.unwrap_or_default();
                         notifier.broadcast_animation(&subs, gif).await;
                     }
+                    metrics::record_resolution(&r.strategy, r.won, r.pnl);
+                    metrics::record_bankroll(&r.strategy, r.bankroll);
                     tracing::info!(
                         market = %market_id,
                         strategy = %r.strategy,
@@ -1196,11 +1213,14 @@ async fn housekeeping_cycle(
             .upsert_f64_pub("unrealized_pnl", total_unrealized)
             .await;
         let _ = portfolio.upsert_f64_pub("open_exposure", total_cost).await;
+        metrics::record_unrealized_pnl(total_unrealized);
 
         let msg = format::format_open_bets(&views, true);
         broadcast(notifier, portfolio, &msg).await;
     }
 
+    metrics::record_housekeeping();
+    metrics::record_open_bets(open_bets.len() as u64);
     tracing::info!(open_bets = open_bets.len(), "Housekeeping cycle complete");
     Ok(())
 }
@@ -1250,6 +1270,13 @@ async fn news_scan_cycle(
             stats
                 .signals_found
                 .fetch_add(result.signals.len() as u64, Ordering::Relaxed);
+
+            metrics::record_scan(
+                result.markets_scanned as u64,
+                result.news_total as u64,
+                result.news_new as u64,
+                result.signals.len() as u64,
+            );
 
             let mut bets_placed: Vec<String> = Vec::new();
             let mut strategy_rejections: Vec<String> = Vec::new();
@@ -1381,6 +1408,9 @@ async fn news_scan_cycle(
                             let open_count = portfolio.open_bets().await?.len();
                             let strat_signals =
                                 portfolio.strategy_signals_today(&strat.name).await?;
+                            metrics::record_bet(&strat.name, signal.source.as_str(), bet_amount);
+                            metrics::record_bankroll(&strat.name, new_strat_bankroll);
+                            metrics::record_open_bets(open_count as u64);
                             tracing::info!(
                                 strategy = %strat.name,
                                 market = %signal.question,
@@ -1562,6 +1592,9 @@ async fn heartbeat_cycle(
     );
 
     broadcast(notifier, portfolio, &msg).await;
+    metrics::record_heartbeat();
+    metrics::record_total_bankroll(bankroll);
+    metrics::record_open_bets(open_count as u64);
     tracing::info!("Heartbeat sent");
     Ok(())
 }

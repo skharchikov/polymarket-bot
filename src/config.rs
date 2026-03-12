@@ -122,6 +122,10 @@ pub struct AppConfig {
     /// When set, uses the full stacking ensemble instead of local XGBoost.
     #[config(env = "MODEL_SIDECAR_URL", default = "")]
     pub model_sidecar_url: String,
+
+    /// Port for the Prometheus metrics HTTP endpoint.
+    #[config(env = "METRICS_PORT", default = 9000)]
+    pub metrics_port: u16,
 }
 
 impl AppConfig {
