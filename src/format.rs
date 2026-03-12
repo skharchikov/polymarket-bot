@@ -189,6 +189,7 @@ mod tests {
             strategy: "aggressive".to_string(),
             source: "xgboost".to_string(),
             url: String::new(),
+            event_slug: None,
             placed_at: Utc::now(),
             resolved: false,
             won: None,
