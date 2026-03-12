@@ -77,6 +77,10 @@ pub struct GammaEvent {
 }
 
 impl GammaMarket {
+    pub fn event_slug(&self) -> Option<&str> {
+        self.events.first().map(|e| e.slug.as_str())
+    }
+
     pub fn resolved_yes(&self) -> Option<bool> {
         let prices_str = self.outcome_prices.as_ref()?;
         let prices: Vec<String> = serde_json::from_str(prices_str).ok()?;

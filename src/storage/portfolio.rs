@@ -50,6 +50,7 @@ pub struct NewBet {
     pub strategy: String,
     pub source: String,
     pub url: String,
+    pub event_slug: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +79,8 @@ pub struct Bet {
     pub source: String,
     #[serde(default)]
     pub url: String,
+    #[serde(default)]
+    pub event_slug: Option<String>,
     pub placed_at: DateTime<Utc>,
     pub resolved: bool,
     pub won: Option<bool>,

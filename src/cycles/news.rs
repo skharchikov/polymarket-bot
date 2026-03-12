@@ -40,9 +40,14 @@ pub async fn news_scan_cycle(
     let resolved_ids = portfolio.resolved_bet_market_ids().await?;
     skip_ids.extend(rejected_ids);
     skip_ids.extend(resolved_ids);
+    // Skip markets belonging to events we already have open bets on
+    let skip_event_slugs = portfolio.open_bet_event_slugs().await?;
     let past_bets = portfolio.learning_summary().await?;
 
-    match scanner.scan(&skip_ids, &past_bets, seen_headlines).await {
+    match scanner
+        .scan(&skip_ids, &skip_event_slugs, &past_bets, seen_headlines)
+        .await
+    {
         Ok(result) => {
             stats.scans_completed.fetch_add(1, Ordering::Relaxed);
             stats
@@ -173,6 +178,7 @@ pub async fn news_scan_cycle(
                         strategy: strat.name.clone(),
                         source: signal.source.as_str().to_string(),
                         url: signal.polymarket_url.clone(),
+                        event_slug: signal.event_slug.clone(),
                     };
 
                     // Log prediction for Brier score tracking

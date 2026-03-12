@@ -118,6 +118,18 @@ pub async fn alert_loop(
                     "WS-triggered signal found"
                 );
 
+                // Skip if another market in the same event already has an open bet
+                if let Some(ref slug) = signal.event_slug {
+                    let open_slugs = portfolio.open_bet_event_slugs().await.unwrap_or_default();
+                    if open_slugs.iter().any(|s| s == slug) {
+                        tracing::info!(
+                            event_slug = slug,
+                            "Skipping WS signal — already have bet on this event"
+                        );
+                        continue;
+                    }
+                }
+
                 // Process through strategies — only first matching strategy bets
                 for strat in strategies.iter() {
                     let sent = portfolio
@@ -170,6 +182,7 @@ pub async fn alert_loop(
                         strategy: strat.name.clone(),
                         source: source_str.to_string(),
                         url: signal.polymarket_url.clone(),
+                        event_slug: signal.event_slug.clone(),
                     };
 
                     // Log prediction for Brier score tracking

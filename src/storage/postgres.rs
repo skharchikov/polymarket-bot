@@ -690,8 +690,8 @@ impl PgPortfolio {
 
         let row: (i32,) = sqlx::query_as(
             "INSERT INTO bets (market_id, question, side, entry_price, slipped_price, shares, cost, fee_paid, \
-             estimated_prob, confidence, edge, kelly_size, reasoning, end_date, context, strategy, source, url) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id",
+             estimated_prob, confidence, edge, kelly_size, reasoning, end_date, context, strategy, source, url, event_slug) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING id",
         )
         .bind(&bet.market_id)
         .bind(&bet.question)
@@ -711,6 +711,7 @@ impl PgPortfolio {
         .bind(&bet.strategy)
         .bind(&bet.source)
         .bind(&bet.url)
+        .bind(bet.event_slug.as_deref())
         .fetch_one(&self.pool)
         .await?;
 
@@ -1040,6 +1041,15 @@ impl PgPortfolio {
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
+    pub async fn open_bet_event_slugs(&self) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT event_slug FROM bets WHERE resolved = false AND event_slug IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+
     pub async fn open_bets(&self) -> Result<Vec<Bet>> {
         self.fetch_bets("SELECT * FROM bets WHERE resolved = false ORDER BY placed_at DESC")
             .await
@@ -1277,6 +1287,7 @@ struct BetRow {
     strategy: String,
     source: String,
     url: String,
+    event_slug: Option<String>,
     placed_at: DateTime<Utc>,
     resolved: bool,
     won: Option<bool>,
@@ -1313,6 +1324,7 @@ impl BetRow {
             strategy: self.strategy,
             source: self.source,
             url: self.url,
+            event_slug: self.event_slug,
             placed_at: self.placed_at,
             resolved: self.resolved,
             won: self.won,

@@ -63,6 +63,8 @@ pub struct Signal {
     pub source: SignalSource,
     /// Days until market expiry (for terminal risk scaling)
     pub days_to_expiry: f64,
+    /// Event slug grouping related markets (e.g. multi-outcome events)
+    pub event_slug: Option<String>,
 }
 
 impl Signal {
@@ -755,6 +757,7 @@ impl LiveScanner {
     pub async fn scan(
         &self,
         skip_market_ids: &[String],
+        skip_event_slugs: &[String],
         past_bets_summary: &str,
         seen_headlines: &mut std::collections::HashSet<String>,
     ) -> Result<ScanResult> {
@@ -769,6 +772,13 @@ impl LiveScanner {
             .filter(|m| m.yes_token_id().is_some())
             .filter(|m| self.expires_within_window(m.end_date.as_deref()))
             .filter(|m| !skip_market_ids.contains(&m.market_id))
+            .filter(|m| {
+                // Skip markets belonging to an event we already have a bet on
+                match m.event_slug() {
+                    Some(slug) => !skip_event_slugs.iter().any(|s| s == slug),
+                    None => true,
+                }
+            })
             .filter(|m| {
                 let price = Self::get_yes_price(m).unwrap_or(0.0);
                 price > self.cfg.min_price && price < self.cfg.max_price
@@ -1189,6 +1199,7 @@ impl LiveScanner {
                 news_matched_count: news_count,
                 source: SignalSource::XgBoost,
                 days_to_expiry: parse_days_to_expiry(&c.market.end_date),
+                event_slug: c.market.event_slug().map(String::from),
                 context: BetContext {
                     btc_price: 0.0,
                     eth_price: 0.0,
@@ -1452,6 +1463,7 @@ impl LiveScanner {
                 news_matched_count: nm.news.len(),
                 source: SignalSource::LlmConsensus,
                 days_to_expiry: parse_days_to_expiry(&nm.market.end_date),
+                event_slug: nm.market.event_slug().map(String::from),
                 context: BetContext {
                     btc_price: 0.0,
                     eth_price: 0.0,
@@ -1582,6 +1594,7 @@ impl LiveScanner {
             news_matched_count: 0,
             source: SignalSource::XgBoost,
             days_to_expiry: parse_days_to_expiry(&market.end_date),
+            event_slug: market.event_slug().map(String::from),
             context: BetContext {
                 btc_price: 0.0,
                 eth_price: 0.0,
