@@ -470,6 +470,16 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         }
     });
 
+    // Spawn model age metric poller — records sidecar model age every 60s
+    let ma_scanner = Arc::clone(&scanner);
+    tokio::spawn(async move {
+        loop {
+            let age = ma_scanner.model_age_secs().await;
+            crate::metrics::record_model_status(age);
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }
+    });
+
     // Spawn model retrain monitor — checks sidecar after expected retrain window
     let mr_scanner = Arc::clone(&scanner);
     let mr_notifier = Arc::clone(&notifier);

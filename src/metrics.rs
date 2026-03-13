@@ -25,29 +25,32 @@ pub fn init(port: u16) {
 pub fn spawn_tokio_collector(runtime_monitor: tokio_metrics::RuntimeMonitor) {
     tokio::spawn(async move {
         for interval in runtime_monitor.intervals() {
+            // Point-in-time values → gauges
             gauge!("tokio_workers_count").set(interval.workers_count as f64);
             gauge!("tokio_live_tasks_count").set(interval.live_tasks_count as f64);
-            gauge!("tokio_total_park_count").set(interval.total_park_count as f64);
-            gauge!("tokio_total_noop_count").set(interval.total_noop_count as f64);
-            gauge!("tokio_total_steal_count").set(interval.total_steal_count as f64);
-            gauge!("tokio_total_steal_operations").set(interval.total_steal_operations as f64);
-            gauge!("tokio_total_polls_count").set(interval.total_polls_count as f64);
-            gauge!("tokio_total_local_schedule_count")
-                .set(interval.total_local_schedule_count as f64);
-            gauge!("tokio_num_remote_schedules").set(interval.num_remote_schedules as f64);
-            gauge!("tokio_total_overflow_count").set(interval.total_overflow_count as f64);
-            gauge!("tokio_total_busy_duration_seconds")
-                .set(interval.total_busy_duration.as_secs_f64());
-            gauge!("tokio_mean_poll_duration_seconds")
-                .set(interval.mean_poll_duration.as_secs_f64());
             gauge!("tokio_global_queue_depth").set(interval.global_queue_depth as f64);
             gauge!("tokio_total_local_queue_depth").set(interval.total_local_queue_depth as f64);
             gauge!("tokio_blocking_queue_depth").set(interval.blocking_queue_depth as f64);
             gauge!("tokio_blocking_threads_count").set(interval.blocking_threads_count as f64);
-            gauge!("tokio_budget_forced_yield_count")
-                .set(interval.budget_forced_yield_count as f64);
-            gauge!("tokio_io_driver_ready_count").set(interval.io_driver_ready_count as f64);
+            gauge!("tokio_mean_poll_duration_seconds")
+                .set(interval.mean_poll_duration.as_secs_f64());
             gauge!("tokio_busy_ratio").set(interval.busy_ratio());
+
+            // Per-interval deltas → counters (so rate() works in dashboards)
+            counter!("tokio_total_park_count").increment(interval.total_park_count);
+            counter!("tokio_total_noop_count").increment(interval.total_noop_count);
+            counter!("tokio_total_steal_count").increment(interval.total_steal_count);
+            counter!("tokio_total_steal_operations").increment(interval.total_steal_operations);
+            counter!("tokio_total_polls_count").increment(interval.total_polls_count);
+            counter!("tokio_total_local_schedule_count")
+                .increment(interval.total_local_schedule_count);
+            counter!("tokio_num_remote_schedules").increment(interval.num_remote_schedules);
+            counter!("tokio_total_overflow_count").increment(interval.total_overflow_count);
+            counter!("tokio_budget_forced_yield_count")
+                .increment(interval.budget_forced_yield_count);
+            counter!("tokio_io_driver_ready_count").increment(interval.io_driver_ready_count);
+            gauge!("tokio_total_busy_duration_seconds")
+                .set(interval.total_busy_duration.as_secs_f64());
 
             // Refresh process metrics each cycle
             metrics_process::Collector::default().collect();
@@ -118,6 +121,19 @@ pub fn record_ws_alert(had_signal: bool) {
     counter!("bot_ws_alerts_total").increment(1);
     if had_signal {
         counter!("bot_ws_signals_total").increment(1);
+    }
+}
+
+/// Record ML model sidecar status: age in seconds and whether it's reachable.
+pub fn record_model_status(age_secs: Option<f64>) {
+    match age_secs {
+        Some(age) => {
+            gauge!("bot_model_age_seconds").set(age);
+            gauge!("bot_model_up").set(1.0);
+        }
+        None => {
+            gauge!("bot_model_up").set(0.0);
+        }
     }
 }
 

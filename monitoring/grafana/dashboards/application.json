@@ -6,9 +6,10 @@
   "links": [],
   "panels": [
     {
+      "id": 1,
       "title": "Total Bankroll",
       "type": "stat",
-      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
       "fieldConfig": {
         "defaults": {
           "unit": "currencyEUR",
@@ -27,29 +28,10 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
     },
     {
-      "title": "Open Bets",
-      "type": "stat",
-      "gridPos": { "h": 6, "w": 3, "x": 6, "y": 0 },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 10 }] }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "bot_open_bets",
-          "legendFormat": "Open",
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
-        }
-      ],
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
-    },
-    {
+      "id": 2,
       "title": "Unrealized PnL",
       "type": "stat",
-      "gridPos": { "h": 6, "w": 6, "x": 9, "y": 0 },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
       "fieldConfig": {
         "defaults": {
           "unit": "currencyEUR",
@@ -68,32 +50,57 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
     },
     {
-      "title": "Scan Rate",
+      "id": 3,
+      "title": "Open Bets",
       "type": "stat",
-      "gridPos": { "h": 6, "w": 3, "x": 15, "y": 0 },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
-          "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 10 }] }
         },
         "overrides": []
       },
       "targets": [
         {
-          "expr": "bot_scans_total",
-          "legendFormat": "Total Scans",
+          "expr": "bot_open_bets",
+          "legendFormat": "Open",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
         }
       ],
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
     },
     {
-      "title": "Bets Placed & Resolved",
+      "id": 4,
+      "title": "Scan Rate",
       "type": "stat",
-      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" }
+          "unit": "ops",
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 0.01 }] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "rate(bot_scans_total[5m])",
+          "legendFormat": "Scans/s",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+    },
+    {
+      "id": 5,
+      "title": "Bets Placed",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [{ "color": "blue", "value": null }] }
         },
         "overrides": []
       },
@@ -102,7 +109,23 @@
           "expr": "sum(bot_bets_placed_total)",
           "legendFormat": "Placed",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+    },
+    {
+      "id": 6,
+      "title": "Bets Resolved",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [{ "color": "purple", "value": null }] }
         },
+        "overrides": []
+      },
+      "targets": [
         {
           "expr": "sum(bot_bets_resolved_total)",
           "legendFormat": "Resolved",
@@ -112,9 +135,18 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
     },
     {
+      "id": 10,
+      "title": "Bankroll",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 4 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 11,
       "title": "Bankroll per Strategy",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
       "fieldConfig": {
         "defaults": {
           "unit": "currencyEUR",
@@ -133,9 +165,10 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
     },
     {
+      "id": 12,
       "title": "Total Bankroll Over Time",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
       "fieldConfig": {
         "defaults": {
           "unit": "currencyEUR",
@@ -154,6 +187,15 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
     },
     {
+      "id": 20,
+      "title": "Betting",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 13 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 21,
       "title": "Bets Placed Rate (per strategy)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
@@ -175,6 +217,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
     },
     {
+      "id": 22,
       "title": "Bet Resolutions (wins vs losses)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
@@ -200,9 +243,97 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
     },
     {
+      "id": 25,
+      "title": "ML Model",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 26,
+      "title": "Model Status",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 4, "x": 0, "y": 23 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] },
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+          ]
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "bot_model_up",
+          "legendFormat": "Status",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+    },
+    {
+      "id": 27,
+      "title": "Model Age",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 4, "x": 4, "y": 23 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 72000 }, { "color": "red", "value": 100800 }] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "bot_model_age_seconds",
+          "legendFormat": "Age",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+    },
+    {
+      "id": 28,
+      "title": "Model Age Over Time",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 16, "x": 8, "y": 23 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "bot_model_age_seconds",
+          "legendFormat": "Model Age",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ],
+      "options": { "legend": { "displayMode": "list" }, "tooltip": { "mode": "multi" } },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+    },
+    {
+      "id": 30,
+      "title": "Scanning & Data",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 29 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 31,
       "title": "Markets Scanned Rate",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" }
@@ -225,9 +356,10 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
     },
     {
+      "id": 32,
       "title": "News Fetched vs New",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" }
@@ -250,9 +382,42 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
     },
     {
+      "id": 33,
+      "title": "Scan Duration (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 38 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(bot_scan_duration_seconds_bucket[5m]))",
+          "legendFormat": "p50",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(bot_scan_duration_seconds_bucket[5m]))",
+          "legendFormat": "p95",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(bot_scan_duration_seconds_bucket[5m]))",
+          "legendFormat": "p99",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ],
+      "options": { "legend": { "displayMode": "list" }, "tooltip": { "mode": "multi" } },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+    },
+    {
+      "id": 34,
       "title": "WebSocket Alerts",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 38 },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" }
@@ -275,30 +440,18 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
     },
     {
-      "title": "Scan Duration",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "color": { "mode": "palette-classic" }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "bot_scan_duration_seconds",
-          "legendFormat": "p50",
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
-        }
-      ],
-      "options": { "legend": { "displayMode": "list" }, "tooltip": { "mode": "multi" } },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+      "id": 40,
+      "title": "Operations",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 46 },
+      "collapsed": false,
+      "panels": []
     },
     {
-      "title": "Housekeeping & Heartbeat Cycles",
+      "id": 41,
+      "title": "Housekeeping Cycles",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 38 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 47 },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" }
@@ -310,7 +463,23 @@
           "expr": "increase(bot_housekeeping_cycles_total[1h])",
           "legendFormat": "Housekeeping/h",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ],
+      "options": { "legend": { "displayMode": "list" }, "tooltip": { "mode": "multi" } },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+    },
+    {
+      "id": 42,
+      "title": "Heartbeat Cycles",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 47 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
         },
+        "overrides": []
+      },
+      "targets": [
         {
           "expr": "increase(bot_heartbeats_total[1h])",
           "legendFormat": "Heartbeats/h",
