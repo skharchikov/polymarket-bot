@@ -15,47 +15,29 @@ services:
       timeout: 3s
       retries: 5
 
-  trainer:
+  model-server:
     build:
       context: scripts
-    command: ["retrain.sh"]
+    command: ["serve_model.py"]
     depends_on:
       postgres:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://bot:bot@postgres:5432/polymarket
-      RETRAIN_MAX_AGE_HOURS: "24"
-    volumes:
-      - model:/model
-    healthcheck:
-      test: ["CMD-SHELL", "test -f /model/ensemble.joblib"]
-      interval: 10s
-      timeout: 3s
-      retries: 30
-      start_period: 30s
-    restart: unless-stopped
-
-  model-server:
-    build:
-      context: scripts
-    entrypoint: ["python"]
-    command: ["serve_model.py"]
-    depends_on:
-      trainer:
-        condition: service_healthy
-    environment:
       MODEL_DIR: /model
       MODEL_PORT: "8000"
+      RETRAIN_MAX_AGE_HOURS: "24"
+      RETRAIN_ON_SCHEDULE: "true"
     volumes:
       - model:/model
     ports:
       - "8000:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 10s
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
     restart: unless-stopped
 
   bot:

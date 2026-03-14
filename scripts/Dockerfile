@@ -9,4 +9,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY fetch_data.py train_model.py retrain.sh serve_model.py ./
 
-ENTRYPOINT ["/bin/sh"]
+ENTRYPOINT ["python"]

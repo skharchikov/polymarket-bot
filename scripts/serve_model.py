@@ -8,12 +8,20 @@ from the full ensemble (XGBoost + LightGBM + HistGBM + ExtraTrees + RF + meta-le
 Endpoints:
     POST /predict        — single prediction
     POST /predict_batch  — batch predictions
+    POST /reload         — reload model from disk
+    POST /retrain        — trigger retrain (force=true to skip staleness check)
+    GET  /retrain/status — check retrain status
     GET  /health         — liveness check
 """
 
 import logging
 import os
+import subprocess
+import sys
+import threading
 import time
+from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 
 import joblib
@@ -28,6 +36,8 @@ log = logging.getLogger("sidecar")
 MODEL_DIR = os.environ.get("MODEL_DIR", "/model")
 MODEL_PATH = Path(MODEL_DIR) / "ensemble.joblib"
 SCALER_PATH = Path(MODEL_DIR) / "scaler.joblib"
+MAX_AGE_HOURS = int(os.environ.get("RETRAIN_MAX_AGE_HOURS", "24"))
+RETRAIN_ON_SCHEDULE = os.environ.get("RETRAIN_ON_SCHEDULE", "true").lower() == "true"
 
 FEATURE_NAMES = [
     "yes_price", "momentum_1h", "momentum_24h", "volatility_24h", "rsi",
@@ -45,21 +55,123 @@ scaler = None
 model_loaded_at = None
 
 
+class RetrainStatus(str, Enum):
+    idle = "idle"
+    running = "running"
+    success = "success"
+    failed = "failed"
+
+
+class _RetrainState:
+    def __init__(self):
+        self.status: RetrainStatus = RetrainStatus.idle
+        self.started_at: str | None = None
+        self.finished_at: str | None = None
+        self.error: str | None = None
+        self.lock = threading.Lock()
+
+
+_retrain = _RetrainState()
+
+
 def load_model():
     global model, scaler, model_loaded_at
     if not MODEL_PATH.exists():
-        print(f"Model not found at {MODEL_PATH}, waiting for training...")
+        log.warning("Model not found at %s, waiting for training...", MODEL_PATH)
         return False
     model = joblib.load(MODEL_PATH)
     scaler = joblib.load(SCALER_PATH) if SCALER_PATH.exists() else None
     model_loaded_at = time.time()
-    print(f"Loaded ensemble from {MODEL_PATH}")
+    log.info("Loaded ensemble from %s", MODEL_PATH)
     return True
+
+
+def model_age_hours() -> float | None:
+    if not MODEL_PATH.exists():
+        return None
+    return (time.time() - MODEL_PATH.stat().st_mtime) / 3600
+
+
+def _run_retrain():
+    """Run fetch + train in a background thread, then reload the model."""
+    _retrain.status = RetrainStatus.running
+    _retrain.started_at = datetime.now(timezone.utc).isoformat()
+    _retrain.finished_at = None
+    _retrain.error = None
+
+    try:
+        log.info("Retrain: fetching data...")
+        subprocess.run(
+            [sys.executable, "fetch_data.py", "--markets", "1000",
+             "--output", f"{MODEL_DIR}/training_data.json"],
+            check=True, capture_output=True, text=True,
+        )
+
+        log.info("Retrain: training model...")
+        subprocess.run(
+            [sys.executable, "train_model.py",
+             "--input", f"{MODEL_DIR}/training_data.json",
+             "--output", f"{MODEL_DIR}/xgb_model.json"],
+            check=True, capture_output=True, text=True,
+        )
+
+        load_model()
+        _retrain.status = RetrainStatus.success
+        log.info("Retrain complete")
+    except subprocess.CalledProcessError as e:
+        _retrain.status = RetrainStatus.failed
+        _retrain.error = e.stderr[-500:] if e.stderr else str(e)
+        log.error("Retrain failed: %s", _retrain.error)
+    except Exception as e:
+        _retrain.status = RetrainStatus.failed
+        _retrain.error = str(e)
+        log.error("Retrain failed: %s", e)
+    finally:
+        _retrain.finished_at = datetime.now(timezone.utc).isoformat()
+
+
+def _retrain_if_stale():
+    """Retrain only if the model is missing or older than MAX_AGE_HOURS."""
+    age = model_age_hours()
+    if age is not None and age < MAX_AGE_HOURS:
+        log.info("Model is %.1fh old (max %dh) — fresh, skipping", age, MAX_AGE_HOURS)
+        return
+    if age is not None:
+        log.info("Model is %.1fh old (max %dh) — stale, retraining", age, MAX_AGE_HOURS)
+    else:
+        log.info("No model found — training")
+
+    if not _retrain.lock.acquire(blocking=False):
+        log.info("Retrain already in progress, skipping scheduled run")
+        return
+    try:
+        _run_retrain()
+    finally:
+        _retrain.lock.release()
+
+
+def _schedule_loop():
+    """Background thread: check staleness every hour, retrain if needed."""
+    while True:
+        time.sleep(3600)
+        try:
+            _retrain_if_stale()
+        except Exception as e:
+            log.error("Scheduled retrain check failed: %s", e)
 
 
 @app.on_event("startup")
 def startup():
-    load_model()
+    # Train on first boot if no model exists
+    if not MODEL_PATH.exists():
+        _retrain_if_stale()
+    else:
+        load_model()
+
+    if RETRAIN_ON_SCHEDULE:
+        t = threading.Thread(target=_schedule_loop, daemon=True)
+        t.start()
+        log.info("Scheduled retrain: checking every 1h, max model age %dh", MAX_AGE_HOURS)
 
 
 class PredictRequest(BaseModel):
@@ -201,6 +313,55 @@ def _estimate_confidence(features: np.ndarray) -> float:
         pass
 
     return 0.50  # Default moderate confidence
+
+
+class RetrainRequest(BaseModel):
+    force: bool = False
+
+
+class RetrainStatusResponse(BaseModel):
+    status: RetrainStatus
+    model_age_hours: float | None = None
+    max_age_hours: int = MAX_AGE_HOURS
+    started_at: str | None = None
+    finished_at: str | None = None
+    error: str | None = None
+
+
+@app.post("/retrain")
+def retrain(req: RetrainRequest = RetrainRequest()):
+    if _retrain.status == RetrainStatus.running:
+        raise HTTPException(status_code=409, detail="Retrain already in progress")
+
+    age = model_age_hours()
+    if not req.force and age is not None and age < MAX_AGE_HOURS:
+        return {
+            "status": "skipped",
+            "reason": f"Model is {age:.1f}h old (max {MAX_AGE_HOURS}h). Use force=true to override.",
+        }
+
+    if not _retrain.lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Retrain already in progress")
+
+    def run():
+        try:
+            _run_retrain()
+        finally:
+            _retrain.lock.release()
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"status": "started"}
+
+
+@app.get("/retrain/status", response_model=RetrainStatusResponse)
+def retrain_status():
+    return RetrainStatusResponse(
+        status=_retrain.status,
+        model_age_hours=model_age_hours(),
+        started_at=_retrain.started_at,
+        finished_at=_retrain.finished_at,
+        error=_retrain.error,
+    )
 
 
 if __name__ == "__main__":
