@@ -495,6 +495,20 @@ impl LiveScanner {
         Ok(Self::get_yes_price(&market))
     }
 
+    /// Fetch a single market using the query endpoint (includes `events` array).
+    /// The `/markets/{id}` endpoint omits events; `/markets?id={id}` includes them.
+    async fn fetch_market_with_events(&self, market_id: &str) -> Result<GammaMarket> {
+        let url = format!("{GAMMA_API}/markets?id={market_id}");
+        let resp = self.http.get(&url).send().await?;
+        let text = resp.text().await?;
+        let markets: Vec<GammaMarket> = serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse market {market_id}"))?;
+        markets
+            .into_iter()
+            .next()
+            .with_context(|| format!("market {market_id} not found"))
+    }
+
     fn expires_within_window(&self, end_date: Option<&str>) -> bool {
         let Some(date_str) = end_date else {
             return false;
@@ -1519,10 +1533,8 @@ impl LiveScanner {
             return Ok(None);
         }
 
-        // Fetch fresh market data
-        let url = format!("{GAMMA_API}/markets/{market_id}");
-        let resp = self.http.get(&url).send().await?;
-        let market: GammaMarket = resp.json().await?;
+        // Fetch fresh market data (query endpoint includes events for event_slug)
+        let market = self.fetch_market_with_events(market_id).await?;
 
         let current_price = Self::get_yes_price(&market).unwrap_or(ws_price);
         let token_id = match market.yes_token_id() {
