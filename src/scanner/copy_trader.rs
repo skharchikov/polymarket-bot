@@ -318,7 +318,8 @@ impl CopyTraderMonitor {
             .await
             .context("activity JSON parse failed")?;
 
-        let trades = events
+        let raw_count = events.len();
+        let trades: Vec<TraderTrade> = events
             .into_iter()
             .filter_map(|e| {
                 // Require all mandatory fields to be present.
@@ -342,6 +343,14 @@ impl CopyTraderMonitor {
                 })
             })
             .collect();
+
+        tracing::debug!(
+            wallet = %wallet,
+            since = %since.format("%Y-%m-%d %H:%M"),
+            raw_events = raw_count,
+            parsed_trades = trades.len(),
+            "Trader activity fetched"
+        );
 
         Ok(trades)
     }
@@ -368,10 +377,22 @@ impl CopyTraderMonitor {
                 .last_checked_at
                 .unwrap_or_else(|| Utc::now() - chrono::Duration::hours(24));
 
+            let name = trader
+                .username
+                .as_deref()
+                .unwrap_or(&trader.proxy_wallet[..8.min(trader.proxy_wallet.len())]);
+            tracing::debug!(
+                trader = %name,
+                wallet = %trader.proxy_wallet,
+                since = %since.format("%Y-%m-%d %H:%M"),
+                "Polling trader"
+            );
+
             let trades = match self.poll_trader_activity(&trader.proxy_wallet, since).await {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::warn!(
+                        trader = %name,
                         wallet = %trader.proxy_wallet,
                         err = %e,
                         "Failed to poll trader activity, skipping"
@@ -379,6 +400,9 @@ impl CopyTraderMonitor {
                     continue;
                 }
             };
+
+            let mut new_count = 0usize;
+            let mut skipped_count = 0usize;
 
             for trade in trades {
                 let already_seen = portfolio
@@ -392,6 +416,7 @@ impl CopyTraderMonitor {
                     .context("is_copy_trade_seen")?;
 
                 if already_seen {
+                    skipped_count += 1;
                     continue;
                 }
 
@@ -414,7 +439,15 @@ impl CopyTraderMonitor {
                     trader_wallet: trader.proxy_wallet.clone(),
                     trade,
                 });
+                new_count += 1;
             }
+
+            tracing::debug!(
+                trader = %name,
+                new = new_count,
+                skipped = skipped_count,
+                "Trader poll complete"
+            );
 
             // Stamp the poll timestamp regardless of whether any trades were found.
             if let Err(e) = portfolio.update_trader_checked(&trader.proxy_wallet).await {
