@@ -12,6 +12,11 @@ pub struct OrderBookStats {
 
 /// Feature vector matching the Python training pipeline's FEATURE_COLS.
 /// Order must be identical to scripts/train_model.py.
+///
+/// Removed from v1: news_count, best_news_score, avg_news_age_hours,
+/// order_imbalance, spread — these were always 0 in training (not available
+/// retroactively for historical markets) but non-zero in live inference,
+/// causing distribution shift with zero learning signal.
 #[derive(Debug, Clone)]
 pub struct MarketFeatures {
     pub yes_price: f64,
@@ -25,12 +30,6 @@ pub struct MarketFeatures {
     pub is_crypto: f64,
     pub is_politics: f64,
     pub is_sports: f64,
-    pub news_count: f64,
-    pub best_news_score: f64,
-    pub avg_news_age_hours: f64,
-    // Order book microstructure
-    pub order_imbalance: f64,
-    pub spread: f64,
     // Gamma API price changes (more reliable than computed momentum)
     pub price_change_1d: f64,
     pub price_change_1w: f64,
@@ -50,11 +49,6 @@ impl MarketFeatures {
         "is_crypto",
         "is_politics",
         "is_sports",
-        "news_count",
-        "best_news_score",
-        "avg_news_age_hours",
-        "order_imbalance",
-        "spread",
         "price_change_1d",
         "price_change_1w",
     ];
@@ -73,37 +67,23 @@ impl MarketFeatures {
             self.is_crypto,
             self.is_politics,
             self.is_sports,
-            self.news_count,
-            self.best_news_score,
-            self.avg_news_age_hours,
-            self.order_imbalance,
-            self.spread,
             self.price_change_1d,
             self.price_change_1w,
         ]
     }
 
-    /// Set order book features (call after initial construction).
-    pub fn with_order_book(mut self, stats: &OrderBookStats) -> Self {
-        self.order_imbalance = stats.order_imbalance;
-        self.spread = stats.spread;
-        self
-    }
-
     /// Build features from a market, price history, and matched news.
+    /// News signals are passed through for logging/display but are no longer
+    /// part of the model feature vector (see struct comment).
     pub fn from_market_and_news(
         market: &GammaMarket,
         current_price: f64,
         history: &[PriceTick],
-        news_count: usize,
-        best_news_score: f64,
-        avg_news_age_hours: f64,
+        _news_count: usize,
+        _best_news_score: f64,
+        _avg_news_age_hours: f64,
     ) -> Self {
-        let mut features = Self::from_market_and_history(market, current_price, history);
-        features.news_count = news_count as f64;
-        features.best_news_score = best_news_score;
-        features.avg_news_age_hours = avg_news_age_hours;
-        features
+        Self::from_market_and_history(market, current_price, history)
     }
 
     /// Build features from a market and its price history (no news data).
@@ -186,11 +166,6 @@ impl MarketFeatures {
             is_crypto,
             is_politics,
             is_sports,
-            news_count: 0.0,
-            best_news_score: 0.0,
-            avg_news_age_hours: 0.0,
-            order_imbalance: 0.0,
-            spread: 0.0,
             price_change_1d,
             price_change_1w,
         }
@@ -342,11 +317,6 @@ mod tests {
             is_crypto: 1.0,
             is_politics: 0.0,
             is_sports: 0.0,
-            news_count: 3.0,
-            best_news_score: 0.85,
-            avg_news_age_hours: 2.5,
-            order_imbalance: 0.15,
-            spread: 0.02,
             price_change_1d: 0.03,
             price_change_1w: -0.05,
         };
