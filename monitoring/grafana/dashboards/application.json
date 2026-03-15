@@ -488,6 +488,210 @@
       ],
       "options": { "legend": { "displayMode": "list" }, "tooltip": { "mode": "multi" } },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+    },
+    {
+      "id": 50,
+      "title": "Copy Trading",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 55 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 51,
+      "title": "Copy Bets Placed",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 56 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [{ "color": "blue", "value": null }] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(bot_bets_placed_total{source=\"copy_trade\"})",
+          "legendFormat": "Placed",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+    },
+    {
+      "id": 52,
+      "title": "Copy Bets Resolved",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 56 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [{ "color": "purple", "value": null }] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(bot_bets_resolved_total{strategy=~\"copy:.*\"})",
+          "legendFormat": "Resolved",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+    },
+    {
+      "id": 53,
+      "title": "Copy Win Rate",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 56 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "yellow", "value": 40 }, { "color": "green", "value": 55 }] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(bot_bets_resolved_total{strategy=~\"copy:.*\",outcome=\"win\"}) / sum(bot_bets_resolved_total{strategy=~\"copy:.*\"}) * 100",
+          "legendFormat": "Win %",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+    },
+    {
+      "id": 54,
+      "title": "Active Copy Traders",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 56 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "count(bot_bankroll_eur{strategy=~\"copy:.*\"})",
+          "legendFormat": "Traders",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+    },
+    {
+      "id": 55,
+      "title": "Copy Trader Bankrolls",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 60 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyEUR",
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 5 }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "bot_bankroll_eur{strategy=~\"copy:.*\"}",
+          "legendFormat": "{{strategy}}",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ],
+      "options": { "legend": { "displayMode": "list" }, "tooltip": { "mode": "multi" } },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+    },
+    {
+      "id": 56,
+      "title": "Copy Trade Activity (bets/h)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 60 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "increase(bot_bets_placed_total{source=\"copy_trade\"}[1h])",
+          "legendFormat": "Placed — {{strategy}}",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        },
+        {
+          "expr": "increase(bot_bets_resolved_total{strategy=~\"copy:.*\"}[1h])",
+          "legendFormat": "Resolved — {{strategy}} {{outcome}}",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ],
+      "options": { "legend": { "displayMode": "list" }, "tooltip": { "mode": "multi" } },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+    },
+    {
+      "id": 57,
+      "title": "Copy Trade Outcomes (wins vs losses)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 68 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": ".*win.*" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byRegexp", "options": ".*loss.*" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "expr": "increase(bot_bets_resolved_total{strategy=~\"copy:.*\",outcome=\"win\"}[1h])",
+          "legendFormat": "{{strategy}} win",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        },
+        {
+          "expr": "increase(bot_bets_resolved_total{strategy=~\"copy:.*\",outcome=\"loss\"}[1h])",
+          "legendFormat": "{{strategy}} loss",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ],
+      "options": { "legend": { "displayMode": "list" }, "tooltip": { "mode": "multi" } },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+    },
+    {
+      "id": 58,
+      "title": "Copy Trade Stake Sizes",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 68 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyEUR",
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(bot_bet_cost_eur_bucket{strategy=~\"copy:.*\"}[1h]))",
+          "legendFormat": "p50 stake",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(bot_bet_cost_eur_bucket{strategy=~\"copy:.*\"}[1h]))",
+          "legendFormat": "p95 stake",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
+        }
+      ],
+      "options": { "legend": { "displayMode": "list" }, "tooltip": { "mode": "multi" } },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }
     }
   ],
   "schemaVersion": 39,
