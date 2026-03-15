@@ -98,7 +98,7 @@ pub struct LeaderboardDisplay {
 /// Returns an error if the HTTP request fails or the response cannot be
 /// parsed.
 pub async fn fetch_leaderboard(http: &Client) -> Result<Vec<LeaderboardDisplay>> {
-    let url = format!("{DATA_API}/leaderboard?window=all&limit=50");
+    let url = format!("{DATA_API}/v1/leaderboard?window=all&limit=50");
 
     let entries: Vec<LeaderboardEntry> = http
         .get(&url)
@@ -243,7 +243,7 @@ impl CopyTraderMonitor {
         min_volume: f64,
         max_traders: usize,
     ) -> Result<usize> {
-        let url = format!("{DATA_API}/leaderboard?window=all&limit=50",);
+        let url = format!("{DATA_API}/v1/leaderboard?window=all&limit=50",);
 
         let entries: Vec<LeaderboardEntry> = self
             .http
