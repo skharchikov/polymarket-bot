@@ -179,4 +179,22 @@ impl SidecarClient {
             .context("sidecar reload")?;
         Ok(())
     }
+
+    /// Trigger a warm-start retrain on the sidecar (fire-and-forget by the caller).
+    /// The sidecar applies its own WARMSTART_TRIGGER_N threshold and skips if not enough
+    /// resolved bets have accumulated.
+    pub async fn warmstart(&self) -> Result<()> {
+        let resp = self
+            .client
+            .post(format!("{}/retrain/warmstart", self.base_url))
+            .send()
+            .await
+            .context("sidecar warmstart request")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("sidecar warmstart returned {status}: {body}");
+        }
+        Ok(())
+    }
 }

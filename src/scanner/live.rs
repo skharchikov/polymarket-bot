@@ -320,6 +320,16 @@ impl LiveScanner {
         sidecar.health().await?.model_age_secs
     }
 
+    /// Trigger a warm-start retrain on the sidecar (fire-and-forget).
+    /// Logs and swallows errors — warm-start failure must not block normal operation.
+    pub async fn trigger_warmstart(&self) {
+        let Some(sidecar) = &self.sidecar else { return };
+        match sidecar.warmstart().await {
+            Ok(()) => tracing::info!("Warm-start retrain triggered"),
+            Err(e) => tracing::warn!(err = %e, "Warm-start retrain request failed"),
+        }
+    }
+
     /// Get prediction from the ML sidecar.
     async fn predict(&self, features: &MarketFeatures, market_price: f64) -> Option<(f64, f64)> {
         let sidecar = self.sidecar.as_ref()?;

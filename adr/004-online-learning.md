@@ -19,7 +19,7 @@ Our own resolved bets (highest-quality samples — we have exact entry context a
 are diluted in a bulk retrain and reconstructed with noise.
 
 Two goals:
-1. **Exact feature capture**: store the precise 16-feature vector at bet-placement time.
+1. **Exact feature capture**: store the precise 13-feature vector at bet-placement time.
 2. **Warm-start retraining**: when new bets resolve, update the model incrementally without
    a full cold retrain — keeping the model responsive to live performance between daily retrains.
 
@@ -68,6 +68,51 @@ without compounding errors over many cycles.
 When `bet_features` records exist for resolved bets, use them directly instead of
 reconstructing from price history. Falls back to reconstruction for bets placed before
 this ADR (no stored features yet).
+
+### Typed predict API (schema validation)
+
+The sidecar's `/predict` endpoint previously accepted features as `list[float]` — a
+positional array with no names. Wrong feature order would silently produce bad predictions,
+and sklearn would emit "feature names not set" warnings.
+
+Changed to a named struct in both Rust and Python:
+
+**Rust** (`src/model/sidecar.rs`):
+```rust
+#[derive(Serialize, Clone)]
+struct PredictRequest {
+    features: MarketFeatures,   // full named struct, not Vec<f64>
+    market_price: f64,
+}
+```
+
+**Python** (`scripts/serve_model.py`):
+```python
+class FeatureMap(BaseModel):
+    yes_price: float
+    momentum_1h: float
+    momentum_24h: float
+    volatility_24h: float
+    rsi: float
+    log_volume: float
+    log_liquidity: float
+    days_to_expiry: float
+    is_crypto: float
+    is_politics: float
+    is_sports: float
+    price_change_1d: float
+    price_change_1w: float
+```
+
+Benefits:
+- Missing or renamed fields return HTTP 422 with explicit field names (fail loud, not silent)
+- DataFrame built from `model_dump()` with named columns — no sklearn warnings
+- Schema is self-documenting in the OpenAPI spec at `/docs`
+- Feature set is visible at both ends of the wire — Rust struct and Python model stay in sync
+
+The pure-Rust local inference path (`src/model/xgb.rs`) still accepts `&[f64]` internally
+because XGBoost tree nodes are indexed by integer position. Callers convert via
+`MarketFeatures::to_vec()` which preserves the canonical order defined in `NAMES`.
 
 ---
 

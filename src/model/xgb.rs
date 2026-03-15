@@ -284,12 +284,12 @@ mod tests {
         let model = XgbModel::load(model_path).expect("Failed to load model");
         assert!(model.n_trees() > 0, "Model should have trees");
 
-        // Test prediction with a typical market feature vector
+        // Test prediction with a typical market feature vector matching MarketFeatures::NAMES:
         // [yes_price, momentum_1h, momentum_24h, volatility_24h, rsi,
         //  log_volume, log_liquidity, days_to_expiry, is_crypto, is_politics, is_sports,
-        //  news_count, best_news_score, avg_news_age_hours]
+        //  price_change_1d, price_change_1w]
         let features = vec![
-            0.55, 0.02, -0.05, 0.03, 0.6, 12.0, 10.0, 15.0, 1.0, 0.0, 0.0, 3.0, 0.75, 2.0,
+            0.55, 0.02, -0.05, 0.03, 0.6, 12.0, 10.0, 15.0, 1.0, 0.0, 0.0, 0.03, -0.02,
         ];
         let prob = model.predict_prob(&features);
         assert!(

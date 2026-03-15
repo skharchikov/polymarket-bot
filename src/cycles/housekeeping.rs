@@ -86,6 +86,9 @@ pub async fn housekeeping_cycle(
                         bankroll = format_args!("€{:.2}", r.bankroll),
                         "Bet resolved"
                     );
+                    // Trigger warm-start retrain — sidecar applies its own threshold
+                    // (WARMSTART_TRIGGER_N) and skips if not enough resolved bets yet.
+                    scanner.trigger_warmstart().await;
                 }
             }
             Ok(None) => {} // still open
