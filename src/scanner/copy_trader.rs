@@ -278,6 +278,36 @@ fn return_rank_str(_rank: usize) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Activity parsing
+// ---------------------------------------------------------------------------
+
+/// Convert raw deserialized activity events into `TraderTrade`s, dropping any
+/// entries that are missing mandatory fields.
+fn parse_activity_events(events: Vec<ActivityEvent>) -> Vec<TraderTrade> {
+    events
+        .into_iter()
+        .filter_map(|e| {
+            let slug = e.slug?;
+            let condition_id = e.condition_id?;
+            let side = e.side?;
+            let price = e.price?;
+            let size_usd = e.usdc_size.unwrap_or(0.0);
+            let ts_secs = e.timestamp?;
+            let timestamp = DateTime::from_timestamp(ts_secs, 0).unwrap_or_else(Utc::now);
+            Some(TraderTrade {
+                slug,
+                condition_id,
+                side,
+                price,
+                size_usd,
+                tx_hash: e.tx_hash,
+                timestamp,
+            })
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Monitor
 // ---------------------------------------------------------------------------
 
@@ -321,30 +351,7 @@ impl CopyTraderMonitor {
             .context("activity JSON parse failed")?;
 
         let raw_count = events.len();
-        let trades: Vec<TraderTrade> = events
-            .into_iter()
-            .filter_map(|e| {
-                // Require all mandatory fields to be present.
-                let slug = e.slug?;
-                let condition_id = e.condition_id?;
-                let side = e.side?;
-                let price = e.price?;
-                let size_usd = e.usdc_size.unwrap_or(0.0);
-                let ts_secs = e.timestamp?;
-
-                let timestamp = DateTime::from_timestamp(ts_secs, 0).unwrap_or_else(Utc::now);
-
-                Some(TraderTrade {
-                    slug,
-                    condition_id,
-                    side,
-                    price,
-                    size_usd,
-                    tx_hash: e.tx_hash,
-                    timestamp,
-                })
-            })
-            .collect();
+        let trades: Vec<TraderTrade> = parse_activity_events(events);
 
         tracing::info!(
             wallet = %wallet,
@@ -470,6 +477,125 @@ impl CopyTraderMonitor {
 mod tests {
     use super::*;
 
+    // Real API response shape captured 2026-03-15
+    const ACTIVITY_JSON: &str = r#"[
+        {
+            "proxyWallet": "0x37c1874a60d348903594a96703e0507c518fc53a",
+            "timestamp": 1773601939,
+            "conditionId": "0xfab8520004b4d201119f0362dc8678e8cf7f11b514efc48bc5a48aebf7974b50",
+            "type": "TRADE",
+            "size": 19.6,
+            "usdcSize": 9.604,
+            "transactionHash": "0x36b6c841eb1",
+            "price": 0.49,
+            "asset": "87207434043876055147",
+            "side": "BUY",
+            "outcomeIndex": 0,
+            "title": "Spread: Trail Blazers (-8.5)",
+            "slug": "nba-por-phi-2026-03-15-spread-away-8pt5",
+            "icon": "https://example.com/icon.png",
+            "eventSlug": "nba-por-phi-2026-03-15",
+            "outcome": "Trail Blazers",
+            "name": "CemeterySun",
+            "pseudonym": "Pale-Bend",
+            "bio": "",
+            "profileImage": ""
+        },
+        {
+            "proxyWallet": "0x37c1874a60d348903594a96703e0507c518fc53a",
+            "timestamp": 1773601939,
+            "conditionId": "0x65c3ff402d81e756af732fd67ea6521b15395206d2d77b8b2b006c212f620981",
+            "type": "TRADE",
+            "size": 1554.74,
+            "usdcSize": 855.107,
+            "transactionHash": "0x197d26499737",
+            "price": 0.55,
+            "asset": "87796361570300895",
+            "side": "BUY",
+            "outcomeIndex": 0,
+            "title": "Spread: Bucks (-6.5)",
+            "slug": "nba-ind-mil-2026-03-15-spread-home-6pt5",
+            "icon": "https://example.com/icon2.png",
+            "eventSlug": "nba-ind-mil-2026-03-15",
+            "outcome": "Bucks",
+            "name": "CemeterySun",
+            "pseudonym": "Pale-Bend",
+            "bio": "",
+            "profileImage": ""
+        }
+    ]"#;
+
+    /// Verify that the real API response shape deserializes correctly and all
+    /// mandatory fields are extracted — this guards against the previous bug
+    /// where `marketId` (non-existent) caused every trade to be dropped.
+    #[test]
+    fn test_parse_activity_events_real_shape() {
+        let events: Vec<ActivityEvent> = serde_json::from_str(ACTIVITY_JSON).unwrap();
+        assert_eq!(events.len(), 2, "should deserialize both events");
+
+        let trades = parse_activity_events(events);
+        assert_eq!(trades.len(), 2, "both trades should survive parsing");
+
+        let t = &trades[0];
+        assert_eq!(t.slug, "nba-por-phi-2026-03-15-spread-away-8pt5");
+        assert_eq!(
+            t.condition_id,
+            "0xfab8520004b4d201119f0362dc8678e8cf7f11b514efc48bc5a48aebf7974b50"
+        );
+        assert_eq!(t.side, "BUY");
+        assert_eq!(t.price, 0.49);
+        // usdcSize, not size (shares)
+        assert_eq!(t.size_usd, 9.604);
+        assert_eq!(t.tx_hash.as_deref(), Some("0x36b6c841eb1"));
+        assert_eq!(t.timestamp.timestamp(), 1773601939);
+    }
+
+    #[test]
+    fn test_parse_drops_events_missing_mandatory_fields() {
+        // Missing slug → should be dropped
+        let json = r#"[
+            {"conditionId": "0xabc", "side": "BUY", "price": 0.5, "usdcSize": 10.0, "timestamp": 1000},
+            {"slug": "some-market", "conditionId": "0xdef", "side": "BUY", "price": 0.6, "usdcSize": 20.0, "timestamp": 2000}
+        ]"#;
+        let events: Vec<ActivityEvent> = serde_json::from_str(json).unwrap();
+        let trades = parse_activity_events(events);
+        assert_eq!(trades.len(), 1, "event with missing slug should be dropped");
+        assert_eq!(trades[0].slug, "some-market");
+    }
+
+    #[test]
+    fn test_parse_uses_usdc_size_not_shares() {
+        let json = r#"[{
+            "slug": "market-a",
+            "conditionId": "0xabc",
+            "side": "SELL",
+            "price": 0.9,
+            "size": 1000.0,
+            "usdcSize": 900.0,
+            "timestamp": 1000
+        }]"#;
+        let events: Vec<ActivityEvent> = serde_json::from_str(json).unwrap();
+        let trades = parse_activity_events(events);
+        assert_eq!(trades.len(), 1);
+        // Must be usdcSize (900), not size/shares (1000)
+        assert_eq!(trades[0].size_usd, 900.0);
+    }
+
+    #[test]
+    fn test_parse_usdc_size_defaults_to_zero_when_absent() {
+        let json = r#"[{
+            "slug": "market-b",
+            "conditionId": "0xabc",
+            "side": "BUY",
+            "price": 0.5,
+            "timestamp": 1000
+        }]"#;
+        let events: Vec<ActivityEvent> = serde_json::from_str(json).unwrap();
+        let trades = parse_activity_events(events);
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].size_usd, 0.0);
+    }
+
     #[tokio::test]
     #[ignore] // hits real API
     async fn test_fetch_leaderboard_live() {
@@ -477,16 +603,32 @@ mod tests {
         let entries = fetch_leaderboard(&http, "ALL").await.unwrap();
         assert!(!entries.is_empty(), "leaderboard should have entries");
         assert!(entries.len() <= LEADERBOARD_SECTION_LIMIT);
-        // First entry should be rank 1
         assert_eq!(entries[0].rank, 1);
-        // Name should not be empty
         assert!(!entries[0].name.is_empty());
-        // Top trader should have positive PnL
         assert!(entries[0].pnl > 0.0);
-        // Print for manual inspection
         println!(
             "{}",
             format_multi_leaderboard(&[("All Time", entries.as_slice())])
         );
+    }
+
+    #[tokio::test]
+    #[ignore] // hits real API
+    async fn test_poll_trader_activity_live() {
+        let monitor = CopyTraderMonitor::new(Client::new());
+        // Top leaderboard trader from 2026-03-15
+        let wallet = "0x37c1874a60d348903594a96703e0507c518fc53a";
+        let since = chrono::Utc::now() - chrono::Duration::hours(24);
+        let trades = monitor.poll_trader_activity(wallet, since).await.unwrap();
+        assert!(
+            !trades.is_empty(),
+            "active trader should have recent trades"
+        );
+        for t in &trades {
+            assert!(!t.slug.is_empty(), "slug must be populated");
+            assert!(!t.condition_id.is_empty(), "condition_id must be populated");
+            assert!(t.price > 0.0 && t.price < 1.0, "price must be in (0,1)");
+            assert!(t.size_usd >= 0.0, "size_usd must be non-negative");
+        }
     }
 }
