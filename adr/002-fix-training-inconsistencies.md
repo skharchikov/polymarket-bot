@@ -1,6 +1,6 @@
 # ADR 002 — Fix Training/Live Pipeline Inconsistencies
 
-**Status**: draft
+**Status**: complete
 **Date**: 2026-03-15
 **Branch**: model/training-fixes
 
