@@ -77,5 +77,6 @@ jobs:
             echo $GHCR_PAT | docker login ghcr.io -u skharchikov --password-stdin && \
             cd $DEPLOY_DIR && \
             docker pull $IMAGE && \
+            docker compose build model-server && \
             docker compose up -d && \
             docker compose logs --tail=20 bot"
