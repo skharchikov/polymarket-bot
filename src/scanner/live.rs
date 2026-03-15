@@ -1013,52 +1013,51 @@ impl LiveScanner {
             "Top model candidates passed liquidity"
         );
 
-        // Step 4: Fetch news and match to top candidates (boost, not gate)
-        // No cross-cycle headline dedup for model-first — the 4h freshness
-        // window handles staleness, and the same headline may be relevant
-        // to different top candidates across cycles.
-        let (mut news, source_counts) = self.news.fetch_all().await;
-        let news_total = news.len();
+        // Step 4: Optionally fetch news and match to top candidates (Telegram context only).
+        // News has no effect on model predictions — disable via NEWS_ENABLED=false to save
+        // RSS + OpenAI embedding costs when running with a model sidecar.
+        let (news_total, news_new, news_matched, news_by_market) = if self.cfg.news_enabled {
+            let (mut news, _source_counts) = self.news.fetch_all().await;
+            let news_total = news.len();
 
-        let freshness_cutoff = chrono::Utc::now() - chrono::Duration::hours(4);
-        news.retain(|item| {
-            item.published
-                .map(|p| p >= freshness_cutoff)
-                .unwrap_or(true)
-        });
+            let freshness_cutoff = chrono::Utc::now() - chrono::Duration::hours(4);
+            news.retain(|item| {
+                item.published
+                    .map(|p| p >= freshness_cutoff)
+                    .unwrap_or(true)
+            });
+            dedup_news(&mut news);
+            let news_new = news.len();
 
-        // Dedup within this batch only (same headline from multiple RSS feeds)
-        dedup_news(&mut news);
-
-        let news_new = news.len();
-
-        // Match news to candidate markets only (not all eligible — saves embedding cost)
-        let candidate_markets: Vec<GammaMarket> =
-            candidates.iter().map(|c| c.market.clone()).collect();
-        let news_matches = if !news.is_empty() {
-            self.news
-                .match_to_markets(&news, &candidate_markets)
-                .await
-                .unwrap_or_default()
+            let candidate_markets: Vec<GammaMarket> =
+                candidates.iter().map(|c| c.market.clone()).collect();
+            let news_matches = if !news.is_empty() {
+                self.news
+                    .match_to_markets(&news, &candidate_markets)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let news_matched = news_matches.len();
+            let mut by_market: std::collections::HashMap<String, NewsMatch> =
+                std::collections::HashMap::new();
+            for nm in news_matches {
+                by_market.insert(nm.market.market_id.clone(), nm);
+            }
+            tracing::info!(
+                news_total,
+                news_new,
+                news_matched,
+                "News fetched and matched"
+            );
+            (news_total, news_new, news_matched, by_market)
         } else {
-            Vec::new()
+            tracing::debug!("News disabled (NEWS_ENABLED=false) — skipping fetch");
+            (0, 0, 0, std::collections::HashMap::new())
         };
-
-        // Build lookup: market_id → matched news
-        let mut news_by_market: std::collections::HashMap<String, &NewsMatch> =
-            std::collections::HashMap::new();
-        for nm in &news_matches {
-            news_by_market.insert(nm.market.market_id.clone(), nm);
-        }
-
-        let news_matched = news_matches.len();
-
-        tracing::info!(
-            news_total,
-            news_new,
-            news_matched,
-            "News fetched and matched to top candidates"
-        );
+        let source_counts: Vec<(String, usize)> = Vec::new();
+        let news_by_market = &news_by_market;
 
         // Step 5: Build signals from model candidates + optional news boost
         let mut signals = Vec::new();
