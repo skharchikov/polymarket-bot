@@ -1,6 +1,6 @@
 [package]
 name = "polymarket-bot"
-version = "0.5.32"
+version = "0.5.33"
 edition = "2024"
 repository = "https://github.com/skharchikov/polymarket-bot"
 license = "MIT"
