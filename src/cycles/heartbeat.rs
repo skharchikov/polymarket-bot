@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::sync::atomic::Ordering;
 
 use crate::config::AppConfig;
-use crate::live::{ScanStats, broadcast};
+use crate::live::{ScanStats, notify_owner};
 use crate::metrics;
 use crate::storage::postgres::PgPortfolio;
 use crate::strategy::StrategyProfile;
@@ -58,7 +58,7 @@ pub async fn heartbeat_cycle(
             .sum::<usize>(),
     );
 
-    broadcast(notifier, portfolio, &msg).await;
+    notify_owner(notifier, &msg).await;
     metrics::record_heartbeat();
     metrics::record_total_bankroll(bankroll);
     metrics::record_open_bets(open_count as u64);

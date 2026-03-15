@@ -65,6 +65,13 @@ pub async fn broadcast(notifier: &TelegramNotifier, portfolio: &PgPortfolio, mes
     notifier.broadcast(&subs, message).await;
 }
 
+/// Send a message only to the bot owner — operational noise subscribers don't need.
+pub async fn notify_owner(notifier: &TelegramNotifier, message: &str) {
+    if let Err(e) = notifier.send(message).await {
+        tracing::warn!(err = %e, "Failed to send owner-only message");
+    }
+}
+
 pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     tracing::info!(
         news_interval_mins = cfg.news_scan_interval_mins,

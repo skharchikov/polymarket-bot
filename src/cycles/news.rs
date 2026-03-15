@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::config::AppConfig;
 use crate::format;
-use crate::live::{ScanStats, broadcast};
+use crate::live::{ScanStats, broadcast, notify_owner};
 use crate::metrics;
 use crate::scanner::live::LiveScanner;
 use crate::storage::portfolio::{BetSide, NewBet};
@@ -315,7 +315,7 @@ pub async fn news_scan_cycle(
 
                 // Rejection details only logged, not sent to Telegram
 
-                broadcast(notifier, portfolio, &summary).await;
+                notify_owner(notifier, &summary).await;
             }
         }
         Err(e) => {
