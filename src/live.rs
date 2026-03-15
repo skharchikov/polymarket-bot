@@ -445,12 +445,29 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                         }
                     },
                     "leaderboard" => {
-                        match crate::scanner::copy_trader::fetch_leaderboard(&cmd_http).await {
-                            Ok(entries) => {
-                                crate::scanner::copy_trader::format_leaderboard(&entries)
+                        let (day_res, month_res, all_res) = tokio::join!(
+                            crate::scanner::copy_trader::fetch_leaderboard(&cmd_http, "DAY"),
+                            crate::scanner::copy_trader::fetch_leaderboard(&cmd_http, "MONTH"),
+                            crate::scanner::copy_trader::fetch_leaderboard(&cmd_http, "ALL"),
+                        );
+                        match (day_res, month_res, all_res) {
+                            (Ok(day), Ok(month), Ok(all)) => {
+                                crate::scanner::copy_trader::format_multi_leaderboard(&[
+                                    ("Today", day.as_slice()),
+                                    ("This Month", month.as_slice()),
+                                    ("All Time", all.as_slice()),
+                                ])
                             }
-                            Err(e) => {
-                                tracing::warn!(err = %e, "Failed to fetch leaderboard");
+                            (day_res, month_res, all_res) => {
+                                if let Err(e) = day_res.as_ref() {
+                                    tracing::warn!(err = %e, "Failed to fetch DAY leaderboard");
+                                }
+                                if let Err(e) = month_res.as_ref() {
+                                    tracing::warn!(err = %e, "Failed to fetch MONTH leaderboard");
+                                }
+                                if let Err(e) = all_res.as_ref() {
+                                    tracing::warn!(err = %e, "Failed to fetch ALL leaderboard");
+                                }
                                 "⚠️ Could not fetch leaderboard — try again shortly.".to_string()
                             }
                         }

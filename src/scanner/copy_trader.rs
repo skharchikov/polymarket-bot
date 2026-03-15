@@ -15,8 +15,8 @@ use crate::storage::postgres::{NewCopyTradeEvent, PgPortfolio};
 const DATA_API: &str = "https://data-api.polymarket.com";
 /// Default HTTP timeout for all data-API calls.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-/// Number of traders shown in the inline leaderboard reply.
-const LEADERBOARD_DISPLAY_LIMIT: usize = 15;
+/// Number of traders shown per period section in the inline leaderboard reply.
+const LEADERBOARD_SECTION_LIMIT: usize = 5;
 
 // ---------------------------------------------------------------------------
 // API response types
@@ -122,16 +122,21 @@ pub struct LeaderboardDisplay {
 // Standalone leaderboard helpers (no monitor instance required)
 // ---------------------------------------------------------------------------
 
-/// Fetch the public Polymarket leaderboard and return the top entries
-/// formatted for display.  This is **read-only** — nothing is written to the
-/// database.
+/// Fetch the public Polymarket leaderboard for a given time period and return
+/// the top entries formatted for display.  This is **read-only** — nothing is
+/// written to the database.
+///
+/// `time_period` must be one of `"DAY"`, `"WEEK"`, `"MONTH"`, or `"ALL"`.
 ///
 /// # Errors
 ///
 /// Returns an error if the HTTP request fails or the response cannot be
 /// parsed.
-pub async fn fetch_leaderboard(http: &Client) -> Result<Vec<LeaderboardDisplay>> {
-    let url = format!("{DATA_API}/v1/leaderboard?window=all&limit=50");
+pub async fn fetch_leaderboard(
+    http: &Client,
+    time_period: &str,
+) -> Result<Vec<LeaderboardDisplay>> {
+    let url = format!("{DATA_API}/v1/leaderboard?timePeriod={time_period}&limit=10");
 
     let entries: Vec<LeaderboardEntry> = http
         .get(&url)
@@ -155,7 +160,7 @@ pub async fn fetch_leaderboard(http: &Client) -> Result<Vec<LeaderboardDisplay>>
 
     let display = sorted
         .into_iter()
-        .take(LEADERBOARD_DISPLAY_LIMIT)
+        .take(LEADERBOARD_SECTION_LIMIT)
         .enumerate()
         .map(|(i, e)| {
             let pnl = e.pnl_f64();
@@ -177,8 +182,73 @@ pub async fn fetch_leaderboard(http: &Client) -> Result<Vec<LeaderboardDisplay>>
     Ok(display)
 }
 
-/// Format a slice of [`LeaderboardDisplay`] entries as a Telegram MarkdownV2-
-/// compatible message.
+/// Format a slice of [`LeaderboardDisplay`] entries as a single period section
+/// (no header or footer — used internally by [`format_multi_leaderboard`]).
+fn format_leaderboard_section(entries: &[LeaderboardDisplay]) -> String {
+    let mut lines = Vec::with_capacity(entries.len());
+
+    for entry in entries {
+        let pnl_str = format_dollars(entry.pnl);
+        let vol_str = format_dollars(entry.volume);
+
+        let line = match entry.rank {
+            1 => format!("🥇 *{}* — PnL: {} | Vol: {}", entry.name, pnl_str, vol_str),
+            2 => format!("🥈 *{}* — PnL: {} | Vol: {}", entry.name, pnl_str, vol_str),
+            3 => format!("🥉 *{}* — PnL: {} | Vol: {}", entry.name, pnl_str, vol_str),
+            n => format!(
+                "{} {}. {} — PnL: {} | Vol: {}",
+                return_rank_str(n),
+                n,
+                entry.name,
+                pnl_str,
+                vol_str,
+            ),
+        };
+
+        lines.push(line);
+    }
+
+    lines.join("\n")
+}
+
+/// Format leaderboard results for multiple time periods into a single Telegram
+/// message with one section per period.
+///
+/// `periods` is a slice of `(label, entries)` pairs, e.g.:
+/// `&[("Today", &day_entries), ("This Month", &month_entries), ("All Time", &all_entries)]`
+///
+/// # Example
+///
+/// ```ignore
+/// let msg = format_multi_leaderboard(&[
+///     ("Today", &day_entries),
+///     ("This Month", &month_entries),
+///     ("All Time", &all_entries),
+/// ]);
+/// notifier.send_to(&chat_id, &msg).await?;
+/// ```
+pub fn format_multi_leaderboard(periods: &[(&str, &[LeaderboardDisplay])]) -> String {
+    let mut parts = Vec::with_capacity(periods.len() + 2);
+    parts.push("🏆 *Polymarket Leaderboard*".to_string());
+
+    for (label, entries) in periods {
+        let section_header = format!("\n📅 *{label}*");
+        if entries.is_empty() {
+            parts.push(format!("{section_header}\n_No data available._"));
+        } else {
+            parts.push(format!(
+                "{section_header}\n{}",
+                format_leaderboard_section(entries)
+            ));
+        }
+    }
+
+    parts.push("\n_Data from Polymarket Data API_".to_string());
+    parts.join("\n")
+}
+
+/// Format a slice of [`LeaderboardDisplay`] entries as a Telegram-compatible
+/// message for a single unnamed period.
 ///
 /// # Example
 ///
@@ -186,6 +256,7 @@ pub async fn fetch_leaderboard(http: &Client) -> Result<Vec<LeaderboardDisplay>>
 /// let msg = format_leaderboard(&entries);
 /// notifier.send_to(&chat_id, &msg).await?;
 /// ```
+#[allow(dead_code)]
 pub fn format_leaderboard(entries: &[LeaderboardDisplay]) -> String {
     if entries.is_empty() {
         return "🏆 *Polymarket Leaderboard*\n\n_No data available._".to_string();
@@ -193,33 +264,7 @@ pub fn format_leaderboard(entries: &[LeaderboardDisplay]) -> String {
 
     let mut lines = Vec::with_capacity(entries.len() + 3);
     lines.push("🏆 *Polymarket Leaderboard*\n".to_string());
-
-    for entry in entries {
-        let medal = match entry.rank {
-            1 => "🥇",
-            2 => "🥈",
-            3 => "🥉",
-            n => return_rank_str(n),
-        };
-
-        let pnl_str = format_dollars(entry.pnl);
-        let vol_str = format_dollars(entry.volume);
-
-        let line = if entry.rank <= 3 {
-            format!(
-                "{medal} *{}* — PnL: {} | Vol: {}",
-                entry.name, pnl_str, vol_str
-            )
-        } else {
-            format!(
-                "{} {}. {} — PnL: {} | Vol: {}",
-                medal, entry.rank, entry.name, pnl_str, vol_str,
-            )
-        };
-
-        lines.push(line);
-    }
-
+    lines.push(format_leaderboard_section(entries));
     lines.push("\n_Data from Polymarket Data API_".to_string());
     lines.join("\n")
 }
@@ -281,7 +326,7 @@ impl CopyTraderMonitor {
         min_volume: f64,
         max_traders: usize,
     ) -> Result<usize> {
-        let url = format!("{DATA_API}/v1/leaderboard?window=all&limit=50",);
+        let url = format!("{DATA_API}/v1/leaderboard?timePeriod=ALL&limit=50");
 
         let entries: Vec<LeaderboardEntry> = self
             .http
@@ -475,9 +520,9 @@ mod tests {
     #[ignore] // hits real API
     async fn test_fetch_leaderboard_live() {
         let http = Client::new();
-        let entries = fetch_leaderboard(&http).await.unwrap();
+        let entries = fetch_leaderboard(&http, "ALL").await.unwrap();
         assert!(!entries.is_empty(), "leaderboard should have entries");
-        assert!(entries.len() <= LEADERBOARD_DISPLAY_LIMIT);
+        assert!(entries.len() <= LEADERBOARD_SECTION_LIMIT);
         // First entry should be rank 1
         assert_eq!(entries[0].rank, 1);
         // Name should not be empty
