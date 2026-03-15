@@ -210,31 +210,21 @@ pub async fn copy_trade_cycle(
                 // Get trader's record with us
                 let trader_record = portfolio.copy_trader_record(&strategy_name).await?;
 
-                let msg = format!(
-                    "👥 *Copy Trade*\n\
-                     📋 {question}\n\
-                     💸 *Bet: 🟢 YES*\n\
-                     💵 Stake: `€{cost:.2}` ({shares:.1} shares @ `{price:.1}¢`)\n\
-                     📈 Edge: +{edge:.1}% | Kelly: {kelly:.1}%\n\
-                     {ml_info}\n\
-                     👤 Trader: `{trader_display}`\n\
-                     📊 Trader record: {wins}W/{losses}L ({pnl:+.2}€)\n\
-                     💰 Trader bankroll: `€{bankroll:.2}`\n\
-                     🔓 Open bets: {open}",
-                    question = format::truncate(&market.question, 60),
-                    cost = bet_amount,
-                    shares = shares,
-                    price = slipped_price * 100.0,
-                    edge = edge * 100.0,
-                    kelly = kelly * 100.0,
-                    ml_info = ml_info,
-                    trader_display = trader_display,
-                    wins = trader_record.0,
-                    losses = trader_record.1,
-                    pnl = trader_record.2,
-                    bankroll = new_bankroll,
-                    open = open_count,
-                );
+                let msg = crate::format::format_copy_bet(&crate::format::CopyBetNotif {
+                    question: &format::truncate(&market.question, 60),
+                    cost: bet_amount,
+                    shares,
+                    price_cents: slipped_price * 100.0,
+                    edge_pct: edge * 100.0,
+                    kelly_pct: kelly * 100.0,
+                    ml_info: &ml_info,
+                    trader_display: &trader_display,
+                    wins: trader_record.0,
+                    losses: trader_record.1,
+                    trader_pnl: trader_record.2,
+                    bankroll: new_bankroll,
+                    open: open_count,
+                });
                 broadcast(notifier, portfolio, &msg).await;
                 bets_placed += 1;
             }

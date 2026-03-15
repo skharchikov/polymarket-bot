@@ -233,7 +233,7 @@ impl PgPortfolio {
         };
 
         // Build per-strategy stats
-        let mut strat_lines = Vec::new();
+        let mut strat_stats = Vec::new();
         let mut total_bankroll = 0.0_f64;
         let mut total_pnl = 0.0_f64;
         let mut total_wins = 0_usize;
@@ -241,12 +241,6 @@ impl PgPortfolio {
         let mut total_open = 0_usize;
 
         for strat in &strategies {
-            let label = match strat.as_str() {
-                "aggressive" => "🔥",
-                "balanced" => "⚖️",
-                "conservative" => "🛡️",
-                _ => "📊",
-            };
             let s_resolved: Vec<_> = resolved.iter().filter(|b| &b.strategy == strat).collect();
             let s_open_count = open.iter().filter(|b| &b.strategy == strat).count();
             let s_wins = s_resolved.iter().filter(|b| b.won == Some(true)).count();
@@ -258,11 +252,6 @@ impl PgPortfolio {
             } else {
                 0.0
             };
-            let s_wr = if s_wins + s_losses > 0 {
-                s_wins as f64 / (s_wins + s_losses) as f64 * 100.0
-            } else {
-                0.0
-            };
 
             total_bankroll += s_bankroll;
             total_pnl += s_pnl;
@@ -270,28 +259,20 @@ impl PgPortfolio {
             total_losses += s_losses;
             total_open += s_open_count;
 
-            strat_lines.push(format!(
-                "{label} *{strat}*\n\
-                 \u{00a0}\u{00a0}💰 `€{s_bankroll:.2}` | ROI `{s_roi:+.1}%`\n\
-                 \u{00a0}\u{00a0}💵 PnL `€{s_pnl:+.2}` | {s_wins}W/{s_losses}L ({s_wr:.0}%)\n\
-                 \u{00a0}\u{00a0}🔓 {s_open_count} open",
-            ));
+            strat_stats.push(crate::format::StratStats {
+                name: strat.clone(),
+                bankroll: s_bankroll,
+                roi: s_roi,
+                pnl: s_pnl,
+                wins: s_wins,
+                losses: s_losses,
+                open: s_open_count,
+            });
         }
-
-        let total_roi = if starting > 0.0 {
-            (total_bankroll - starting) / starting * 100.0
-        } else {
-            0.0
-        };
-        let total_wr = if total_wins + total_losses > 0 {
-            total_wins as f64 / (total_wins + total_losses) as f64 * 100.0
-        } else {
-            0.0
-        };
 
         // Per-source breakdown
         let all_resolved: Vec<&Bet> = resolved.iter().collect();
-        let mut source_lines = Vec::new();
+        let mut source_stats = Vec::new();
         for src in &["xgboost", "llm_consensus"] {
             let src_bets: Vec<_> = all_resolved.iter().filter(|b| b.source == *src).collect();
             if src_bets.is_empty() {
@@ -300,21 +281,13 @@ impl PgPortfolio {
             let src_wins = src_bets.iter().filter(|b| b.won == Some(true)).count();
             let src_losses = src_bets.iter().filter(|b| b.won == Some(false)).count();
             let src_pnl: f64 = src_bets.iter().filter_map(|b| b.pnl).sum();
-            let src_wr = if src_wins + src_losses > 0 {
-                src_wins as f64 / (src_wins + src_losses) as f64 * 100.0
-            } else {
-                0.0
-            };
-            let label = if *src == "xgboost" { "🤖" } else { "🧠" };
-            source_lines.push(format!(
-                "{label} *{src}*: {src_wins}W/{src_losses}L ({src_wr:.0}%) | PnL `€{src_pnl:+.2}`",
-            ));
+            source_stats.push(crate::format::SourceStats {
+                name: src.to_string(),
+                wins: src_wins,
+                losses: src_losses,
+                pnl: src_pnl,
+            });
         }
-        let source_section = if source_lines.is_empty() {
-            String::new()
-        } else {
-            format!("\n\n📡 *By Source*\n{}", source_lines.join("\n"))
-        };
 
         // Fetch live unrealized PnL from current market prices
         let (unrealized, exposure) = if total_open > 0 {
@@ -322,21 +295,43 @@ impl PgPortfolio {
         } else {
             (0.0, 0.0)
         };
-        let unrealized_section = if total_open > 0 {
-            format!("\n📈 Unrealized: `€{unrealized:+.2}` (€{exposure:.2} deployed)\n")
-        } else {
-            String::new()
+
+        // Copy-trade aggregate
+        let copy_traders = self
+            .get_active_traders()
+            .await
+            .map(|v| v.len())
+            .unwrap_or(0);
+        let copy_open = open
+            .iter()
+            .filter(|b| b.strategy.starts_with("copy:"))
+            .count();
+        let copy_pnl: f64 = resolved
+            .iter()
+            .filter(|b| b.strategy.starts_with("copy:"))
+            .filter_map(|b| b.pnl)
+            .sum();
+        let copy_trade = Some(crate::format::CopyTradeSummary {
+            traders: copy_traders,
+            open: copy_open,
+            pnl: copy_pnl,
+        });
+
+        let stats_data = crate::format::StatsData {
+            total_bankroll,
+            starting,
+            total_pnl,
+            total_wins,
+            total_losses,
+            total_open,
+            unrealized,
+            exposure,
+            strategies: strat_stats,
+            sources: source_stats,
+            copy_trade,
         };
 
-        Ok(format!(
-            "📊 *Bot Statistics*\n\n\
-             💰 Bankroll: `€{total_bankroll:.2}` (started: `€{starting:.2}`)\n\
-             💵 Realized PnL: `€{total_pnl:+.2}` | ROI: `{total_roi:+.1}%`\n\
-             {unrealized_section}\
-             📋 {total_wins}W / {total_losses}L ({total_wr:.0}%) | {total_open} open\n\n\
-             {strat_details}{source_section}",
-            strat_details = strat_lines.join("\n\n"),
-        ))
+        Ok(crate::format::format_stats(&stats_data))
     }
 
     /// Build a summary of open bets for /open command.
@@ -1473,41 +1468,36 @@ impl PgPortfolio {
     /// Build a summary of followed traders for the /traders command.
     pub async fn traders_summary(&self) -> Result<String> {
         let traders = self.get_active_traders().await?;
-        if traders.is_empty() {
-            return Ok("👥 *Followed Traders*\n\nNo traders followed yet.\nOwner can use `/follow <wallet>` to add one.".to_string());
-        }
 
-        let mut lines = vec![format!("👥 *Followed Traders* ({})\n", traders.len())];
+        let mut rows = Vec::with_capacity(traders.len());
         for t in &traders {
             let short = &t.proxy_wallet[..8.min(t.proxy_wallet.len())];
-            let name = t.username.as_deref().unwrap_or(short);
+            let name = t.username.as_deref().unwrap_or(short).to_string();
             let strat = format!("copy:{short}");
             let bankroll = self.strategy_bankroll(&strat).await.unwrap_or(0.0);
             let (wins, losses, pnl) = self.copy_trader_record(&strat).await.unwrap_or((0, 0, 0.0));
-            let open: Vec<_> = self
+            let open_count = self
                 .open_bets()
                 .await
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|b| b.strategy == strat)
-                .collect();
+                .count();
 
-            let rank = t.rank.map(|r| format!("#{r}")).unwrap_or("—".into());
-            let poly_pnl = t
-                .pnl
-                .map(|p| format!("${:.0}k", p / 1000.0))
-                .unwrap_or("—".into());
-
-            lines.push(format!(
-                "👤 *{name}* (`{short}...`)\n\
-                 \u{00a0}\u{00a0}🏆 Rank: {rank} | Poly PnL: {poly_pnl}\n\
-                 \u{00a0}\u{00a0}💰 Bankroll: `€{bankroll:.2}`\n\
-                 \u{00a0}\u{00a0}📊 Record: {wins}W/{losses}L ({pnl:+.2}€)\n\
-                 \u{00a0}\u{00a0}🔓 Open: {open}",
-                open = open.len(),
-            ));
+            rows.push(crate::format::TraderRow {
+                name,
+                wallet_short: short.to_string(),
+                rank: t.rank,
+                poly_pnl: t.pnl,
+                bankroll,
+                wins,
+                losses,
+                pnl,
+                open: open_count,
+            });
         }
-        Ok(lines.join("\n"))
+
+        Ok(crate::format::format_traders(&rows))
     }
 }
 

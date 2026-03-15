@@ -163,6 +163,251 @@ pub fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Per-strategy performance row for `/stats`.
+pub struct StratStats {
+    pub name: String,
+    pub bankroll: f64,
+    pub roi: f64,
+    pub pnl: f64,
+    pub wins: usize,
+    pub losses: usize,
+    pub open: usize,
+}
+
+/// Per-source performance row for `/stats`.
+pub struct SourceStats {
+    pub name: String,
+    pub wins: usize,
+    pub losses: usize,
+    pub pnl: f64,
+}
+
+/// Aggregate copy-trade figures for `/stats`.
+pub struct CopyTradeSummary {
+    pub traders: usize,
+    pub open: usize,
+    pub pnl: f64,
+}
+
+/// All data required to render the `/stats` message.
+pub struct StatsData {
+    pub total_bankroll: f64,
+    pub starting: f64,
+    pub total_pnl: f64,
+    pub total_wins: usize,
+    pub total_losses: usize,
+    pub total_open: usize,
+    pub unrealized: f64,
+    pub exposure: f64,
+    pub strategies: Vec<StratStats>,
+    pub sources: Vec<SourceStats>,
+    pub copy_trade: Option<CopyTradeSummary>,
+}
+
+/// Render the `/stats` message from structured data.
+pub fn format_stats(data: &StatsData) -> String {
+    let total_roi = if data.starting > 0.0 {
+        (data.total_bankroll - data.starting) / data.starting * 100.0
+    } else {
+        0.0
+    };
+    let total_wr = if data.total_wins + data.total_losses > 0 {
+        data.total_wins as f64 / (data.total_wins + data.total_losses) as f64 * 100.0
+    } else {
+        0.0
+    };
+
+    let unrealized_section = if data.total_open > 0 {
+        format!(
+            "\n📈 Unrealized: `€{:+.2}` (€{:.2} deployed)\n",
+            data.unrealized, data.exposure
+        )
+    } else {
+        String::new()
+    };
+
+    let strat_lines: Vec<String> = data
+        .strategies
+        .iter()
+        .map(|s| {
+            let label = match s.name.as_str() {
+                "aggressive" => "🔥",
+                "balanced" => "⚖️",
+                "conservative" => "🛡️",
+                _ => "📊",
+            };
+            let s_wr = if s.wins + s.losses > 0 {
+                s.wins as f64 / (s.wins + s.losses) as f64 * 100.0
+            } else {
+                0.0
+            };
+            format!(
+                "{label} *{name}*\n\
+                 \u{00a0}\u{00a0}💰 `€{bankroll:.2}` | ROI `{roi:+.1}%`\n\
+                 \u{00a0}\u{00a0}💵 PnL `€{pnl:+.2}` | {wins}W/{losses}L ({wr:.0}%)\n\
+                 \u{00a0}\u{00a0}🔓 {open} open",
+                name = s.name,
+                bankroll = s.bankroll,
+                roi = s.roi,
+                pnl = s.pnl,
+                wins = s.wins,
+                losses = s.losses,
+                wr = s_wr,
+                open = s.open,
+            )
+        })
+        .collect();
+
+    let mut source_lines = Vec::new();
+    for src in &data.sources {
+        let label = if src.name == "xgboost" {
+            "🤖"
+        } else {
+            "🧠"
+        };
+        let src_wr = if src.wins + src.losses > 0 {
+            src.wins as f64 / (src.wins + src.losses) as f64 * 100.0
+        } else {
+            0.0
+        };
+        source_lines.push(format!(
+            "{label} *{name}*: {wins}W/{losses}L ({wr:.0}%) | PnL `€{pnl:+.2}`",
+            name = src.name,
+            wins = src.wins,
+            losses = src.losses,
+            wr = src_wr,
+            pnl = src.pnl,
+        ));
+    }
+    let source_section = if source_lines.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n📡 *By Source*\n{}", source_lines.join("\n"))
+    };
+
+    let copy_section = match &data.copy_trade {
+        Some(ct) if ct.traders > 0 => format!(
+            "\n\n👥 *Copy Trading*: {} traders | {} open | PnL `€{:+.2}`",
+            ct.traders, ct.open, ct.pnl
+        ),
+        _ => String::new(),
+    };
+
+    format!(
+        "📊 *Bot Statistics*\n\n\
+         💰 Bankroll: `€{bankroll:.2}` (started: `€{starting:.2}`)\n\
+         💵 Realized PnL: `€{pnl:+.2}` | ROI: `{roi:+.1}%`\n\
+         {unrealized_section}\
+         📋 {wins}W / {losses}L ({wr:.0}%) | {open} open\n\n\
+         {strat_details}{source_section}{copy_section}",
+        bankroll = data.total_bankroll,
+        starting = data.starting,
+        pnl = data.total_pnl,
+        roi = total_roi,
+        wins = data.total_wins,
+        losses = data.total_losses,
+        wr = total_wr,
+        open = data.total_open,
+        strat_details = strat_lines.join("\n\n"),
+    )
+}
+
+/// A single followed-trader row for `/traders`.
+pub struct TraderRow {
+    pub name: String,
+    pub wallet_short: String,
+    pub rank: Option<i32>,
+    pub poly_pnl: Option<f64>,
+    pub bankroll: f64,
+    pub wins: usize,
+    pub losses: usize,
+    pub pnl: f64,
+    pub open: usize,
+}
+
+/// Render the `/traders` message from a slice of rows.
+pub fn format_traders(traders: &[TraderRow]) -> String {
+    if traders.is_empty() {
+        return "👥 *Followed Traders*\n\nNo traders followed yet.\nOwner can use `/follow <wallet>` to add one.".to_string();
+    }
+
+    let mut lines = vec![format!("👥 *Followed Traders* ({})\n", traders.len())];
+    for t in traders {
+        let rank = t
+            .rank
+            .map(|r| format!("#{r}"))
+            .unwrap_or_else(|| "—".into());
+        let poly_pnl = t
+            .poly_pnl
+            .map(|p| format!("${:.0}k", p / 1000.0))
+            .unwrap_or_else(|| "—".into());
+        lines.push(format!(
+            "👤 *{name}* (`{short}...`)\n\
+             \u{00a0}\u{00a0}🏆 Rank: {rank} | Poly PnL: {poly_pnl}\n\
+             \u{00a0}\u{00a0}💰 Bankroll: `€{bankroll:.2}`\n\
+             \u{00a0}\u{00a0}📊 Record: {wins}W/{losses}L ({pnl:+.2}€)\n\
+             \u{00a0}\u{00a0}🔓 Open: {open}",
+            name = t.name,
+            short = t.wallet_short,
+            bankroll = t.bankroll,
+            wins = t.wins,
+            losses = t.losses,
+            pnl = t.pnl,
+            open = t.open,
+        ));
+    }
+    lines.join("\n")
+}
+
+/// Data for a copy-trade bet notification.
+pub struct CopyBetNotif<'a> {
+    pub question: &'a str,
+    pub cost: f64,
+    pub shares: f64,
+    /// Price already multiplied by 100 (cents).
+    pub price_cents: f64,
+    /// Edge already multiplied by 100 (percent).
+    pub edge_pct: f64,
+    /// Kelly already multiplied by 100 (percent).
+    pub kelly_pct: f64,
+    pub ml_info: &'a str,
+    pub trader_display: &'a str,
+    pub wins: usize,
+    pub losses: usize,
+    pub trader_pnl: f64,
+    pub bankroll: f64,
+    pub open: usize,
+}
+
+/// Render the copy-trade bet notification message.
+pub fn format_copy_bet(n: &CopyBetNotif) -> String {
+    format!(
+        "👥 *Copy Trade*\n\
+         📋 {question}\n\
+         💸 *Bet: 🟢 YES*\n\
+         💵 Stake: `€{cost:.2}` ({shares:.1} shares @ `{price:.1}¢`)\n\
+         📈 Edge: +{edge:.1}% | Kelly: {kelly:.1}%\n\
+         {ml_info}\n\
+         👤 Trader: `{trader_display}`\n\
+         📊 Trader record: {wins}W/{losses}L ({pnl:+.2}€)\n\
+         💰 Trader bankroll: `€{bankroll:.2}`\n\
+         🔓 Open bets: {open}",
+        question = n.question,
+        cost = n.cost,
+        shares = n.shares,
+        price = n.price_cents,
+        edge = n.edge_pct,
+        kelly = n.kelly_pct,
+        ml_info = n.ml_info,
+        trader_display = n.trader_display,
+        wins = n.wins,
+        losses = n.losses,
+        pnl = n.trader_pnl,
+        bankroll = n.bankroll,
+        open = n.open,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
