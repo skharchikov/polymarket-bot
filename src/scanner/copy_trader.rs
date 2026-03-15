@@ -229,16 +229,14 @@ pub fn format_multi_leaderboard(periods: &[(&str, &[LeaderboardDisplay])]) -> St
     let mut parts = Vec::with_capacity(periods.len() + 2);
     parts.push("🏆 *Polymarket Leaderboard*".to_string());
 
-    let last_idx = periods.len().saturating_sub(1);
-    for (i, (label, entries)) in periods.iter().enumerate() {
-        let show_wallets = i == last_idx;
+    for (label, entries) in periods.iter() {
         let section_header = format!("\n📅 *{label}*");
         if entries.is_empty() {
             parts.push(format!("{section_header}\n_No data available._"));
         } else {
             parts.push(format!(
                 "{section_header}\n{}",
-                format_leaderboard_section(entries, show_wallets)
+                format_leaderboard_section(entries, true)
             ));
         }
     }
