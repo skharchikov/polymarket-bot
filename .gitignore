@@ -6,3 +6,4 @@ portfolio_state.json
 __pycache__/
 *.pyc
 CHANGELOG.gen
+.envrc
