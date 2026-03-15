@@ -38,6 +38,7 @@ MODEL_PATH = Path(MODEL_DIR) / "ensemble.joblib"
 SCALER_PATH = Path(MODEL_DIR) / "scaler.joblib"
 MAX_AGE_HOURS = int(os.environ.get("RETRAIN_MAX_AGE_HOURS", "24"))
 RETRAIN_ON_SCHEDULE = os.environ.get("RETRAIN_ON_SCHEDULE", "true").lower() == "true"
+RETRAIN_MARKETS = int(os.environ.get("RETRAIN_MARKETS", "3000"))
 
 FEATURE_NAMES = [
     "yes_price", "momentum_1h", "momentum_24h", "volatility_24h", "rsi",
@@ -101,7 +102,7 @@ def _run_retrain():
     try:
         log.info("Retrain: fetching data...")
         subprocess.run(
-            [sys.executable, "fetch_data.py", "--markets", "1000",
+            [sys.executable, "fetch_data.py", "--markets", str(RETRAIN_MARKETS),
              "--output", f"{MODEL_DIR}/training_data.json"],
             check=True, capture_output=True, text=True,
         )

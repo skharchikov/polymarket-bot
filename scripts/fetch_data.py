@@ -262,7 +262,8 @@ def _extract_snapshot(prices: np.ndarray, timestamps: np.ndarray,
 
     # Only keep snapshots within the deployment window: bot bets at 3-14d remaining.
     # Snapshots outside this range teach the model patterns that never appear in live.
-    if days_to_expiry > 14.0:
+    # Lower bound: sub-12h markets (5-min Bitcoin, hourly) are noise — never appear in live.
+    if days_to_expiry > 14.0 or days_to_expiry < 0.5:
         return None
 
     # Category detection — must match live Rust logic (category + question, same keywords)
