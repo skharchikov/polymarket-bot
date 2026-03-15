@@ -49,6 +49,7 @@ log = structlog.get_logger("sidecar")
 MODEL_DIR = os.environ.get("MODEL_DIR", "/model")
 MODEL_PATH = Path(MODEL_DIR) / "ensemble.joblib"
 SCALER_PATH = Path(MODEL_DIR) / "scaler.joblib"
+ENCODING_PATH = Path(MODEL_DIR) / "category_encoding.json"
 MAX_AGE_HOURS = int(os.environ.get("RETRAIN_MAX_AGE_HOURS", "24"))
 RETRAIN_ON_SCHEDULE = os.environ.get("RETRAIN_ON_SCHEDULE", "true").lower() == "true"
 RETRAIN_MARKETS = int(os.environ.get("RETRAIN_MARKETS", "3000"))
@@ -56,12 +57,17 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 # Trigger warm-start retrain after this many new resolved bets accumulate
 WARMSTART_TRIGGER_N = int(os.environ.get("WARMSTART_TRIGGER_N", "10"))
 
+# Feature names — must stay in sync with MarketFeatures::NAMES in src/model/features.rs
 FEATURE_NAMES = [
     "yes_price", "momentum_1h", "momentum_24h", "volatility_24h", "rsi",
     "log_volume", "log_liquidity", "days_to_expiry",
     "is_crypto", "is_politics", "is_sports",
     "price_change_1d", "price_change_1w",
+    "days_since_created", "created_to_expiry_span",
 ]
+
+# Category columns subject to target encoding (binary → historical YES rate)
+CATEGORY_COLS = ["is_crypto", "is_politics", "is_sports"]
 
 app = FastAPI(title="Polymarket ML Sidecar")
 
@@ -69,6 +75,8 @@ app = FastAPI(title="Polymarket ML Sidecar")
 model = None
 scaler = None
 model_loaded_at = None
+# Category encoding map: {col: {"0": rate, "1": rate}} — loaded from model artifact
+category_encoding: dict[str, dict[str, float]] = {}
 
 
 class RetrainStatus(str, Enum):
@@ -91,13 +99,21 @@ _retrain = _RetrainState()
 
 
 def load_model():
-    global model, scaler, model_loaded_at
+    global model, scaler, model_loaded_at, category_encoding
     if not MODEL_PATH.exists():
         log.warning("Model not found at %s, waiting for training...", MODEL_PATH)
         return False
     model = joblib.load(MODEL_PATH)
     scaler = joblib.load(SCALER_PATH) if SCALER_PATH.exists() else None
     model_loaded_at = time.time()
+    if ENCODING_PATH.exists():
+        import json
+        with open(ENCODING_PATH) as f:
+            category_encoding = json.load(f)
+        log.info("Loaded category encoding from %s", ENCODING_PATH)
+    else:
+        category_encoding = {}
+        log.warning("No category_encoding.json found — category features will use raw binary values")
     log.info("Loaded ensemble from %s", MODEL_PATH)
     return True
 
@@ -313,6 +329,23 @@ class FeatureMap(BaseModel):
     is_sports: float
     price_change_1d: float
     price_change_1w: float
+    days_since_created: float
+    created_to_expiry_span: float
+
+    def to_row(self) -> dict[str, float]:
+        return {k: getattr(self, k) for k in FEATURE_NAMES}
+
+
+def _apply_encoding(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply target encoding to category columns if encoding map is loaded."""
+    if not category_encoding:
+        return df
+    df = df.copy()
+    for col in CATEGORY_COLS:
+        if col in category_encoding and col in df.columns:
+            enc = category_encoding[col]
+            df[col] = df[col].apply(lambda v: enc.get(str(int(v)), enc.get("0", v)))
+    return df
 
 
 class PredictRequest(BaseModel):
@@ -368,6 +401,7 @@ def predict(req: PredictRequest):
         raise HTTPException(status_code=503, detail="Model not loaded")
 
     features = pd.DataFrame([req.features.model_dump()], dtype=np.float64)[FEATURE_NAMES]
+    features = _apply_encoding(features)
     if scaler is not None:
         features = pd.DataFrame(scaler.transform(features), columns=FEATURE_NAMES)
 
@@ -393,6 +427,7 @@ def predict_batch(req: PredictBatchRequest):
         return BatchResponse(predictions=[])
 
     features = pd.DataFrame([item.features.model_dump() for item in req.items], dtype=np.float64)[FEATURE_NAMES]
+    features = _apply_encoding(features)
     if scaler is not None:
         features = pd.DataFrame(scaler.transform(features), columns=FEATURE_NAMES)
 

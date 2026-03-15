@@ -18,6 +18,10 @@ pub struct OrderBookStats {
 /// order_imbalance, spread — these were always 0 in training (not available
 /// retroactively for historical markets) but non-zero in live inference,
 /// causing distribution shift with zero learning signal.
+///
+/// v2 additions: days_since_created, created_to_expiry_span (temporal features).
+/// Category flags (is_crypto/is_politics/is_sports) are sent as binary 0/1 from Rust;
+/// the Python sidecar applies target encoding before model inference.
 #[derive(Debug, Clone, Serialize)]
 pub struct MarketFeatures {
     pub yes_price: f64,
@@ -34,6 +38,9 @@ pub struct MarketFeatures {
     // Gamma API price changes (more reliable than computed momentum)
     pub price_change_1d: f64,
     pub price_change_1w: f64,
+    // Temporal features (v2)
+    pub days_since_created: f64,
+    pub created_to_expiry_span: f64,
 }
 
 impl MarketFeatures {
@@ -52,16 +59,9 @@ impl MarketFeatures {
         "is_sports",
         "price_change_1d",
         "price_change_1w",
+        "days_since_created",
+        "created_to_expiry_span",
     ];
-
-    /// Serialize features as JSONB-compatible value for the feature store (ADR 004).
-    pub fn to_json(&self) -> serde_json::Value {
-        let mut map = serde_json::Map::new();
-        for (name, val) in Self::NAMES.iter().zip(self.to_vec()) {
-            map.insert(name.to_string(), serde_json::json!(val));
-        }
-        serde_json::Value::Object(map)
-    }
 
     /// Convert to fixed-order f64 vector for model input.
     pub fn to_vec(&self) -> Vec<f64> {
@@ -79,6 +79,8 @@ impl MarketFeatures {
             self.is_sports,
             self.price_change_1d,
             self.price_change_1w,
+            self.days_since_created,
+            self.created_to_expiry_span,
         ]
     }
 
@@ -122,17 +124,33 @@ impl MarketFeatures {
         let log_liquidity = (market.liquidity_num + 1.0).ln();
 
         // Days to expiry
-        let days_to_expiry = market
+        let end_ts = market
             .end_date
             .as_ref()
             .and_then(|d| chrono::DateTime::parse_from_rfc3339(d).ok())
-            .map(|end| {
-                let remaining = end.timestamp() - now_ts;
-                (remaining as f64 / 86400.0).max(0.0)
-            })
+            .map(|d| d.timestamp());
+
+        let days_to_expiry = end_ts
+            .map(|end| ((end - now_ts) as f64 / 86400.0).max(0.0))
             .unwrap_or(30.0);
 
-        // Category flags
+        // Temporal features
+        let created_ts = market
+            .created_at
+            .as_ref()
+            .and_then(|d| chrono::DateTime::parse_from_rfc3339(d).ok())
+            .map(|d| d.timestamp());
+
+        let days_since_created = created_ts
+            .map(|c| ((now_ts - c) as f64 / 86400.0).max(0.0))
+            .unwrap_or(30.0);
+
+        let created_to_expiry_span = match (created_ts, end_ts) {
+            (Some(c), Some(e)) => ((e - c) as f64 / 86400.0).max(0.0),
+            _ => 30.0,
+        };
+
+        // Category flags (sent as binary; sidecar applies target encoding)
         let cat = market
             .category
             .as_deref()
@@ -178,6 +196,8 @@ impl MarketFeatures {
             is_sports,
             price_change_1d,
             price_change_1w,
+            days_since_created,
+            created_to_expiry_span,
         }
     }
 }
@@ -329,6 +349,8 @@ mod tests {
             is_sports: 0.0,
             price_change_1d: 0.03,
             price_change_1w: -0.05,
+            days_since_created: 20.0,
+            created_to_expiry_span: 30.0,
         };
         assert_eq!(features.to_vec().len(), MarketFeatures::NAMES.len());
     }

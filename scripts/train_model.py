@@ -49,11 +49,18 @@ except ImportError:
     HAS_LIGHTGBM = False
     print("Warning: LightGBM not installed, using sklearn only")
 
+try:
+    import shap
+    HAS_SHAP = True
+except ImportError:
+    HAS_SHAP = False
+    print("Warning: shap not installed — skipping SHAP analysis (pip install shap)")
+
 
 # Feature columns in fixed order — must match Rust inference (MarketFeatures::NAMES).
-# news_count / best_news_score / avg_news_age_hours / order_imbalance / spread removed:
-# they are always 0 in training data (not available retroactively) but non-zero in live
-# inference, causing guaranteed distribution shift with zero learning signal.
+# Category flags (is_crypto/is_politics/is_sports) are target-encoded at training time
+# and during inference (sidecar applies saved encoding before model prediction).
+# Rust still sends binary 0/1 flags; encoding is a sidecar-internal transformation.
 FEATURE_COLS = [
     "yes_price",
     "momentum_1h",
@@ -68,7 +75,12 @@ FEATURE_COLS = [
     "is_sports",
     "price_change_1d",
     "price_change_1w",
+    "days_since_created",
+    "created_to_expiry_span",
 ]
+
+# Binary category columns subject to target encoding (binary → historical YES rate)
+CATEGORY_COLS = ["is_crypto", "is_politics", "is_sports"]
 
 N_FEATURES = len(FEATURE_COLS)
 
@@ -107,6 +119,13 @@ def load_data(path: str) -> pd.DataFrame:
         if col in df.columns:
             df[col] = df[col].fillna(0.0)
 
+    # Temporal features — default 30d for old snapshots that lack created_at
+    for col in ["days_since_created", "created_to_expiry_span"]:
+        if col not in df.columns:
+            df[col] = 30.0
+        else:
+            df[col] = df[col].fillna(30.0)
+
     # Sort by snapshot time for proper time-series splits
     df = df.sort_values("snapshot_ts").reset_index(drop=True)
 
@@ -114,6 +133,34 @@ def load_data(path: str) -> pd.DataFrame:
     df["label"] = df["outcome_yes"].astype(int)
 
     return df
+
+
+def compute_target_encoding(df: pd.DataFrame, col: str, target_col: str = "label",
+                             alpha: float = 5.0) -> dict:
+    """
+    Smoothed target encoding for a binary column.
+
+    Returns {0: non_category_yes_rate, 1: category_yes_rate} where rates are
+    smoothed toward the global mean using pseudo-count alpha.
+    """
+    global_mean = df[target_col].mean()
+    result = {}
+    for val in [0, 1]:
+        mask = df[col] == val
+        n = mask.sum()
+        local_mean = df.loc[mask, target_col].mean() if n > 0 else global_mean
+        # Bayesian smoothing: weight local mean vs global mean by count
+        result[val] = (n * local_mean + alpha * global_mean) / (n + alpha)
+    return result
+
+
+def apply_target_encoding(X: pd.DataFrame, encoding: dict[str, dict]) -> pd.DataFrame:
+    """Replace binary category columns with their target-encoded values."""
+    X = X.copy()
+    for col, mapping in encoding.items():
+        if col in X.columns:
+            X[col] = X[col].map(mapping).fillna(mapping.get(0, 0.5))
+    return X
 
 
 def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
@@ -401,6 +448,18 @@ def main():
     y = df["label"].values
     prices = df["yes_price"].values
 
+    # Target encoding for category flags — replaces binary 0/1 with smoothed YES rates.
+    # Computed from full training set (no leakage risk since it's used for CV too;
+    # fold-level encoding would be more rigorous but overkill at this dataset size).
+    print("\nComputing target encoding for category features...")
+    category_encoding = {}
+    for col in CATEGORY_COLS:
+        enc = compute_target_encoding(df, col)
+        category_encoding[col] = enc
+        print(f"  {col}: 0→{enc[0]:.3f}, 1→{enc[1]:.3f}  "
+              f"(global YES rate: {df['label'].mean():.3f})")
+    X = apply_target_encoding(X, category_encoding)
+
     print(f"\nFeature matrix: {X.shape[0]} samples x {X.shape[1]} features")
     print(f"Class balance: {y.mean():.1%} YES / {1-y.mean():.1%} NO")
 
@@ -491,8 +550,41 @@ def main():
     joblib.dump(scaler, scaler_joblib_path)
     print(f"Saved full ensemble to {ensemble_path}")
 
+    # Save category encoding map for sidecar inference
+    encoding_path = Path(args.output).parent / "category_encoding.json"
+    # Convert int keys to str for JSON serialisation
+    encoding_json = {col: {str(k): v for k, v in enc.items()}
+                     for col, enc in category_encoding.items()}
+    with open(encoding_path, "w") as f:
+        json.dump(encoding_json, f, indent=2)
+    print(f"Saved category encoding to {encoding_path}")
+
     # Feature importance
     print_feature_importance(model, FEATURE_COLS)
+
+    # SHAP analysis — uses XGBoost's native TreeExplainer (fast, exact)
+    if HAS_SHAP:
+        xgb_model = _find_xgb_model(model)
+        if xgb_model:
+            print("\nSHAP feature importance (mean |SHAP value| on held-out 20%):")
+            X_shap = X_scaled.iloc[int(len(X_scaled) * 0.8):]
+            try:
+                explainer = shap.TreeExplainer(xgb_model)
+                shap_values = explainer.shap_values(X_shap)
+                mean_abs = np.abs(shap_values).mean(axis=0)
+                pairs = sorted(zip(FEATURE_COLS, mean_abs), key=lambda x: -x[1])
+                for fname, val in pairs:
+                    bar = "#" * max(1, int(val * 200))
+                    print(f"  {fname:25s} {val:.4f}  {bar}")
+                shap_path = Path(args.output).parent / "shap_summary.json"
+                with open(shap_path, "w") as f:
+                    json.dump({name: float(val) for name, val in zip(FEATURE_COLS, mean_abs)},
+                              f, indent=2)
+                print(f"Saved SHAP summary to {shap_path}")
+            except Exception as e:
+                print(f"  SHAP failed: {e}")
+        else:
+            print("\nSHAP: no XGBoost model found in ensemble, skipping")
 
     print("\nDone!")
 

@@ -51,9 +51,8 @@ pub struct NewBet {
     pub source: String,
     pub url: String,
     pub event_slug: Option<String>,
-    /// Exact feature vector at bet-placement time, stored for online learning (ADR 005).
-    /// Keyed by feature name so schema changes don't invalidate old records.
-    pub features: Option<serde_json::Value>,
+    /// Exact feature vector at bet-placement time for online learning.
+    pub features: Option<crate::model::features::MarketFeatures>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

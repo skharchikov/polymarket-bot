@@ -68,7 +68,7 @@ pub struct Signal {
     /// Event slug grouping related markets (e.g. multi-outcome events)
     pub event_slug: Option<String>,
     /// Exact feature vector at signal time for online learning (ADR 004).
-    pub features: Option<serde_json::Value>,
+    pub features: Option<MarketFeatures>,
 }
 
 impl Signal {
@@ -939,7 +939,7 @@ impl LiveScanner {
         // Batch predict via sidecar or per-item XGBoost
         let batch_items: Vec<(MarketFeatures, f64)> = market_data
             .iter()
-            .map(|(_, price, _, f)| (f.clone(), *price))
+            .map(|(_, price, _, features)| (features.clone(), *price))
             .collect();
         let predictions = self.predict_batch(&batch_items).await;
 
@@ -1107,7 +1107,7 @@ impl LiveScanner {
 
             // Re-run model with news + order book features
             let (ml_prob, ml_conf, signal_features) = if news_count > 0 {
-                let f = MarketFeatures::from_market_and_news(
+                let features = MarketFeatures::from_market_and_news(
                     &c.market,
                     c.current_price,
                     &c.history,
@@ -1115,15 +1115,15 @@ impl LiveScanner {
                     best_news_score,
                     avg_news_age_hours,
                 );
-                match self.predict(&f, c.current_price).await {
-                    Some(p) => (p.0, p.1, f),
+                match self.predict(&features, c.current_price).await {
+                    Some(p) => (p.0, p.1, features),
                     None => (c.ml_prob, c.ml_conf, c.features.clone()),
                 }
             } else {
-                let f =
+                let features =
                     MarketFeatures::from_market_and_history(&c.market, c.current_price, &c.history);
-                match self.predict(&f, c.current_price).await {
-                    Some(p) => (p.0, p.1, f),
+                match self.predict(&features, c.current_price).await {
+                    Some(p) => (p.0, p.1, features),
                     None => (c.ml_prob, c.ml_conf, c.features.clone()),
                 }
             };
@@ -1267,7 +1267,7 @@ impl LiveScanner {
                     book_depth: c.book_stats.depth,
                     news_headlines,
                 },
-                features: Some(signal_features.to_json()),
+                features: Some(signal_features),
             });
         }
 
@@ -1534,7 +1534,7 @@ impl LiveScanner {
                     book_depth: book_stats.depth,
                     news_headlines,
                 },
-                features: Some(signal_features.to_json()),
+                features: Some(signal_features),
             });
         }
 
@@ -1663,7 +1663,7 @@ impl LiveScanner {
                 book_depth: 0.0,
                 news_headlines: Vec::new(),
             },
-            features: Some(features.to_json()),
+            features: Some(features),
         }))
     }
 }

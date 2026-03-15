@@ -249,10 +249,13 @@ def _extract_snapshot(prices: np.ndarray, timestamps: np.ndarray,
     volume = market.get("volume", 0)
     liquidity = market.get("liquidity", 0)
 
-    # Days to expiry
+    # Days to expiry + temporal features
     end_date_str = market.get("end_date")
+    created_at_str = market.get("created_at")
     snapshot_time = datetime.utcfromtimestamp(timestamps[idx])
+
     days_to_expiry = 30.0
+    end_date = None
     if end_date_str:
         try:
             end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00")).replace(tzinfo=None)
@@ -266,13 +269,25 @@ def _extract_snapshot(prices: np.ndarray, timestamps: np.ndarray,
     if days_to_expiry > 14.0 or days_to_expiry < 0.5:
         return None
 
+    created_date = None
+    if created_at_str:
+        try:
+            created_date = datetime.fromisoformat(created_at_str.replace("Z", "+00:00")).replace(tzinfo=None)
+        except (ValueError, TypeError):
+            pass
+
+    days_since_created = max((snapshot_time - created_date).total_seconds() / 86400, 0) \
+        if created_date else 30.0
+    created_to_expiry_span = max((end_date - created_date).total_seconds() / 86400, 0) \
+        if (end_date and created_date) else 30.0
+
     # Category detection — must match live Rust logic (category + question, same keywords)
     category = (market.get("category") or "").lower()
     question = (market.get("question") or "").lower()
     combined = category + " " + question
 
     return {
-        # Features (13 total — news/orderbook features removed: always 0 in training,
+        # Features (15 total — news/orderbook features removed: always 0 in training,
         # non-zero in live, causing distribution shift with no learning signal)
         "yes_price": current_price,
         "price_1h_ago": p_1h,
@@ -285,6 +300,8 @@ def _extract_snapshot(prices: np.ndarray, timestamps: np.ndarray,
         "volume": market.get("volume_24h", volume),  # prefer 24h volume over total
         "liquidity": liquidity,
         "days_to_expiry": days_to_expiry,
+        "days_since_created": days_since_created,
+        "created_to_expiry_span": created_to_expiry_span,
         "category": combined,
         # Gamma API price changes
         "price_change_1d": market.get("one_day_price_change", momentum_24h),
