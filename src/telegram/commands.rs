@@ -108,12 +108,22 @@ pub async fn handle_command(
                     {
                         tracing::warn!(err = %e, "Failed to init copy trader bankroll");
                     }
+                    let username =
+                        crate::scanner::copy_trader::fetch_trader_username(http, &wallet).await;
+                    let display = username.as_deref().unwrap_or(short);
                     match portfolio
-                        .add_followed_trader(&wallet, None, "manual", None, None, None)
+                        .add_followed_trader(
+                            &wallet,
+                            username.as_deref(),
+                            "manual",
+                            None,
+                            None,
+                            None,
+                        )
                         .await
                     {
                         Ok(()) => format!(
-                            "✅ Now following `{short}...`\n💰 Bankroll: €{:.0}",
+                            "✅ Now following *{display}* (`{short}...`)\n💰 Bankroll: €{:.0}",
                             crate::cycles::copy_trade::COPY_TRADER_STARTING_BANKROLL
                         ),
                         Err(e) => format!("⚠️ Failed to follow: {e}"),
