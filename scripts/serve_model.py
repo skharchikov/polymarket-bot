@@ -14,12 +14,14 @@ Endpoints:
     GET  /health         — liveness check
 """
 
+import json
 import logging
 import os
 import subprocess
 import sys
 import threading
 import time
+import warnings
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -27,24 +29,78 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
-import structlog
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-# Structured JSON logging — output is parseable by log aggregators (Loki, Datadog, etc.)
-structlog.configure(
-    processors=[
-        structlog.stdlib.add_log_level,
-        structlog.stdlib.add_logger_name,
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.StackInfoRenderer(),
-        structlog.processors.JSONRenderer(),
-    ],
-    wrapper_class=structlog.stdlib.BoundLogger,
-    logger_factory=structlog.stdlib.LoggerFactory(),
-)
-logging.basicConfig(format="%(message)s", level=logging.INFO, stream=sys.stdout)
-log = structlog.get_logger("sidecar")
+# Suppress sklearn feature-name warnings: base estimators fitted with feature
+# names warn when called with a DataFrame slice; predictions are correct.
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
+
+
+# ---------------------------------------------------------------------------
+# Structured JSON logging
+# ---------------------------------------------------------------------------
+
+class _JsonFormatter(logging.Formatter):
+    """Emit every log record as a single JSON line."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        # Uvicorn access logger passes a 5-tuple as args:
+        #   (client_addr, method, full_path, http_version, status_code)
+        if record.name == "uvicorn.access" and isinstance(record.args, tuple) and len(record.args) == 5:
+            client, method, path, _version, status = record.args
+            payload: dict = {
+                "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%SZ"),
+                "level": "info",
+                "logger": "access",
+                "method": method,
+                "path": path,
+                "status": status,
+                "client": client,
+            }
+        else:
+            payload = {
+                "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%SZ"),
+                "level": record.levelname.lower(),
+                "logger": record.name,
+                "msg": record.getMessage(),
+            }
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        return json.dumps(payload)
+
+
+class _HealthFilter(logging.Filter):
+    """Drop /health access log records — they're sampled every ~5 s and add no value."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name == "uvicorn.access" and isinstance(record.args, tuple) and len(record.args) == 5:
+            path = record.args[2]
+            return path != "/health"
+        return True
+
+
+def _configure_logging() -> None:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(_JsonFormatter())
+    handler.addFilter(_HealthFilter())
+
+    # Replace the root handler so all loggers (ours + libraries) emit JSON.
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.handlers = [handler]
+
+    # Uvicorn manages its own loggers — redirect them to our handler.
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        lg = logging.getLogger(name)
+        lg.handlers = [handler]
+        lg.propagate = False
+
+
+_configure_logging()
+log = logging.getLogger("sidecar")
+
+# ---------------------------------------------------------------------------
 
 MODEL_DIR = os.environ.get("MODEL_DIR", "/model")
 MODEL_PATH = Path(MODEL_DIR) / "ensemble.joblib"
@@ -132,7 +188,7 @@ def _run_retrain():
     _retrain.error = None
 
     try:
-        log.info("retrain.start", kind="cold", markets=RETRAIN_MARKETS)
+        log.info("retrain.fetch_start: markets=%d", RETRAIN_MARKETS)
         fetch_args = [
             sys.executable, "fetch_data.py",
             "--markets", str(RETRAIN_MARKETS),
@@ -142,7 +198,7 @@ def _run_retrain():
             fetch_args += ["--db", DATABASE_URL]
         subprocess.run(fetch_args, check=True, capture_output=True, text=True)
 
-        log.info("retrain.train", kind="cold")
+        log.info("retrain.train_start")
         subprocess.run(
             [sys.executable, "train_model.py",
              "--input", f"{MODEL_DIR}/training_data.json",
@@ -152,15 +208,15 @@ def _run_retrain():
 
         load_model()
         _retrain.status = RetrainStatus.success
-        log.info("retrain.complete", kind="cold")
+        log.info("retrain.complete")
     except subprocess.CalledProcessError as e:
         _retrain.status = RetrainStatus.failed
         _retrain.error = e.stderr[-500:] if e.stderr else str(e)
-        log.error("retrain.failed", kind="cold", error=_retrain.error)
+        log.error("retrain.failed: %s", _retrain.error)
     except Exception as e:
         _retrain.status = RetrainStatus.failed
         _retrain.error = str(e)
-        log.error("retrain.failed", kind="cold", error=str(e))
+        log.error("retrain.failed: %s", e)
     finally:
         _retrain.finished_at = datetime.now(timezone.utc).isoformat()
 
@@ -274,15 +330,15 @@ def _retrain_if_stale():
     """Retrain only if the model is missing or older than MAX_AGE_HOURS."""
     age = model_age_hours()
     if age is not None and age < MAX_AGE_HOURS:
-        log.info("Model is %.1fh old (max %dh) — fresh, skipping", age, MAX_AGE_HOURS)
+        log.info("retrain.skip: model is %.1fh old (max %dh)", age, MAX_AGE_HOURS)
         return
     if age is not None:
-        log.info("Model is %.1fh old (max %dh) — stale, retraining", age, MAX_AGE_HOURS)
+        log.info("retrain.stale: model is %.1fh old, retraining", age)
     else:
-        log.info("No model found — training")
+        log.info("retrain.no_model: training from scratch")
 
     if not _retrain.lock.acquire(blocking=False):
-        log.info("Retrain already in progress, skipping scheduled run")
+        log.info("retrain.skip: already in progress")
         return
     try:
         _run_retrain()
@@ -297,12 +353,11 @@ def _schedule_loop():
         try:
             _retrain_if_stale()
         except Exception as e:
-            log.error("Scheduled retrain check failed: %s", e)
+            log.error("retrain.schedule_error: %s", e)
 
 
 @app.on_event("startup")
 def startup():
-    # Train on first boot if no model exists
     if not MODEL_PATH.exists():
         _retrain_if_stale()
     else:
@@ -311,7 +366,7 @@ def startup():
     if RETRAIN_ON_SCHEDULE:
         t = threading.Thread(target=_schedule_loop, daemon=True)
         t.start()
-        log.info("Scheduled retrain: checking every 1h, max model age %dh", MAX_AGE_HOURS)
+        log.info("retrain.scheduled: checking every 1h, max age %dh", MAX_AGE_HOURS)
 
 
 class FeatureMap(BaseModel):
@@ -406,14 +461,14 @@ def predict(req: PredictRequest):
         features = pd.DataFrame(scaler.transform(features), columns=FEATURE_NAMES)
 
     prob = float(model.predict_proba(features)[0, 1])
-    confidence = _estimate_confidence(features.values)
+    confidence = _estimate_confidence(features)
 
     log.info(
-        "predict",
-        price_pct=round(req.market_price * 100, 1),
-        prob_pct=round(prob * 100, 1),
-        conf_pct=round(confidence * 100, 0),
-        edge_pct=round((prob - req.market_price) * 100, 1),
+        "predict: price=%.1f%% prob=%.1f%% conf=%.0f%% edge=%+.1f%%",
+        req.market_price * 100,
+        prob * 100,
+        confidence * 100,
+        (prob - req.market_price) * 100,
     )
 
     return PredictResponse(prob=prob, confidence=confidence)
@@ -432,14 +487,14 @@ def predict_batch(req: PredictBatchRequest):
         features = pd.DataFrame(scaler.transform(features), columns=FEATURE_NAMES)
 
     probs = model.predict_proba(features)[:, 1]
-    confidences = [_estimate_confidence(features.values[i : i + 1]) for i in range(len(features))]
+    confidences = [_estimate_confidence(features.iloc[i:i+1]) for i in range(len(features))]
     market_prices = [item.market_price for item in req.items]
 
     log.info(
-        "predict_batch",
-        n=len(probs),
-        avg_conf_pct=round(float(np.mean(confidences)) * 100, 0),
-        avg_edge_pct=round(float(np.mean(probs - np.array(market_prices))) * 100, 1),
+        "predict_batch: n=%d avg_conf=%.0f%% avg_edge=%+.1f%%",
+        len(probs),
+        np.mean(confidences) * 100,
+        np.mean(probs - np.array(market_prices)) * 100,
     )
 
     return BatchResponse(
@@ -450,31 +505,26 @@ def predict_batch(req: PredictBatchRequest):
     )
 
 
-def _estimate_confidence(features: np.ndarray) -> float:
+def _estimate_confidence(features: pd.DataFrame) -> float:
     """Estimate confidence from base estimator disagreement.
 
-    For a stacking ensemble: get predictions from each base model,
-    measure their spread. Low spread = high agreement = high confidence.
+    Accepts a single-row DataFrame (with column names) so base estimators
+    that were fitted with feature names don't emit validation warnings.
     """
     try:
-        # Try to get base estimator predictions
         base_preds = []
 
-        # CalibratedClassifierCV wraps the stacker
         estimator = model
         if hasattr(estimator, "calibrated_classifiers_"):
             estimator = estimator.calibrated_classifiers_[0].estimator
 
         if hasattr(estimator, "estimators_"):
-            # StackingClassifier — get predictions from each base model
             for est_list in estimator.estimators_:
                 if isinstance(est_list, list):
                     for est in est_list:
-                        pred = est.predict_proba(features)[0, 1]
-                        base_preds.append(pred)
+                        base_preds.append(est.predict_proba(features)[0, 1])
                 else:
-                    pred = est_list.predict_proba(features)[0, 1]
-                    base_preds.append(pred)
+                    base_preds.append(est_list.predict_proba(features)[0, 1])
 
         if len(base_preds) >= 2:
             spread = max(base_preds) - min(base_preds)
@@ -484,7 +534,7 @@ def _estimate_confidence(features: np.ndarray) -> float:
     except Exception:
         pass
 
-    return 0.50  # Default moderate confidence
+    return 0.50
 
 
 class RetrainRequest(BaseModel):
@@ -549,4 +599,4 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.environ.get("MODEL_PORT", "8000"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port, log_config=None)
