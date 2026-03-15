@@ -296,6 +296,7 @@ pub async fn copy_trade_cycle(
             source: SignalSource::CopyTrade.as_str().to_string(),
             url: market.polymarket_url(),
             event_slug: market.event_slug().map(String::from),
+            features: None,
         };
 
         // Log prediction for model learning (Brier score tracking)

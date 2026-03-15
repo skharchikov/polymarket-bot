@@ -53,6 +53,15 @@ impl MarketFeatures {
         "price_change_1w",
     ];
 
+    /// Serialize features as JSONB-compatible value for the feature store (ADR 004).
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        for (name, val) in Self::NAMES.iter().zip(self.to_vec()) {
+            map.insert(name.to_string(), serde_json::json!(val));
+        }
+        serde_json::Value::Object(map)
+    }
+
     /// Convert to fixed-order f64 vector for model input.
     pub fn to_vec(&self) -> Vec<f64> {
         vec![

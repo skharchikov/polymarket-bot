@@ -27,11 +27,24 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+import structlog
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("sidecar")
+# Structured JSON logging — output is parseable by log aggregators (Loki, Datadog, etc.)
+structlog.configure(
+    processors=[
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.add_logger_name,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.JSONRenderer(),
+    ],
+    wrapper_class=structlog.stdlib.BoundLogger,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+)
+logging.basicConfig(format="%(message)s", level=logging.INFO, stream=sys.stdout)
+log = structlog.get_logger("sidecar")
 
 MODEL_DIR = os.environ.get("MODEL_DIR", "/model")
 MODEL_PATH = Path(MODEL_DIR) / "ensemble.joblib"
@@ -39,6 +52,9 @@ SCALER_PATH = Path(MODEL_DIR) / "scaler.joblib"
 MAX_AGE_HOURS = int(os.environ.get("RETRAIN_MAX_AGE_HOURS", "24"))
 RETRAIN_ON_SCHEDULE = os.environ.get("RETRAIN_ON_SCHEDULE", "true").lower() == "true"
 RETRAIN_MARKETS = int(os.environ.get("RETRAIN_MARKETS", "3000"))
+DATABASE_URL = os.environ.get("DATABASE_URL")
+# Trigger warm-start retrain after this many new resolved bets accumulate
+WARMSTART_TRIGGER_N = int(os.environ.get("WARMSTART_TRIGGER_N", "10"))
 
 FEATURE_NAMES = [
     "yes_price", "momentum_1h", "momentum_24h", "volatility_24h", "rsi",
@@ -93,21 +109,24 @@ def model_age_hours() -> float | None:
 
 
 def _run_retrain():
-    """Run fetch + train in a background thread, then reload the model."""
+    """Full cold retrain: fetch N markets + train from scratch, then reload."""
     _retrain.status = RetrainStatus.running
     _retrain.started_at = datetime.now(timezone.utc).isoformat()
     _retrain.finished_at = None
     _retrain.error = None
 
     try:
-        log.info("Retrain: fetching data...")
-        subprocess.run(
-            [sys.executable, "fetch_data.py", "--markets", str(RETRAIN_MARKETS),
-             "--output", f"{MODEL_DIR}/training_data.json"],
-            check=True, capture_output=True, text=True,
-        )
+        log.info("retrain.start", kind="cold", markets=RETRAIN_MARKETS)
+        fetch_args = [
+            sys.executable, "fetch_data.py",
+            "--markets", str(RETRAIN_MARKETS),
+            "--output", f"{MODEL_DIR}/training_data.json",
+        ]
+        if DATABASE_URL:
+            fetch_args += ["--db", DATABASE_URL]
+        subprocess.run(fetch_args, check=True, capture_output=True, text=True)
 
-        log.info("Retrain: training model...")
+        log.info("retrain.train", kind="cold")
         subprocess.run(
             [sys.executable, "train_model.py",
              "--input", f"{MODEL_DIR}/training_data.json",
@@ -117,17 +136,122 @@ def _run_retrain():
 
         load_model()
         _retrain.status = RetrainStatus.success
-        log.info("Retrain complete")
+        log.info("retrain.complete", kind="cold")
     except subprocess.CalledProcessError as e:
         _retrain.status = RetrainStatus.failed
         _retrain.error = e.stderr[-500:] if e.stderr else str(e)
-        log.error("Retrain failed: %s", _retrain.error)
+        log.error("retrain.failed", kind="cold", error=_retrain.error)
     except Exception as e:
         _retrain.status = RetrainStatus.failed
         _retrain.error = str(e)
-        log.error("Retrain failed: %s", e)
+        log.error("retrain.failed", kind="cold", error=str(e))
     finally:
         _retrain.finished_at = datetime.now(timezone.utc).isoformat()
+
+
+def _run_warmstart():
+    """Warm-start retrain: add XGBoost trees on top of existing model using stored bet_features.
+
+    No API calls — reads exact feature vectors from DB. Takes seconds.
+    Triggered automatically every WARMSTART_TRIGGER_N resolved bets.
+    """
+    if not DATABASE_URL:
+        log.warning("warmstart.skip", reason="DATABASE_URL not set")
+        return
+
+    try:
+        import psycopg2
+    except ImportError:
+        log.warning("warmstart.skip", reason="psycopg2 not installed")
+        return
+
+    try:
+        import xgboost as xgb
+        from sklearn.calibration import CalibratedClassifierCV
+        from sklearn.preprocessing import RobustScaler
+    except ImportError as e:
+        log.warning("warmstart.skip", reason=str(e))
+        return
+
+    log.info("warmstart.start", trigger_n=WARMSTART_TRIGGER_N)
+
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT bf.features, b.won, b.side
+            FROM bet_features bf
+            JOIN bets b ON b.id = bf.bet_id
+            WHERE b.resolved = TRUE AND b.won IS NOT NULL
+            ORDER BY b.resolved_at DESC
+        """)
+        rows = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        log.error("warmstart.db_error", error=str(e))
+        return
+
+    if len(rows) < 10:
+        log.info("warmstart.skip", reason="not enough resolved bets", n=len(rows))
+        return
+
+    # Build feature matrix from stored JSONB
+    records = []
+    labels = []
+    for features_json, won, side in rows:
+        if features_json is None or won is None:
+            continue
+        row = {k: float(v) if v is not None else 0.0 for k, v in features_json.items()}
+        outcome_yes = won if side == "Yes" else not won
+        records.append(row)
+        labels.append(int(outcome_yes))
+
+    if len(records) < 10:
+        log.info("warmstart.skip", reason="not enough clean records", n=len(records))
+        return
+
+    df = pd.DataFrame(records)
+    for col in FEATURE_NAMES:
+        if col not in df.columns:
+            df[col] = 0.0
+    X = df[FEATURE_NAMES].astype(np.float64).fillna(0.0)
+    y = np.array(labels)
+
+    # Scale using existing scaler
+    if scaler is not None:
+        X_scaled = pd.DataFrame(scaler.transform(X), columns=FEATURE_NAMES)
+    else:
+        X_scaled = X
+
+    # Warm-start XGBoost: continue from existing model, add 50 trees
+    xgb_path = Path(MODEL_DIR) / "xgb_model.json"
+    if not xgb_path.exists():
+        log.warning("warmstart.skip", reason="no existing xgb_model.json")
+        return
+
+    try:
+        booster = xgb.XGBClassifier(
+            n_estimators=50,
+            learning_rate=0.03,
+            max_depth=4,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            objective="binary:logistic",
+            eval_metric="logloss",
+            random_state=42,
+            n_jobs=-1,
+            verbosity=0,
+        )
+        booster.fit(X_scaled, y, xgb_model=str(xgb_path))
+        booster.save_model(str(xgb_path))
+        log.info("warmstart.xgb_updated", n_samples=len(records), trees_added=50)
+    except Exception as e:
+        log.error("warmstart.xgb_failed", error=str(e))
+        return
+
+    # Hot-reload so next predictions use the updated model
+    load_model()
+    log.info("warmstart.complete", n_samples=len(records))
 
 
 def _retrain_if_stale():
@@ -234,11 +358,11 @@ def predict(req: PredictRequest):
     confidence = _estimate_confidence(features.values)
 
     log.info(
-        "predict  price=%.1f%% → prob=%.1f%% conf=%.0f%% edge=%+.1f%%",
-        req.market_price * 100,
-        prob * 100,
-        confidence * 100,
-        (prob - req.market_price) * 100,
+        "predict",
+        price_pct=round(req.market_price * 100, 1),
+        prob_pct=round(prob * 100, 1),
+        conf_pct=round(confidence * 100, 0),
+        edge_pct=round((prob - req.market_price) * 100, 1),
     )
 
     return PredictResponse(prob=prob, confidence=confidence)
@@ -259,16 +383,12 @@ def predict_batch(req: PredictBatchRequest):
     confidences = [_estimate_confidence(features.values[i : i + 1]) for i in range(len(features))]
     market_prices = [item.market_price for item in req.items]
 
-    for price, prob, conf in zip(market_prices, probs, confidences):
-        log.info(
-            "batch    price=%.1f%% → prob=%.1f%% conf=%.0f%% edge=%+.1f%%",
-            price * 100,
-            float(prob) * 100,
-            conf * 100,
-            (float(prob) - price) * 100,
-        )
-
-    log.info("batch complete: %d predictions, avg_conf=%.0f%%", len(probs), np.mean(confidences) * 100)
+    log.info(
+        "predict_batch",
+        n=len(probs),
+        avg_conf_pct=round(float(np.mean(confidences)) * 100, 0),
+        avg_edge_pct=round(float(np.mean(probs - np.array(market_prices))) * 100, 1),
+    )
 
     return BatchResponse(
         predictions=[
@@ -351,6 +471,15 @@ def retrain(req: RetrainRequest = RetrainRequest()):
 
     threading.Thread(target=run, daemon=True).start()
     return {"status": "started"}
+
+
+@app.post("/retrain/warmstart")
+def retrain_warmstart():
+    """Warm-start retrain on stored bet_features — no API calls, takes seconds."""
+    if _retrain.status == RetrainStatus.running:
+        raise HTTPException(status_code=409, detail="Retrain already in progress")
+    threading.Thread(target=_run_warmstart, daemon=True).start()
+    return {"status": "started", "kind": "warmstart"}
 
 
 @app.get("/retrain/status", response_model=RetrainStatusResponse)

@@ -734,6 +734,16 @@ impl PgPortfolio {
         .execute(&mut *tx)
         .await?;
 
+        if let Some(features) = &bet.features {
+            sqlx::query(
+                "INSERT INTO bet_features (bet_id, features) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            )
+            .bind(row.0)
+            .bind(features)
+            .execute(&mut *tx)
+            .await?;
+        }
+
         tx.commit().await?;
 
         Ok(row.0)

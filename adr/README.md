@@ -21,3 +21,4 @@ Sections:
 | [001](001-baseline.md) | Baseline model audit | active | 2026-03-15 |
 | [002](002-fix-training-inconsistencies.md) | Fix training/live inconsistencies | complete | 2026-03-15 |
 | [003](003-fresh-data-fetch.md) | Fresh data fetch with deployment-window filter | complete | 2026-03-15 |
+| [004](004-online-learning.md) | Online learning: feature store + warm-start retraining | draft | 2026-03-15 |
