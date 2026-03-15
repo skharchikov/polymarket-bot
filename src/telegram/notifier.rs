@@ -20,6 +20,11 @@ impl TelegramNotifier {
         }
     }
 
+    /// Check if a chat_id belongs to the bot owner.
+    pub fn is_owner(&self, chat_id: &str) -> bool {
+        chat_id == self.chat_id
+    }
+
     pub async fn send(&self, message: &str) -> Result<()> {
         self.send_to(&self.chat_id, message).await
     }
@@ -122,8 +127,10 @@ impl TelegramNotifier {
         }
     }
 
-    /// Poll for new commands. Returns (chat_id, command, username, first_name).
-    pub async fn poll_commands(&self) -> Vec<(String, String, Option<String>, Option<String>)> {
+    /// Poll for new commands. Returns (chat_id, command, username, first_name, full_text).
+    pub async fn poll_commands(
+        &self,
+    ) -> Vec<(String, String, Option<String>, Option<String>, String)> {
         let offset = self.last_update_id.load(Ordering::Relaxed);
         let url = format!("https://api.telegram.org/bot{}/getUpdates", self.bot_token);
 
@@ -172,6 +179,7 @@ impl TelegramNotifier {
                             cmd.to_lowercase(),
                             username.clone(),
                             first_name.clone(),
+                            text.to_string(),
                         ));
                     }
                 }

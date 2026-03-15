@@ -126,6 +126,15 @@ pub struct AppConfig {
     /// Port for the Prometheus metrics HTTP endpoint.
     #[config(env = "METRICS_PORT", default = 9000)]
     pub metrics_port: u16,
+
+    // --- Copy trading ---
+    /// Enable copy trading cycle.
+    #[config(env = "COPY_TRADE_ENABLED", default = false)]
+    pub copy_trade_enabled: bool,
+
+    /// Copy trading poll interval in minutes.
+    #[config(env = "COPY_TRADE_INTERVAL_MINS", default = 5)]
+    pub copy_trade_interval_mins: u64,
 }
 
 impl AppConfig {

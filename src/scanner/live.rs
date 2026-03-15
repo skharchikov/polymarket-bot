@@ -27,6 +27,7 @@ const CLOB_API: &str = "https://clob.polymarket.com";
 pub enum SignalSource {
     XgBoost,
     LlmConsensus,
+    CopyTrade,
 }
 
 impl SignalSource {
@@ -34,6 +35,7 @@ impl SignalSource {
         match self {
             Self::XgBoost => "xgboost",
             Self::LlmConsensus => "llm_consensus",
+            Self::CopyTrade => "copy_trade",
         }
     }
 }
@@ -77,28 +79,30 @@ impl Signal {
         let source_tag = match self.source {
             SignalSource::XgBoost => "\u{1f916} XGBoost",
             SignalSource::LlmConsensus => "\u{1f9e0} LLM",
+            SignalSource::CopyTrade => "\u{1f465} CopyTrade",
         };
 
         // Format reasoning block based on source
-        let reasoning_block = if self.source == SignalSource::XgBoost {
-            format!(
-                "\n\u{1f916} _Model: {:.1}% vs market {:.1}%_",
-                self.estimated_prob * 100.0,
-                self.prior * 100.0
-            )
-        } else {
-            let reasoning_lines: Vec<&str> = self.reasoning.split(" | ").collect();
-            if reasoning_lines.len() > 1 {
-                let mut block = String::from("\n\u{1f9e0} *Bayesian Agents:*\n");
-                for line in &reasoning_lines {
-                    let safe = sanitize_markdown(line);
-                    block.push_str(&format!("  \u{2022} _{safe}_\n"));
-                }
-                block
+        let reasoning_block =
+            if self.source == SignalSource::XgBoost || self.source == SignalSource::CopyTrade {
+                format!(
+                    "\n\u{1f916} _Model: {:.1}% vs market {:.1}%_",
+                    self.estimated_prob * 100.0,
+                    self.prior * 100.0
+                )
             } else {
-                format!("\n\u{1f4a1} _{}_", sanitize_markdown(&self.reasoning))
-            }
-        };
+                let reasoning_lines: Vec<&str> = self.reasoning.split(" | ").collect();
+                if reasoning_lines.len() > 1 {
+                    let mut block = String::from("\n\u{1f9e0} *Bayesian Agents:*\n");
+                    for line in &reasoning_lines {
+                        let safe = sanitize_markdown(line);
+                        block.push_str(&format!("  \u{2022} _{safe}_\n"));
+                    }
+                    block
+                } else {
+                    format!("\n\u{1f4a1} _{}_", sanitize_markdown(&self.reasoning))
+                }
+            };
 
         format!(
             "{emoji} *{side_label} Signal* ({source})\n\n\
@@ -497,7 +501,7 @@ impl LiveScanner {
 
     /// Fetch a single market using the query endpoint (includes `events` array).
     /// The `/markets/{id}` endpoint omits events; `/markets?id={id}` includes them.
-    async fn fetch_market_with_events(&self, market_id: &str) -> Result<GammaMarket> {
+    pub async fn fetch_market_with_events(&self, market_id: &str) -> Result<GammaMarket> {
         let url = format!("{GAMMA_API}/markets?id={market_id}");
         let resp = self.http.get(&url).send().await?;
         let text = resp.text().await?;
@@ -507,6 +511,19 @@ impl LiveScanner {
             .into_iter()
             .next()
             .with_context(|| format!("market {market_id} not found"))
+    }
+
+    /// Run the ML model on a market for informational purposes.
+    /// Returns `(probability, confidence)` or `None` if the model is unavailable.
+    pub async fn predict_market(&self, market_id: &str, current_price: f64) -> Option<(f64, f64)> {
+        let market = self.fetch_market_with_events(market_id).await.ok()?;
+        let token_id = market.yes_token_id()?;
+        let history = self
+            .fetch_price_history(&token_id)
+            .await
+            .unwrap_or_default();
+        let features = MarketFeatures::from_market_and_history(&market, current_price, &history);
+        self.predict(&features.to_vec(), current_price).await
     }
 
     fn expires_within_window(&self, end_date: Option<&str>) -> bool {
@@ -1622,7 +1639,7 @@ impl LiveScanner {
     }
 }
 
-fn parse_days_to_expiry(end_date: &Option<String>) -> f64 {
+pub fn parse_days_to_expiry(end_date: &Option<String>) -> f64 {
     end_date
         .as_ref()
         .and_then(|d| chrono::DateTime::parse_from_rfc3339(d).ok())

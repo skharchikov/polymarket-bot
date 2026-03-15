@@ -94,7 +94,7 @@ impl StrategyProfile {
     pub fn evaluate(&self, signal: &Signal) -> Option<AcceptedSignal> {
         let effective_edge = signal.edge * signal.confidence;
 
-        // XGBoost model signals: halve the edge/confidence gates
+        // XGBoost signals: halve the edge/confidence gates
         let (min_edge, min_conf) = if signal.source == SignalSource::XgBoost {
             (self.min_effective_edge * 0.5, self.min_confidence * 0.7)
         } else {
@@ -147,6 +147,7 @@ pub fn source_icon(source: &str) -> &'static str {
     match source {
         "xgboost" => "🤖",
         "llm_consensus" => "🧠",
+        "copy_trade" => "👥",
         _ => "📊",
     }
 }

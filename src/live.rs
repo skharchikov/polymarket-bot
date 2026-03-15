@@ -308,7 +308,7 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     let command_loop = tokio::spawn(async move {
         loop {
             let commands = cmd_notifier.poll_commands().await;
-            for (chat_id, cmd, username, first_name) in &commands {
+            for (chat_id, cmd, username, first_name, full_text) in &commands {
                 // Track the user
                 if let Err(e) = cmd_portfolio
                     .upsert_telegram_user(chat_id, username.as_deref(), first_name.as_deref())
@@ -328,6 +328,8 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                              /open — open positions\n\
                              /brier — model accuracy\n\
                              /health — bot health\n\
+                             /traders — followed traders\n\
+                             /leaderboard — top traders\n\
                              /help — show commands"
                         )
                     }
@@ -377,11 +379,78 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                              📰 News processed: {news}{model_line}",
                         )
                     }
+                    "follow" => {
+                        if !cmd_notifier.is_owner(chat_id) {
+                            "🔒 Only the bot owner can follow traders.".to_string()
+                        } else {
+                            let arg = full_text.split_whitespace().nth(1).unwrap_or("");
+                            if arg.is_empty() {
+                                "Usage: `/follow <wallet_address>`".to_string()
+                            } else {
+                                let wallet = arg.to_string();
+                                let short = &wallet[..8.min(wallet.len())];
+                                let strat_key = format!("copy:{short}");
+                                // Initialize bankroll for this trader
+                                if let Err(e) = cmd_portfolio
+                                    .ensure_key(
+                                        &strat_key,
+                                        crate::cycles::copy_trade::COPY_TRADER_STARTING_BANKROLL,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(err = %e, "Failed to init copy trader bankroll");
+                                }
+                                match cmd_portfolio
+                                    .add_followed_trader(&wallet, None, "manual", None, None, None)
+                                    .await
+                                {
+                                    Ok(()) => format!(
+                                        "✅ Now following `{short}...`\n💰 Bankroll: €{:.0}",
+                                        crate::cycles::copy_trade::COPY_TRADER_STARTING_BANKROLL
+                                    ),
+                                    Err(e) => format!("⚠️ Failed to follow: {e}"),
+                                }
+                            }
+                        }
+                    }
+                    "unfollow" => {
+                        if !cmd_notifier.is_owner(chat_id) {
+                            "🔒 Only the bot owner can unfollow traders.".to_string()
+                        } else {
+                            let arg = full_text.split_whitespace().nth(1).unwrap_or("");
+                            if arg.is_empty() {
+                                "Usage: `/unfollow <wallet_address>`".to_string()
+                            } else {
+                                match cmd_portfolio.deactivate_trader(arg).await {
+                                    Ok(()) => {
+                                        let short = &arg[..8.min(arg.len())];
+                                        format!("✅ Unfollowed `{short}...`")
+                                    }
+                                    Err(e) => format!("⚠️ Failed to unfollow: {e}"),
+                                }
+                            }
+                        }
+                    }
+                    "traders" => match cmd_portfolio.traders_summary().await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(err = %e, "Failed to build traders summary");
+                            "⚠️ Failed to load traders".to_string()
+                        }
+                    },
+                    "leaderboard" => {
+                        "🏆 View the Polymarket leaderboard:\nhttps://polymarket.com/leaderboard"
+                            .to_string()
+                    }
                     "help" => "📖 *Commands*\n\n\
                          /stats — portfolio statistics\n\
                          /open — open positions\n\
                          /brier — model accuracy\n\
                          /health — bot health & uptime\n\
+                         /traders — followed traders\n\
+                         /leaderboard — top Polymarket traders\n\
+                         /follow — follow a trader (owner)\n\
+                         /unfollow — unfollow a trader (owner)\n\
                          /help — this message"
                         .to_string(),
                     _ => format!("❓ Unknown command: /{cmd}\nTry /help"),
@@ -421,6 +490,43 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             {
                 tracing::error!(err = %e, "Heartbeat failed");
             }
+        }
+    });
+
+    // --- Copy trading loop ---
+    let ct_portfolio = Arc::clone(&portfolio);
+    let ct_notifier = Arc::clone(&notifier);
+    let ct_scanner = Arc::clone(&scanner);
+    let ct_cfg = Arc::clone(&cfg);
+    let copy_trade_loop = tokio::spawn(async move {
+        if !ct_cfg.copy_trade_enabled {
+            tracing::info!("Copy trading disabled");
+            std::future::pending::<()>().await;
+            return;
+        }
+        let monitor = crate::scanner::copy_trader::CopyTraderMonitor::new(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(15))
+                .build()
+                .expect("failed to build HTTP client"),
+        );
+        tracing::info!(
+            interval_mins = ct_cfg.copy_trade_interval_mins,
+            "Copy trading enabled"
+        );
+        loop {
+            if let Err(e) = cycles::copy_trade_cycle(
+                &ct_portfolio,
+                &ct_notifier,
+                &ct_scanner,
+                &monitor,
+                &ct_cfg,
+            )
+            .await
+            {
+                tracing::error!(err = %e, "Copy trade cycle failed");
+            }
+            tokio::time::sleep(Duration::from_secs(ct_cfg.copy_trade_interval_mins * 60)).await;
         }
     });
 
@@ -556,6 +662,9 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         }
         r = model_monitor => {
             tracing::error!("Model monitor loop exited: {:?}", r);
+        }
+        r = copy_trade_loop => {
+            tracing::error!("Copy trade loop exited: {:?}", r);
         }
     }
 
