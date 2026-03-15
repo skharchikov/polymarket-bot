@@ -68,6 +68,8 @@ pub struct GammaMarket {
     #[serde(default)]
     pub one_week_price_change: Option<f64>,
     #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
     pub events: Vec<GammaEvent>,
 }
 

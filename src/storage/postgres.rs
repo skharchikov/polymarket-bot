@@ -734,12 +734,14 @@ impl PgPortfolio {
         .execute(&mut *tx)
         .await?;
 
+        // Store feature vector for online learning
         if let Some(features) = &bet.features {
+            let features_json = serde_json::to_value(features).unwrap_or_default();
             sqlx::query(
                 "INSERT INTO bet_features (bet_id, features) VALUES ($1, $2) ON CONFLICT DO NOTHING",
             )
             .bind(row.0)
-            .bind(features)
+            .bind(features_json)
             .execute(&mut *tx)
             .await?;
         }
