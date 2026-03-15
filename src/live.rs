@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use sqlx::PgPool;
@@ -310,6 +310,7 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     let cmd_notifier = Arc::clone(&notifier);
     let cmd_stats = Arc::clone(&stats);
     let cmd_scanner = Arc::clone(&scanner);
+    let cmd_cfg = Arc::clone(&cfg);
     let cmd_start = std::time::Instant::now();
     let command_loop = tokio::spawn(async move {
         loop {
@@ -324,167 +325,20 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                 }
 
                 tracing::info!(cmd = cmd.as_str(), chat_id, "Handling Telegram command");
-                let reply = match cmd.as_str() {
-                    "start" => {
-                        let name = first_name.as_deref().unwrap_or("there");
-                        format!(
-                            "👋 Hi {name}! I'm the Polymarket Signal Bot.\n\n\
-                             Commands:\n\
-                             /stats — portfolio statistics\n\
-                             /open — open positions\n\
-                             /brier — model accuracy\n\
-                             /health — bot health\n\
-                             /traders — followed traders\n\
-                             /leaderboard — top traders\n\
-                             /help — show commands"
-                        )
-                    }
-                    "stats" => match cmd_portfolio.stats_summary().await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::warn!(err = %e, "Failed to build stats");
-                            "⚠️ Failed to load stats".to_string()
-                        }
-                    },
-                    "open" => match cmd_portfolio.open_bets_summary().await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::warn!(err = %e, "Failed to build open bets");
-                            "⚠️ Failed to load open bets".to_string()
-                        }
-                    },
-                    "brier" => match cmd_portfolio.brier_summary().await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::warn!(err = %e, "Failed to build brier");
-                            "⚠️ Failed to load model accuracy".to_string()
-                        }
-                    },
-                    "health" => {
-                        let uptime = cmd_start.elapsed();
-                        let hours = uptime.as_secs() / 3600;
-                        let mins = (uptime.as_secs() % 3600) / 60;
-                        let scans = cmd_stats.scans_completed.load(Ordering::Relaxed);
-                        let mkts = cmd_stats.markets_scanned.load(Ordering::Relaxed);
-                        let sigs = cmd_stats.signals_found.load(Ordering::Relaxed);
-                        let news = cmd_stats.news_new.load(Ordering::Relaxed);
-                        let model_line = match cmd_scanner.model_age_secs().await {
-                            Some(age) => {
-                                let h = (age / 3600.0) as u64;
-                                let m = ((age % 3600.0) / 60.0) as u64;
-                                format!("\n🧠 Model age: {h}h {m}m")
-                            }
-                            None => "\n🧠 Model: unavailable".to_string(),
-                        };
-                        format!(
-                            "🏥 *Bot Health*\n\n\
-                             ⏱ Uptime: {hours}h {mins}m\n\
-                             🔄 Scans completed: {scans}\n\
-                             🔍 Markets scanned: {mkts}\n\
-                             📡 Signals found: {sigs}\n\
-                             📰 News processed: {news}{model_line}",
-                        )
-                    }
-                    "follow" => {
-                        if !cmd_notifier.is_owner(chat_id) {
-                            "🔒 Only the bot owner can follow traders.".to_string()
-                        } else {
-                            let arg = full_text.split_whitespace().nth(1).unwrap_or("");
-                            if arg.is_empty() {
-                                "Usage: `/follow <wallet_address>`\n\nTip: use /leaderboard to browse top traders — wallet addresses are shown there for easy copy.".to_string()
-                            } else {
-                                let wallet = arg.to_string();
-                                let short = &wallet[..8.min(wallet.len())];
-                                let strat_key = format!("copy:{short}");
-                                // Initialize bankroll for this trader
-                                if let Err(e) = cmd_portfolio
-                                    .ensure_key(
-                                        &strat_key,
-                                        crate::cycles::copy_trade::COPY_TRADER_STARTING_BANKROLL,
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!(err = %e, "Failed to init copy trader bankroll");
-                                }
-                                match cmd_portfolio
-                                    .add_followed_trader(&wallet, None, "manual", None, None, None)
-                                    .await
-                                {
-                                    Ok(()) => format!(
-                                        "✅ Now following `{short}...`\n💰 Bankroll: €{:.0}",
-                                        crate::cycles::copy_trade::COPY_TRADER_STARTING_BANKROLL
-                                    ),
-                                    Err(e) => format!("⚠️ Failed to follow: {e}"),
-                                }
-                            }
-                        }
-                    }
-                    "unfollow" => {
-                        if !cmd_notifier.is_owner(chat_id) {
-                            "🔒 Only the bot owner can unfollow traders.".to_string()
-                        } else {
-                            let arg = full_text.split_whitespace().nth(1).unwrap_or("");
-                            if arg.is_empty() {
-                                "Usage: `/unfollow <wallet_address>`".to_string()
-                            } else {
-                                match cmd_portfolio.deactivate_trader(arg).await {
-                                    Ok(()) => {
-                                        let short = &arg[..8.min(arg.len())];
-                                        format!("✅ Unfollowed `{short}...`")
-                                    }
-                                    Err(e) => format!("⚠️ Failed to unfollow: {e}"),
-                                }
-                            }
-                        }
-                    }
-                    "traders" => match cmd_portfolio.traders_summary().await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::warn!(err = %e, "Failed to build traders summary");
-                            "⚠️ Failed to load traders".to_string()
-                        }
-                    },
-                    "leaderboard" => {
-                        let (day_res, month_res, all_res) = tokio::join!(
-                            crate::scanner::copy_trader::fetch_leaderboard(&cmd_http, "DAY"),
-                            crate::scanner::copy_trader::fetch_leaderboard(&cmd_http, "MONTH"),
-                            crate::scanner::copy_trader::fetch_leaderboard(&cmd_http, "ALL"),
-                        );
-                        match (day_res, month_res, all_res) {
-                            (Ok(day), Ok(month), Ok(all)) => {
-                                crate::scanner::copy_trader::format_multi_leaderboard(&[
-                                    ("Today", day.as_slice()),
-                                    ("This Month", month.as_slice()),
-                                    ("All Time", all.as_slice()),
-                                ])
-                            }
-                            (day_res, month_res, all_res) => {
-                                if let Err(e) = day_res.as_ref() {
-                                    tracing::warn!(err = %e, "Failed to fetch DAY leaderboard");
-                                }
-                                if let Err(e) = month_res.as_ref() {
-                                    tracing::warn!(err = %e, "Failed to fetch MONTH leaderboard");
-                                }
-                                if let Err(e) = all_res.as_ref() {
-                                    tracing::warn!(err = %e, "Failed to fetch ALL leaderboard");
-                                }
-                                "⚠️ Could not fetch leaderboard — try again shortly.".to_string()
-                            }
-                        }
-                    }
-                    "help" => "📖 *Commands*\n\n\
-                         /stats — portfolio statistics\n\
-                         /open — open positions\n\
-                         /brier — model accuracy\n\
-                         /health — bot health & uptime\n\
-                         /traders — followed traders\n\
-                         /leaderboard — top Polymarket traders\n\
-                         /follow — follow a trader (owner)\n\
-                         /unfollow — unfollow a trader (owner)\n\
-                         /help — this message"
-                        .to_string(),
-                    _ => format!("❓ Unknown command: /{cmd}\nTry /help"),
-                };
+                let reply = crate::telegram::commands::handle_command(
+                    cmd,
+                    chat_id,
+                    full_text,
+                    first_name.as_deref(),
+                    &cmd_portfolio,
+                    &cmd_notifier,
+                    &cmd_scanner,
+                    &cmd_http,
+                    &cmd_cfg,
+                    &cmd_stats,
+                    &cmd_start,
+                )
+                .await;
 
                 if let Err(e) = cmd_notifier.send_to(chat_id, &reply).await {
                     tracing::warn!(err = %e, chat_id = chat_id, "Failed to reply to command");

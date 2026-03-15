@@ -25,14 +25,11 @@ const LEADERBOARD_SECTION_LIMIT: usize = 5;
 /// One entry from `GET /leaderboard`.
 /// Fields come as strings from the API, so we deserialize to `Value` and parse.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct LeaderboardEntry {
     #[serde(rename = "proxyWallet")]
     proxy_wallet: String,
     #[serde(rename = "userName")]
     name: Option<String>,
-    #[serde(default)]
-    rank: Option<serde_json::Value>,
     #[serde(default)]
     pnl: Option<serde_json::Value>,
     #[serde(default, rename = "vol")]
@@ -40,14 +37,6 @@ struct LeaderboardEntry {
 }
 
 impl LeaderboardEntry {
-    fn rank_i32(&self) -> Option<i32> {
-        self.rank.as_ref().and_then(|v| match v {
-            serde_json::Value::Number(n) => n.as_i64().map(|n| n as i32),
-            serde_json::Value::String(s) => s.parse().ok(),
-            _ => None,
-        })
-    }
-
     fn pnl_f64(&self) -> f64 {
         self.volume_like(&self.pnl)
     }
@@ -193,8 +182,8 @@ fn format_leaderboard_section(entries: &[LeaderboardDisplay], show_wallets: bool
     let mut lines = Vec::with_capacity(entries.len());
 
     for entry in entries {
-        let pnl_str = format_dollars(entry.pnl);
-        let vol_str = format_dollars(entry.volume);
+        let pnl_str = crate::format::format_dollars(entry.pnl);
+        let vol_str = crate::format::format_dollars(entry.volume);
 
         let line = match entry.rank {
             1 => format!("🥇 *{}* — PnL: {} | Vol: {}", entry.name, pnl_str, vol_str),
@@ -258,50 +247,11 @@ pub fn format_multi_leaderboard(periods: &[(&str, &[LeaderboardDisplay])]) -> St
     parts.join("\n")
 }
 
-/// Format a slice of [`LeaderboardDisplay`] entries as a Telegram-compatible
-/// message for a single unnamed period.
-///
-/// # Example
-///
-/// ```ignore
-/// let msg = format_leaderboard(&entries);
-/// notifier.send_to(&chat_id, &msg).await?;
-/// ```
-#[allow(dead_code)]
-pub fn format_leaderboard(entries: &[LeaderboardDisplay]) -> String {
-    if entries.is_empty() {
-        return "🏆 *Polymarket Leaderboard*\n\n_No data available._".to_string();
-    }
-
-    let mut lines = Vec::with_capacity(entries.len() + 3);
-    lines.push("🏆 *Polymarket Leaderboard*\n".to_string());
-    lines.push(format_leaderboard_section(entries, true));
-    lines.push("\n_Data from Polymarket Data API_".to_string());
-    lines.join("\n")
-}
-
 /// Returns a blank string for numbered ranks (the rank number is embedded in
 /// the formatted line directly).
 #[inline]
 fn return_rank_str(_rank: usize) -> &'static str {
     " "
-}
-
-/// Format a dollar amount into a compact human-readable string.
-///
-/// * ≥ 1 000 000 → `$1.2M`
-/// * ≥ 1 000     → `$890K`
-/// * otherwise   → `$123`
-fn format_dollars(value: f64) -> String {
-    let abs = value.abs();
-    let sign = if value < 0.0 { "-" } else { "" };
-    if abs >= 1_000_000.0 {
-        format!("{sign}${:.1}M", abs / 1_000_000.0)
-    } else if abs >= 1_000.0 {
-        format!("{sign}${:.0}K", abs / 1_000.0)
-    } else {
-        format!("{sign}${:.0}", abs)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -320,69 +270,6 @@ impl CopyTraderMonitor {
     /// Build a new monitor with a shared `reqwest::Client`.
     pub fn new(http: Client) -> Self {
         Self { http }
-    }
-
-    /// Fetch the global leaderboard, apply filters, and upsert qualifying
-    /// traders into `followed_traders`.
-    ///
-    /// * `min_pnl`     — minimum all-time PnL to include a trader
-    /// * `min_volume`  — minimum all-time volume to include a trader
-    /// * `max_traders` — cap on how many traders are persisted (top-N by PnL)
-    #[allow(dead_code)]
-    #[tracing::instrument(skip(self, portfolio))]
-    pub async fn refresh_leaderboard(
-        &self,
-        portfolio: &PgPortfolio,
-        min_pnl: f64,
-        min_volume: f64,
-        max_traders: usize,
-    ) -> Result<usize> {
-        let url = format!("{DATA_API}/v1/leaderboard?timePeriod=ALL&limit=50");
-
-        let entries: Vec<LeaderboardEntry> = self
-            .http
-            .get(&url)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
-            .await
-            .context("leaderboard request failed")?
-            .error_for_status()
-            .context("leaderboard returned non-2xx")?
-            .json()
-            .await
-            .context("leaderboard JSON parse failed")?;
-
-        tracing::info!(count = entries.len(), "Leaderboard entries fetched");
-
-        // Filter and sort by descending PnL.
-        let mut qualifying: Vec<&LeaderboardEntry> = entries
-            .iter()
-            .filter(|e| e.pnl_f64() >= min_pnl && e.volume_f64() >= min_volume)
-            .collect();
-        qualifying.sort_by(|a, b| {
-            b.pnl_f64()
-                .partial_cmp(&a.pnl_f64())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        qualifying.truncate(max_traders);
-
-        let upserted = qualifying.len();
-        for entry in qualifying {
-            portfolio
-                .add_followed_trader(
-                    &entry.proxy_wallet,
-                    entry.name.as_deref(),
-                    "leaderboard",
-                    entry.rank_i32(),
-                    Some(entry.pnl_f64()),
-                    Some(entry.volume_f64()),
-                )
-                .await
-                .context("upsert followed_trader")?;
-        }
-
-        tracing::info!(upserted, "Followed traders upserted from leaderboard");
-        Ok(upserted)
     }
 
     /// Fetch recent trade activity for `wallet` since `since`.
@@ -541,6 +428,9 @@ mod tests {
         // Top trader should have positive PnL
         assert!(entries[0].pnl > 0.0);
         // Print for manual inspection
-        println!("{}", format_leaderboard(&entries));
+        println!(
+            "{}",
+            format_multi_leaderboard(&[("All Time", entries.as_slice())])
+        );
     }
 }

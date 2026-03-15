@@ -3,6 +3,31 @@
 use crate::storage::portfolio::{Bet, BetSide};
 use crate::strategy;
 
+/// Format a dollar amount into a compact human-readable string.
+///
+/// * ≥ 1 000 000 → `$1.2M`
+/// * ≥ 1 000     → `$890K`
+/// * otherwise   → `$123`
+pub fn format_dollars(value: f64) -> String {
+    let abs = value.abs();
+    let sign = if value < 0.0 { "-" } else { "" };
+    if abs >= 1_000_000.0 {
+        format!("{sign}${:.1}M", abs / 1_000_000.0)
+    } else if abs >= 1_000.0 {
+        format!("{sign}${:.0}K", abs / 1_000.0)
+    } else {
+        format!("{sign}${:.0}", abs)
+    }
+}
+
+/// Compute win-rate as a percentage.  Returns `0.0` when there are no resolved bets.
+pub fn win_rate(wins: usize, losses: usize) -> f64 {
+    if wins + losses == 0 {
+        return 0.0;
+    }
+    wins as f64 / (wins + losses) as f64 * 100.0
+}
+
 /// Enriched view of an open bet with live market data.
 pub struct OpenBetView<'a> {
     pub bet: &'a Bet,
@@ -211,11 +236,7 @@ pub fn format_stats(data: &StatsData) -> String {
     } else {
         0.0
     };
-    let total_wr = if data.total_wins + data.total_losses > 0 {
-        data.total_wins as f64 / (data.total_wins + data.total_losses) as f64 * 100.0
-    } else {
-        0.0
-    };
+    let total_wr = win_rate(data.total_wins, data.total_losses);
 
     let unrealized_section = if data.total_open > 0 {
         format!(
@@ -230,17 +251,8 @@ pub fn format_stats(data: &StatsData) -> String {
         .strategies
         .iter()
         .map(|s| {
-            let label = match s.name.as_str() {
-                "aggressive" => "🔥",
-                "balanced" => "⚖️",
-                "conservative" => "🛡️",
-                _ => "📊",
-            };
-            let s_wr = if s.wins + s.losses > 0 {
-                s.wins as f64 / (s.wins + s.losses) as f64 * 100.0
-            } else {
-                0.0
-            };
+            let label = strategy::strategy_label(&s.name);
+            let s_wr = win_rate(s.wins, s.losses);
             format!(
                 "{label} *{name}*\n\
                  \u{00a0}\u{00a0}💰 `€{bankroll:.2}` | ROI `{roi:+.1}%`\n\
@@ -260,16 +272,8 @@ pub fn format_stats(data: &StatsData) -> String {
 
     let mut source_lines = Vec::new();
     for src in &data.sources {
-        let label = if src.name == "xgboost" {
-            "🤖"
-        } else {
-            "🧠"
-        };
-        let src_wr = if src.wins + src.losses > 0 {
-            src.wins as f64 / (src.wins + src.losses) as f64 * 100.0
-        } else {
-            0.0
-        };
+        let label = strategy::source_icon(&src.name);
+        let src_wr = win_rate(src.wins, src.losses);
         source_lines.push(format!(
             "{label} *{name}*: {wins}W/{losses}L ({wr:.0}%) | PnL `€{pnl:+.2}`",
             name = src.name,
@@ -412,6 +416,42 @@ pub fn format_copy_bet(n: &CopyBetNotif) -> String {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[test]
+    fn test_win_rate_zero() {
+        assert_eq!(win_rate(0, 0), 0.0);
+    }
+
+    #[test]
+    fn test_win_rate_all_wins() {
+        assert_eq!(win_rate(5, 0), 100.0);
+    }
+
+    #[test]
+    fn test_win_rate_half() {
+        assert!((win_rate(3, 3) - 50.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_format_dollars_thousands() {
+        assert_eq!(format_dollars(1500.0), "$2K");
+    }
+
+    #[test]
+    fn test_format_dollars_small() {
+        let s = format_dollars(500.0);
+        assert!(s.starts_with('$'));
+    }
+
+    #[test]
+    fn test_format_dollars_millions() {
+        assert_eq!(format_dollars(2_500_000.0), "$2.5M");
+    }
+
+    #[test]
+    fn test_format_dollars_negative() {
+        assert_eq!(format_dollars(-500.0), "-$500");
+    }
 
     fn make_bet(question: &str, side: BetSide, cost: f64, shares: f64, entry: f64) -> Bet {
         Bet {
