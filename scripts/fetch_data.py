@@ -344,6 +344,42 @@ def fetch_bet_snapshots(database_url: str, scraper: PolymarketScraper,
         return []
 
     cur = conn.cursor()
+
+    # First: use exact stored features from bet_features table (ADR 004).
+    # These are the precise feature vector captured at bet-placement time.
+    snapshots = []
+    stored_market_ids = set()
+    try:
+        cur.execute("""
+            SELECT b.market_id, b.side, b.entry_price, b.estimated_prob, b.confidence,
+                   b.edge, b.won, bf.features
+            FROM bets b
+            JOIN bet_features bf ON bf.bet_id = b.id
+            WHERE b.resolved = TRUE AND b.won IS NOT NULL
+            ORDER BY b.placed_at
+        """)
+        for market_id, side, entry_price, est_prob, confidence, edge, won, features_json in cur.fetchall():
+            if features_json is None:
+                continue
+            outcome_yes = won if side == "Yes" else not won
+            snap = {k: float(v) if v is not None else 0.0 for k, v in features_json.items()}
+            snap["yes_price"] = entry_price
+            snap["outcome_yes"] = outcome_yes
+            snap["market_id"] = market_id
+            snap["snapshot_ts"] = 0
+            snap["source"] = "own_bet_exact"
+            snap["our_estimated_prob"] = est_prob
+            snap["our_confidence"] = confidence
+            snap["our_edge"] = edge
+            snap["our_bet_won"] = bool(won)
+            snapshots.append(snap)
+            stored_market_ids.add(market_id)
+        if verbose and snapshots:
+            print(f"  {len(snapshots)} bets with stored features (exact, no reconstruction)")
+    except Exception as e:
+        print(f"  Could not query bet_features: {e}")
+
+    # Fallback: reconstruct from price history for older bets without stored features
     try:
         cur.execute("""
             SELECT market_id, side, entry_price, estimated_prob, confidence,
@@ -356,27 +392,24 @@ def fetch_bet_snapshots(database_url: str, scraper: PolymarketScraper,
     except Exception as e:
         print(f"  Could not query bets: {e}")
         conn.close()
-        return []
+        return snapshots
     conn.close()
 
-    if not rows:
-        print("  No resolved bets in DB")
-        return []
+    legacy_rows = [r for r in rows if r[0] not in stored_market_ids]
+    if not legacy_rows:
+        return snapshots
 
-    print(f"  Found {len(rows)} resolved bets in DB")
-    snapshots = []
+    print(f"  {len(legacy_rows)} older bets without stored features — reconstructing from price history")
 
-    for i, row in enumerate(rows):
+    for i, row in enumerate(legacy_rows):
         market_id, side, entry_price, est_prob, confidence, edge, won, placed_at, end_date, ctx = row
         outcome_yes = won if side == "Yes" else not won
 
-        # Try to get token ID from context JSON
         token_id = None
         if ctx and isinstance(ctx, dict):
             token_id = ctx.get("yes_token_id")
 
         if not token_id:
-            # Fetch market from Gamma API to get token
             market_data = scraper._get(f"{GAMMA_URL}/markets/{market_id}")
             if market_data:
                 tokens_raw = market_data.get("clobTokenIds", "")
@@ -390,7 +423,7 @@ def fetch_bet_snapshots(database_url: str, scraper: PolymarketScraper,
             continue
 
         if verbose:
-            print(f"  [{i+1}/{len(rows)}] Bet on {market_id[:20]}... won={won}")
+            print(f"  [{i+1}/{len(legacy_rows)}] Reconstructing {market_id[:20]}... won={won}")
 
         history = scraper.fetch_price_history(token_id)
         if len(history) < 20:
@@ -410,13 +443,11 @@ def fetch_bet_snapshots(database_url: str, scraper: PolymarketScraper,
         prices = np.array([t["p"] for t in ticks])
         timestamps = np.array([t["t"] for t in ticks])
 
-        # Find the tick closest to when we placed the bet
         bet_ts = int(placed_at.timestamp()) if hasattr(placed_at, "timestamp") else int(placed_at)
         bet_idx = int(np.searchsorted(timestamps, bet_ts))
         bet_idx = min(bet_idx, len(ticks) - 2)
-        bet_idx = max(bet_idx, 20)  # Need enough history
+        bet_idx = max(bet_idx, 20)
 
-        # Parse volume/liquidity from context if available
         volume = ctx.get("volume", 0) if ctx and isinstance(ctx, dict) else 0
         liquidity = ctx.get("liquidity", 0) if ctx and isinstance(ctx, dict) else 0
 
@@ -432,7 +463,6 @@ def fetch_bet_snapshots(database_url: str, scraper: PolymarketScraper,
 
         snap = _extract_snapshot(prices, timestamps, bet_idx, market_stub)
         if snap:
-            # Override with our actual entry data for higher fidelity
             snap["yes_price"] = entry_price
             snap["source"] = "own_bet"
             snap["our_estimated_prob"] = est_prob

@@ -178,6 +178,7 @@ mod tests {
             days_to_expiry: 7.0,
             event_slug: None,
             context: BetContext::default(),
+            features: None,
         }
     }
 

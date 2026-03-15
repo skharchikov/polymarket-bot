@@ -183,6 +183,7 @@ pub async fn alert_loop(
                         source: source_str.to_string(),
                         url: signal.polymarket_url.clone(),
                         event_slug: signal.event_slug.clone(),
+                        features: signal.features.clone(),
                     };
 
                     // Log prediction for Brier score tracking
