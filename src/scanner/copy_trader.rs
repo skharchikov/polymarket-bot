@@ -23,15 +23,48 @@ const LEADERBOARD_DISPLAY_LIMIT: usize = 15;
 // ---------------------------------------------------------------------------
 
 /// One entry from `GET /leaderboard`.
+/// Fields come as strings from the API, so we deserialize to `Value` and parse.
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct LeaderboardEntry {
     #[serde(rename = "proxyWallet")]
     proxy_wallet: String,
+    #[serde(rename = "userName")]
     name: Option<String>,
-    rank: Option<i32>,
-    pnl: Option<f64>,
-    volume: Option<f64>,
+    #[serde(default)]
+    rank: Option<serde_json::Value>,
+    #[serde(default)]
+    pnl: Option<serde_json::Value>,
+    #[serde(default, rename = "vol")]
+    volume: Option<serde_json::Value>,
+}
+
+impl LeaderboardEntry {
+    fn rank_i32(&self) -> Option<i32> {
+        self.rank.as_ref().and_then(|v| match v {
+            serde_json::Value::Number(n) => n.as_i64().map(|n| n as i32),
+            serde_json::Value::String(s) => s.parse().ok(),
+            _ => None,
+        })
+    }
+
+    fn pnl_f64(&self) -> f64 {
+        self.volume_like(&self.pnl)
+    }
+
+    fn volume_f64(&self) -> f64 {
+        self.volume_like(&self.volume)
+    }
+
+    fn volume_like(&self, v: &Option<serde_json::Value>) -> f64 {
+        v.as_ref()
+            .and_then(|v| match v {
+                serde_json::Value::Number(n) => n.as_f64(),
+                serde_json::Value::String(s) => s.parse().ok(),
+                _ => None,
+            })
+            .unwrap_or(0.0)
+    }
 }
 
 /// One trade event from `GET /activity`.
@@ -115,9 +148,8 @@ pub async fn fetch_leaderboard(http: &Client) -> Result<Vec<LeaderboardDisplay>>
     // Sort by descending PnL, then assign sequential display ranks.
     let mut sorted = entries;
     sorted.sort_by(|a, b| {
-        b.pnl
-            .unwrap_or(0.0)
-            .partial_cmp(&a.pnl.unwrap_or(0.0))
+        b.pnl_f64()
+            .partial_cmp(&a.pnl_f64())
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
@@ -125,14 +157,20 @@ pub async fn fetch_leaderboard(http: &Client) -> Result<Vec<LeaderboardDisplay>>
         .into_iter()
         .take(LEADERBOARD_DISPLAY_LIMIT)
         .enumerate()
-        .map(|(i, e)| LeaderboardDisplay {
-            rank: i + 1,
-            name: e
+        .map(|(i, e)| {
+            let pnl = e.pnl_f64();
+            let volume = e.volume_f64();
+            let wallet = e.proxy_wallet;
+            let name = e
                 .name
                 .filter(|n| !n.is_empty())
-                .unwrap_or_else(|| format!("{}…", &e.proxy_wallet[..8.min(e.proxy_wallet.len())])),
-            pnl: e.pnl.unwrap_or(0.0),
-            volume: e.volume.unwrap_or(0.0),
+                .unwrap_or_else(|| format!("{}…", &wallet[..8.min(wallet.len())]));
+            LeaderboardDisplay {
+                rank: i + 1,
+                name,
+                pnl,
+                volume,
+            }
         })
         .collect();
 
@@ -263,12 +301,11 @@ impl CopyTraderMonitor {
         // Filter and sort by descending PnL.
         let mut qualifying: Vec<&LeaderboardEntry> = entries
             .iter()
-            .filter(|e| e.pnl.unwrap_or(0.0) >= min_pnl && e.volume.unwrap_or(0.0) >= min_volume)
+            .filter(|e| e.pnl_f64() >= min_pnl && e.volume_f64() >= min_volume)
             .collect();
         qualifying.sort_by(|a, b| {
-            b.pnl
-                .unwrap_or(0.0)
-                .partial_cmp(&a.pnl.unwrap_or(0.0))
+            b.pnl_f64()
+                .partial_cmp(&a.pnl_f64())
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         qualifying.truncate(max_traders);
@@ -280,9 +317,9 @@ impl CopyTraderMonitor {
                     &entry.proxy_wallet,
                     entry.name.as_deref(),
                     "leaderboard",
-                    entry.rank,
-                    entry.pnl,
-                    entry.volume,
+                    entry.rank_i32(),
+                    Some(entry.pnl_f64()),
+                    Some(entry.volume_f64()),
                 )
                 .await
                 .context("upsert followed_trader")?;
@@ -427,5 +464,27 @@ impl CopyTraderMonitor {
 
         tracing::info!(count = detected.len(), "New copy-trade events detected");
         Ok(detected)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore] // hits real API
+    async fn test_fetch_leaderboard_live() {
+        let http = Client::new();
+        let entries = fetch_leaderboard(&http).await.unwrap();
+        assert!(!entries.is_empty(), "leaderboard should have entries");
+        assert!(entries.len() <= LEADERBOARD_DISPLAY_LIMIT);
+        // First entry should be rank 1
+        assert_eq!(entries[0].rank, 1);
+        // Name should not be empty
+        assert!(!entries[0].name.is_empty());
+        // Top trader should have positive PnL
+        assert!(entries[0].pnl > 0.0);
+        // Print for manual inspection
+        println!("{}", format_leaderboard(&entries));
     }
 }
