@@ -81,6 +81,17 @@ impl PgPortfolio {
         Ok(())
     }
 
+    /// Set the `username` field for a trader (backfill / refresh).
+    pub async fn update_trader_username(&self, wallet: &str, username: &str) -> Result<()> {
+        sqlx::query("UPDATE followed_traders SET username = $1 WHERE proxy_wallet = $2")
+            .bind(username)
+            .bind(wallet)
+            .execute(&self.pool)
+            .await
+            .context("update_trader_username")?;
+        Ok(())
+    }
+
     /// Stamp `last_checked_at = NOW()` for the given trader wallet.
     pub async fn update_trader_checked(&self, wallet: &str) -> Result<()> {
         sqlx::query("UPDATE followed_traders SET last_checked_at = NOW() WHERE proxy_wallet = $1")

@@ -6,7 +6,7 @@ use crate::format;
 use crate::live::broadcast;
 use crate::metrics;
 use crate::pricing::kelly::fractional_kelly;
-use crate::scanner::copy_trader::CopyTraderMonitor;
+use crate::scanner::copy_trader::{CopyTraderMonitor, fetch_trader_username};
 use crate::scanner::live::{LiveScanner, SignalSource};
 use crate::storage::portfolio::{BetSide, NewBet};
 use crate::storage::postgres::PgPortfolio;
@@ -40,6 +40,18 @@ pub async fn copy_trade_cycle(
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
+
+    // Backfill usernames for any traders that don't have one yet
+    if let Ok(traders) = portfolio.get_active_traders().await {
+        for trader in traders.iter().filter(|t| t.username.is_none()) {
+            if let Some(name) = fetch_trader_username(&http, &trader.proxy_wallet).await {
+                tracing::info!(wallet = %trader.proxy_wallet, username = %name, "Backfilled trader username");
+                let _ = portfolio
+                    .update_trader_username(&trader.proxy_wallet, &name)
+                    .await;
+            }
+        }
+    }
 
     let mut bets_placed = 0usize;
     let mut exits_triggered = 0usize;

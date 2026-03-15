@@ -112,10 +112,10 @@ pub struct LeaderboardDisplay {
 // Standalone leaderboard helpers (no monitor instance required)
 // ---------------------------------------------------------------------------
 
-/// Fetch a trader's display name from the Polymarket profile API.
-/// Returns `None` if the request fails or the profile has no username set.
+/// Fetch a trader's display name via the activity endpoint.
+/// Returns `None` if the request fails or the trader has no activity.
 pub async fn fetch_trader_username(http: &Client, wallet: &str) -> Option<String> {
-    let url = format!("{DATA_API}/profile?address={wallet}");
+    let url = format!("{DATA_API}/activity?user={wallet}&type=TRADE&limit=1");
     let resp: serde_json::Value = http
         .get(&url)
         .timeout(REQUEST_TIMEOUT)
@@ -125,9 +125,7 @@ pub async fn fetch_trader_username(http: &Client, wallet: &str) -> Option<String
         .json()
         .await
         .ok()?;
-    let name = resp["name"]
-        .as_str()
-        .or_else(|| resp["username"].as_str())?;
+    let name = resp.as_array()?.first()?["name"].as_str()?;
     if name.is_empty() {
         None
     } else {
