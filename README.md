@@ -40,10 +40,7 @@ src/
 scripts/
 ├── fetch_data.py        # Fetches resolved markets + own bets for training
 ├── train_model.py       # Trains XGBoost/stacking ensemble
-├── serve_model.py       # HTTP model server (sidecar)
-├── retrain.sh           # Continuous retraining loop (every 24h)
-├── backtest.py          # Python backtest with stop-loss simulation
-└── test_predictions.py  # Prediction validation tests
+└── serve_model.py       # HTTP model server with scheduled retraining
 ```
 
 ## How It Works

@@ -7,6 +7,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY fetch_data.py train_model.py retrain.sh serve_model.py ./
+COPY fetch_data.py train_model.py serve_model.py ./
 
 ENTRYPOINT ["python"]
