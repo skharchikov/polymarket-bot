@@ -317,11 +317,6 @@ mod tests {
             is_crypto: 1.0,
             is_politics: 0.0,
             is_sports: 0.0,
-            news_count: 3.0,
-            best_news_score: 0.85,
-            avg_news_age_hours: 2.5,
-            order_imbalance: 0.15,
-            spread: 0.02,
             price_change_1d: 0.03,
             price_change_1w: -0.05,
         };

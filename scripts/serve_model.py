@@ -43,8 +43,7 @@ FEATURE_NAMES = [
     "yes_price", "momentum_1h", "momentum_24h", "volatility_24h", "rsi",
     "log_volume", "log_liquidity", "days_to_expiry",
     "is_crypto", "is_politics", "is_sports",
-    "news_count", "best_news_score", "avg_news_age_hours",
-    "order_imbalance", "spread", "price_change_1d", "price_change_1w",
+    "price_change_1d", "price_change_1w",
 ]
 
 app = FastAPI(title="Polymarket ML Sidecar")
