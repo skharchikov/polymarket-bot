@@ -40,7 +40,7 @@ sqlx = { version = "0.8.6", features = [
 ] }
 
 # WebSocket
-tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 
 # TLS (explicit crypto provider selection — both ring and aws-lc-rs in dep tree)
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
@@ -50,11 +50,11 @@ futures-util = "0.3"
 dotenvy = "0.15"
 
 # Configuration
-confique = "0.2"
+confique = "0.4"
 
 # Metrics
 metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.16", features = ["http-listener"] }
+metrics-exporter-prometheus = { version = "0.18", features = ["http-listener"] }
 metrics-process = "2.3"
 
 # Tokio runtime metrics
