@@ -28,6 +28,7 @@ services:
       MODEL_PORT: "8000"
       RETRAIN_MAX_AGE_HOURS: "24"
       RETRAIN_ON_SCHEDULE: "true"
+      RETRAIN_MARKETS: "3000"
     volumes:
       - model:/model
     ports:
