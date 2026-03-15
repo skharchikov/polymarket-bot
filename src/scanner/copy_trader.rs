@@ -15,6 +15,8 @@ use crate::storage::postgres::{NewCopyTradeEvent, PgPortfolio};
 const DATA_API: &str = "https://data-api.polymarket.com";
 /// Default HTTP timeout for all data-API calls.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// Number of traders shown in the inline leaderboard reply.
+const LEADERBOARD_DISPLAY_LIMIT: usize = 15;
 
 // ---------------------------------------------------------------------------
 // API response types
@@ -72,6 +74,140 @@ pub struct TraderTrade {
 pub struct DetectedTrade {
     pub trader_wallet: String,
     pub trade: TraderTrade,
+}
+
+/// Display-ready representation of a single leaderboard entry.
+#[derive(Debug, Clone)]
+pub struct LeaderboardDisplay {
+    pub rank: usize,
+    pub name: String,
+    pub pnl: f64,
+    pub volume: f64,
+}
+
+// ---------------------------------------------------------------------------
+// Standalone leaderboard helpers (no monitor instance required)
+// ---------------------------------------------------------------------------
+
+/// Fetch the public Polymarket leaderboard and return the top entries
+/// formatted for display.  This is **read-only** — nothing is written to the
+/// database.
+///
+/// # Errors
+///
+/// Returns an error if the HTTP request fails or the response cannot be
+/// parsed.
+pub async fn fetch_leaderboard(http: &Client) -> Result<Vec<LeaderboardDisplay>> {
+    let url = format!("{DATA_API}/leaderboard?window=all&limit=50");
+
+    let entries: Vec<LeaderboardEntry> = http
+        .get(&url)
+        .timeout(REQUEST_TIMEOUT)
+        .send()
+        .await
+        .context("leaderboard request failed")?
+        .error_for_status()
+        .context("leaderboard returned non-2xx")?
+        .json()
+        .await
+        .context("leaderboard JSON parse failed")?;
+
+    // Sort by descending PnL, then assign sequential display ranks.
+    let mut sorted = entries;
+    sorted.sort_by(|a, b| {
+        b.pnl
+            .unwrap_or(0.0)
+            .partial_cmp(&a.pnl.unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let display = sorted
+        .into_iter()
+        .take(LEADERBOARD_DISPLAY_LIMIT)
+        .enumerate()
+        .map(|(i, e)| LeaderboardDisplay {
+            rank: i + 1,
+            name: e
+                .name
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| format!("{}…", &e.proxy_wallet[..8.min(e.proxy_wallet.len())])),
+            pnl: e.pnl.unwrap_or(0.0),
+            volume: e.volume.unwrap_or(0.0),
+        })
+        .collect();
+
+    Ok(display)
+}
+
+/// Format a slice of [`LeaderboardDisplay`] entries as a Telegram MarkdownV2-
+/// compatible message.
+///
+/// # Example
+///
+/// ```ignore
+/// let msg = format_leaderboard(&entries);
+/// notifier.send_to(&chat_id, &msg).await?;
+/// ```
+pub fn format_leaderboard(entries: &[LeaderboardDisplay]) -> String {
+    if entries.is_empty() {
+        return "🏆 *Polymarket Leaderboard*\n\n_No data available._".to_string();
+    }
+
+    let mut lines = Vec::with_capacity(entries.len() + 3);
+    lines.push("🏆 *Polymarket Leaderboard*\n".to_string());
+
+    for entry in entries {
+        let medal = match entry.rank {
+            1 => "🥇",
+            2 => "🥈",
+            3 => "🥉",
+            n => return_rank_str(n),
+        };
+
+        let pnl_str = format_dollars(entry.pnl);
+        let vol_str = format_dollars(entry.volume);
+
+        let line = if entry.rank <= 3 {
+            format!(
+                "{medal} *{}* — PnL: {} | Vol: {}",
+                entry.name, pnl_str, vol_str
+            )
+        } else {
+            format!(
+                "{} {}. {} — PnL: {} | Vol: {}",
+                medal, entry.rank, entry.name, pnl_str, vol_str,
+            )
+        };
+
+        lines.push(line);
+    }
+
+    lines.push("\n_Data from Polymarket Data API_".to_string());
+    lines.join("\n")
+}
+
+/// Returns a blank string for numbered ranks (the rank number is embedded in
+/// the formatted line directly).
+#[inline]
+fn return_rank_str(_rank: usize) -> &'static str {
+    " "
+}
+
+/// Format a dollar amount into a compact human-readable string.
+///
+/// * ≥ 1 000 000 → `$1.2M`
+/// * ≥ 1 000     → `$890K`
+/// * otherwise   → `$123`
+fn format_dollars(value: f64) -> String {
+    let abs = value.abs();
+    let sign = if value < 0.0 { "-" } else { "" };
+    if abs >= 1_000_000.0 {
+        format!("{sign}${:.1}M", abs / 1_000_000.0)
+    } else if abs >= 1_000.0 {
+        format!("{sign}${:.0}K", abs / 1_000.0)
+    } else {
+        format!("{sign}${:.0}", abs)
+    }
 }
 
 // ---------------------------------------------------------------------------

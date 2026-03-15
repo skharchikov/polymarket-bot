@@ -299,6 +299,12 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         }
     });
 
+    // Shared HTTP client for commands that need outbound requests (e.g. /leaderboard).
+    let cmd_http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .expect("failed to build command HTTP client");
+
     // Spawn Telegram command polling loop
     let cmd_portfolio = Arc::clone(&portfolio);
     let cmd_notifier = Arc::clone(&notifier);
@@ -439,8 +445,15 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                         }
                     },
                     "leaderboard" => {
-                        "🏆 View the Polymarket leaderboard:\nhttps://polymarket.com/leaderboard"
-                            .to_string()
+                        match crate::scanner::copy_trader::fetch_leaderboard(&cmd_http).await {
+                            Ok(entries) => {
+                                crate::scanner::copy_trader::format_leaderboard(&entries)
+                            }
+                            Err(e) => {
+                                tracing::warn!(err = %e, "Failed to fetch leaderboard");
+                                "⚠️ Could not fetch leaderboard — try again shortly.".to_string()
+                            }
+                        }
                     }
                     "help" => "📖 *Commands*\n\n\
                          /stats — portfolio statistics\n\
