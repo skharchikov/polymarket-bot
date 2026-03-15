@@ -1098,18 +1098,16 @@ impl LiveScanner {
                     news_count,
                     best_news_score,
                     avg_news_age_hours,
-                )
-                .with_order_book(&c.book_stats);
+                );
                 let fv = features.to_vec();
                 match self.predict(&fv, c.current_price).await {
                     Some(p) => p,
                     None => (c.ml_prob, c.ml_conf),
                 }
             } else {
-                // Re-predict with order book stats even without news
+                // Re-predict without news
                 let features =
-                    MarketFeatures::from_market_and_history(&c.market, c.current_price, &c.history)
-                        .with_order_book(&c.book_stats);
+                    MarketFeatures::from_market_and_history(&c.market, c.current_price, &c.history);
                 let fv = features.to_vec();
                 match self.predict(&fv, c.current_price).await {
                     Some(p) => p,

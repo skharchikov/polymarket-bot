@@ -109,6 +109,9 @@ class PolymarketScraper:
                     "category": m.get("groupSlug") or m.get("category", ""),
                     "outcome_yes": outcome,
                     "volume": volume,
+                    # volume24hr reflects liquidity at a recent point, more
+                    # representative of what live inference sees than total volume
+                    "volume_24h": float(m.get("volume24hr", 0) or 0),
                     "liquidity": float(m.get("liquidityNum", 0) or m.get("liquidity", 0) or 0),
                     "end_date": m.get("endDate"),
                     "created_at": m.get("createdAt"),
@@ -257,11 +260,19 @@ def _extract_snapshot(prices: np.ndarray, timestamps: np.ndarray,
         except (ValueError, TypeError):
             pass
 
-    # Category one-hot
+    # Only keep snapshots within the deployment window: bot bets at 3-14d remaining.
+    # Snapshots outside this range teach the model patterns that never appear in live.
+    if days_to_expiry > 14.0:
+        return None
+
+    # Category detection — must match live Rust logic (category + question, same keywords)
     category = (market.get("category") or "").lower()
+    question = (market.get("question") or "").lower()
+    combined = category + " " + question
 
     return {
-        # Features
+        # Features (13 total — news/orderbook features removed: always 0 in training,
+        # non-zero in live, causing distribution shift with no learning signal)
         "yes_price": current_price,
         "price_1h_ago": p_1h,
         "price_6h_ago": p_6h,
@@ -270,17 +281,10 @@ def _extract_snapshot(prices: np.ndarray, timestamps: np.ndarray,
         "momentum_24h": momentum_24h,
         "volatility_24h": volatility,
         "rsi": rsi,
-        "volume": volume,
+        "volume": market.get("volume_24h", volume),  # prefer 24h volume over total
         "liquidity": liquidity,
         "days_to_expiry": days_to_expiry,
-        "category": category,
-        # News features (0 for historical data — XGBoost handles missing natively)
-        "news_count": 0,
-        "best_news_score": 0.0,
-        "avg_news_age_hours": 0.0,
-        # Order book features (0 for historical snapshots — not available retroactively)
-        "order_imbalance": 0.0,
-        "spread": 0.0,
+        "category": combined,
         # Gamma API price changes
         "price_change_1d": market.get("one_day_price_change", momentum_24h),
         "price_change_1w": market.get("one_week_price_change", 0.0),

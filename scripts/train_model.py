@@ -50,7 +50,10 @@ except ImportError:
     print("Warning: LightGBM not installed, using sklearn only")
 
 
-# Feature columns in fixed order — must match Rust inference (MarketFeatures::NAMES)
+# Feature columns in fixed order — must match Rust inference (MarketFeatures::NAMES).
+# news_count / best_news_score / avg_news_age_hours / order_imbalance / spread removed:
+# they are always 0 in training data (not available retroactively) but non-zero in live
+# inference, causing guaranteed distribution shift with zero learning signal.
 FEATURE_COLS = [
     "yes_price",
     "momentum_1h",
@@ -63,11 +66,6 @@ FEATURE_COLS = [
     "is_crypto",
     "is_politics",
     "is_sports",
-    "news_count",
-    "best_news_score",
-    "avg_news_age_hours",
-    "order_imbalance",
-    "spread",
     "price_change_1d",
     "price_change_1w",
 ]
@@ -89,22 +87,24 @@ def load_data(path: str) -> pd.DataFrame:
     df["log_volume"] = np.log1p(df["volume"])
     df["log_liquidity"] = np.log1p(df["liquidity"])
 
-    # Category one-hot
-    cat = df["category"].fillna("").str.lower()
-    df["is_crypto"] = cat.str.contains("crypto|bitcoin|defi|token").astype(float)
-    df["is_politics"] = cat.str.contains("politic|election|president|vote").astype(float)
-    df["is_sports"] = cat.str.contains("sport|nba|nfl|soccer|tennis|mma").astype(float)
+    # Category one-hot — keywords must match live Rust logic in features.rs exactly.
+    # fetch_data.py stores combined "category + question" in the category field.
+    combined = df["category"].fillna("").str.lower()
+    df["is_crypto"] = combined.str.contains(
+        "crypto|bitcoin|btc|ethereum|eth|solana|sol|defi|nft|blockchain"
+        "|dogecoin|doge|xrp|ripple|cardano|polkadot|avalanche|chainlink|bnb|binance"
+        "|coinbase|stablecoin|memecoin|token"
+    ).astype(float)
+    df["is_politics"] = combined.str.contains(
+        "politic|election|president|vote|congress|senate|democrat|republican"
+    ).astype(float)
+    df["is_sports"] = combined.str.contains(
+        "sport|nba|nfl|soccer|tennis|mma|mlb|nhl|football|basketball|baseball"
+    ).astype(float)
 
     # Fill NaN momentum with 0 (no price reference available)
     for col in ["momentum_1h", "momentum_24h", "price_1h_ago", "price_6h_ago", "price_24h_ago"]:
         if col in df.columns:
-            df[col] = df[col].fillna(0.0)
-
-    # News features (0 for historical data without news — XGBoost handles this natively)
-    for col in ["news_count", "best_news_score", "avg_news_age_hours"]:
-        if col not in df.columns:
-            df[col] = 0.0
-        else:
             df[col] = df[col].fillna(0.0)
 
     # Sort by snapshot time for proper time-series splits
