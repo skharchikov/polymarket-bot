@@ -116,6 +116,7 @@ pub struct LeaderboardDisplay {
     pub name: String,
     pub pnl: f64,
     pub volume: f64,
+    pub wallet: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +176,7 @@ pub async fn fetch_leaderboard(
                 name,
                 pnl,
                 volume,
+                wallet,
             }
         })
         .collect();
@@ -184,7 +186,10 @@ pub async fn fetch_leaderboard(
 
 /// Format a slice of [`LeaderboardDisplay`] entries as a single period section
 /// (no header or footer — used internally by [`format_multi_leaderboard`]).
-fn format_leaderboard_section(entries: &[LeaderboardDisplay]) -> String {
+///
+/// When `show_wallets` is `true`, each entry also shows a `/follow <wallet>`
+/// code snippet that the bot owner can tap-to-copy in Telegram.
+fn format_leaderboard_section(entries: &[LeaderboardDisplay], show_wallets: bool) -> String {
     let mut lines = Vec::with_capacity(entries.len());
 
     for entry in entries {
@@ -205,7 +210,11 @@ fn format_leaderboard_section(entries: &[LeaderboardDisplay]) -> String {
             ),
         };
 
-        lines.push(line);
+        if show_wallets {
+            lines.push(format!("{line}\n   `/follow {}`", entry.wallet));
+        } else {
+            lines.push(line);
+        }
     }
 
     lines.join("\n")
@@ -231,14 +240,16 @@ pub fn format_multi_leaderboard(periods: &[(&str, &[LeaderboardDisplay])]) -> St
     let mut parts = Vec::with_capacity(periods.len() + 2);
     parts.push("🏆 *Polymarket Leaderboard*".to_string());
 
-    for (label, entries) in periods {
+    let last_idx = periods.len().saturating_sub(1);
+    for (i, (label, entries)) in periods.iter().enumerate() {
+        let show_wallets = i == last_idx;
         let section_header = format!("\n📅 *{label}*");
         if entries.is_empty() {
             parts.push(format!("{section_header}\n_No data available._"));
         } else {
             parts.push(format!(
                 "{section_header}\n{}",
-                format_leaderboard_section(entries)
+                format_leaderboard_section(entries, show_wallets)
             ));
         }
     }
@@ -264,7 +275,7 @@ pub fn format_leaderboard(entries: &[LeaderboardDisplay]) -> String {
 
     let mut lines = Vec::with_capacity(entries.len() + 3);
     lines.push("🏆 *Polymarket Leaderboard*\n".to_string());
-    lines.push(format_leaderboard_section(entries));
+    lines.push(format_leaderboard_section(entries, true));
     lines.push("\n_Data from Polymarket Data API_".to_string());
     lines.join("\n")
 }

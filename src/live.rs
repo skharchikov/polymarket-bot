@@ -391,7 +391,7 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                         } else {
                             let arg = full_text.split_whitespace().nth(1).unwrap_or("");
                             if arg.is_empty() {
-                                "Usage: `/follow <wallet_address>`".to_string()
+                                "Usage: `/follow <wallet_address>`\n\nTip: use /leaderboard to browse top traders — wallet addresses are shown there for easy copy.".to_string()
                             } else {
                                 let wallet = arg.to_string();
                                 let short = &wallet[..8.min(wallet.len())];
