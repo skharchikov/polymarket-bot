@@ -22,6 +22,12 @@ pub struct AppConfig {
     #[config(env = "NEWS_SCAN_INTERVAL_MINS", default = 10)]
     pub news_scan_interval_mins: u64,
 
+    /// Enable news fetching and embedding-based matching.
+    /// When the model sidecar is active, news has no effect on predictions —
+    /// disable to save RSS + OpenAI embedding costs.
+    #[config(env = "NEWS_ENABLED", default = false)]
+    pub news_enabled: bool,
+
     // --- Betting ---
     /// Slippage assumption as a fraction (0.01 = 1%).
     #[config(env = "SLIPPAGE_PCT", default = 0.01)]

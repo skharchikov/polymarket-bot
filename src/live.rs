@@ -206,7 +206,7 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
              📊 Open: {open_count} | Record: {wins}W/{losses}L\n\n\
              {strat_details}\n\n\
              ⚙️ *Config:*\n\
-             ⏱ News: every {news_min}min | Housekeeping: every {hk_min}min\n\
+             ⏱ News: {news_status} | Housekeeping: every {hk_min}min\n\
              🎯 Max {max_sig} signals/day (per strategy) | Kelly: {kelly:.0}%\n\
              🔍 Min edge: {edge:.0}% | Min volume: ${vol:.0}\n\
              🧠 Pipeline: {pipeline}\n\
@@ -215,7 +215,11 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             wins = resolved.iter().filter(|b| b.won == Some(true)).count(),
             losses = resolved.iter().filter(|b| b.won == Some(false)).count(),
             strat_details = strat_lines.join("\n"),
-            news_min = cfg.news_scan_interval_mins,
+            news_status = if cfg.news_enabled {
+                format!("every {}min", cfg.news_scan_interval_mins)
+            } else {
+                "disabled".to_string()
+            },
             hk_min = cfg.scan_interval_mins,
             max_sig = strategies
                 .iter()
@@ -275,7 +279,7 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         }
     });
 
-    // Spawn news scanning loop (faster cycle)
+    // Spawn news scanning loop (faster cycle) — disabled when NEWS_ENABLED=false
     let ns_portfolio = Arc::clone(&portfolio);
     let ns_notifier = Arc::clone(&notifier);
     let ns_scanner = Arc::clone(&scanner);
@@ -283,6 +287,11 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     let ns_stats = Arc::clone(&stats);
     let ns_strategies = Arc::clone(&strategies);
     let news_scan = tokio::spawn(async move {
+        if !ns_cfg.news_enabled {
+            tracing::info!("News cycle disabled (NEWS_ENABLED=false) — parked");
+            std::future::pending::<()>().await;
+            return;
+        }
         let mut seen_headlines: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
