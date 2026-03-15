@@ -50,13 +50,13 @@ scripts/
 
 ### ML-First Pipeline
 
-1. **News scan loop** (every 10 min) fetches breaking news from Google News RSS, CBS Sports, CoinDesk, CoinTelegraph, Reuters/AP/BBC, and 15+ other feeds
-2. Matches news to eligible markets by keyword relevance and embedding similarity (volume, expiry, price filters)
-3. **XGBoost ensemble** scores all eligible markets on 15+ features (price momentum, volatility, volume trends, order book depth, time to expiry)
-4. **Bayesian anchoring**: model predictions are anchored to market price as prior, with the model's likelihood ratio dampened by confidence (`LR^confidence`) — prevents overconfident predictions
-5. Top candidates enriched with order book and price history data
-6. Each **strategy profile** independently evaluates signals against its own thresholds and Kelly fraction
-7. Places paper bets with per-strategy bankrolls and sends detailed Telegram summaries
+1. **XGBoost ensemble** scores all eligible markets on 13 features (price momentum, volatility, RSI, volume, time to expiry, category flags, API price changes)
+2. **Bayesian anchoring**: model predictions are anchored to market price as prior, with the model's likelihood ratio dampened by confidence (`LR^confidence`) — prevents overconfident predictions
+3. Top candidates enriched with order book depth data
+4. Each **strategy profile** independently evaluates signals against its own thresholds and Kelly fraction
+5. Places bets with per-strategy bankrolls and sends detailed Telegram summaries
+
+> **News cycle** (`NEWS_ENABLED`, default `false`): when the model sidecar is active, news signals are not part of the feature vector and have no effect on predictions. The news-first/LLM fallback path is only used when no model sidecar is configured.
 
 ### WebSocket Alerts
 
@@ -65,8 +65,9 @@ A parallel WebSocket connection monitors real-time price movements on eligible m
 ### Continuous Learning
 
 The model retrains every 24 hours on:
-- **~1000 resolved Polymarket markets** fetched from the API
+- **~3000 resolved Polymarket markets** fetched from the API (configurable via `RETRAIN_MARKETS`)
 - **Own resolved bets** (weighted 3x) — both wins and losses, with exact entry prices and known outcomes
+- Only snapshots within the **3–14 day deployment window** are used for training (sub-12h markets filtered out)
 
 As more bets resolve, the model sees more of its own data and improves predictions over time.
 
@@ -172,7 +173,9 @@ All settings via environment variables with sensible defaults:
 | `EXIT_DAYS_BEFORE_EXPIRY` | `0` | Exit underwater positions N days before expiry (0 = disabled) |
 | `CONSENSUS_AGENTS` | `2` | Number of LLM agents for fallback (1-3) |
 | `SCAN_INTERVAL_MINS` | `30` | Housekeeping loop interval |
-| `NEWS_SCAN_INTERVAL_MINS` | `10` | News scan loop interval |
+| `NEWS_ENABLED` | `false` | Enable news fetching (no-op when model sidecar is active) |
+| `NEWS_SCAN_INTERVAL_MINS` | `10` | News scan loop interval (only if `NEWS_ENABLED=true`) |
+| `RETRAIN_MARKETS` | `3000` | Number of resolved markets fetched per retrain cycle |
 | `MAX_MODEL_CANDIDATES` | `15` | Top N markets from XGBoost ranking |
 | `MAX_LLM_CANDIDATES` | `1` | Markets assessed by LLM per cycle |
 | `MIN_VOLUME` | `1000.0` | Min market volume filter |
