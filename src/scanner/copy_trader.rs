@@ -344,7 +344,7 @@ impl CopyTraderMonitor {
             })
             .collect();
 
-        tracing::debug!(
+        tracing::info!(
             wallet = %wallet,
             since = %since.format("%Y-%m-%d %H:%M"),
             raw_events = raw_count,
@@ -381,7 +381,7 @@ impl CopyTraderMonitor {
                 .username
                 .as_deref()
                 .unwrap_or(&trader.proxy_wallet[..8.min(trader.proxy_wallet.len())]);
-            tracing::debug!(
+            tracing::info!(
                 trader = %name,
                 wallet = %trader.proxy_wallet,
                 since = %since.format("%Y-%m-%d %H:%M"),
@@ -442,7 +442,7 @@ impl CopyTraderMonitor {
                 new_count += 1;
             }
 
-            tracing::debug!(
+            tracing::info!(
                 trader = %name,
                 new = new_count,
                 skipped = skipped_count,
