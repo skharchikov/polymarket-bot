@@ -513,6 +513,20 @@ impl LiveScanner {
             .with_context(|| format!("market {market_id} not found"))
     }
 
+    /// Fetch a single market by its slug (includes `events` array).
+    /// Used when only the market slug is available (e.g. from the activity endpoint).
+    pub async fn fetch_market_by_slug(&self, slug: &str) -> Result<GammaMarket> {
+        let url = format!("{GAMMA_API}/markets?slug={slug}");
+        let resp = self.http.get(&url).send().await?;
+        let text = resp.text().await?;
+        let markets: Vec<GammaMarket> = serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse market slug={slug}"))?;
+        markets
+            .into_iter()
+            .next()
+            .with_context(|| format!("market slug={slug} not found"))
+    }
+
     /// Run the ML model on a market for informational purposes.
     /// Returns `(probability, confidence)` or `None` if the model is unavailable.
     pub async fn predict_market(&self, market_id: &str, current_price: f64) -> Option<(f64, f64)> {

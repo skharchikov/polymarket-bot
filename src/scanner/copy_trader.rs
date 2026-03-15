@@ -59,14 +59,16 @@ impl LeaderboardEntry {
 /// One trade event from `GET /activity`.
 #[derive(Debug, Deserialize)]
 struct ActivityEvent {
-    #[serde(rename = "marketId")]
-    market_id: Option<String>,
+    /// Market slug — used to look up the Gamma numeric ID.
+    slug: Option<String>,
     #[serde(rename = "conditionId")]
     condition_id: Option<String>,
     /// "BUY" | "SELL"
     side: Option<String>,
     price: Option<f64>,
-    size: Option<f64>,
+    /// Actual USD value of the trade (not shares).
+    #[serde(rename = "usdcSize")]
+    usdc_size: Option<f64>,
     #[serde(rename = "transactionHash")]
     tx_hash: Option<String>,
     timestamp: Option<i64>,
@@ -80,12 +82,14 @@ struct ActivityEvent {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct TraderTrade {
-    pub market_id: String,
+    /// Market slug — used to look up the Gamma market (fetch_market_by_slug).
+    pub slug: String,
+    /// Hex condition ID — used for deduplication.
     pub condition_id: String,
     /// "BUY" or "SELL"
     pub side: String,
     pub price: f64,
-    /// Size in USD
+    /// Size in USD (usdcSize from API).
     pub size_usd: f64,
     pub tx_hash: Option<String>,
     pub timestamp: DateTime<Utc>,
@@ -321,17 +325,17 @@ impl CopyTraderMonitor {
             .into_iter()
             .filter_map(|e| {
                 // Require all mandatory fields to be present.
-                let market_id = e.market_id?;
+                let slug = e.slug?;
                 let condition_id = e.condition_id?;
                 let side = e.side?;
                 let price = e.price?;
-                let size_usd = e.size?;
+                let size_usd = e.usdc_size.unwrap_or(0.0);
                 let ts_secs = e.timestamp?;
 
                 let timestamp = DateTime::from_timestamp(ts_secs, 0).unwrap_or_else(Utc::now);
 
                 Some(TraderTrade {
-                    market_id,
+                    slug,
                     condition_id,
                     side,
                     price,
@@ -406,7 +410,7 @@ impl CopyTraderMonitor {
                 let already_seen = portfolio
                     .is_copy_trade_seen(
                         &trader.proxy_wallet,
-                        &trade.market_id,
+                        &trade.condition_id,
                         &trade.side,
                         trade.price,
                     )
@@ -420,7 +424,7 @@ impl CopyTraderMonitor {
 
                 let event = NewCopyTradeEvent {
                     trader_wallet: trader.proxy_wallet.clone(),
-                    market_id: trade.market_id.clone(),
+                    market_id: trade.condition_id.clone(),
                     condition_id: trade.condition_id.clone(),
                     side: trade.side.clone(),
                     price: trade.price,

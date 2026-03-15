@@ -64,10 +64,18 @@ pub async fn copy_trade_cycle(
 
         // Mirror exits: if the trader sold a position we copied, exit ours too.
         if trade.side == "SELL" {
+            // Resolve slug → Gamma numeric ID to match against bets table
+            let gamma_id = match scanner.fetch_market_by_slug(&trade.slug).await {
+                Ok(m) => m.market_id,
+                Err(e) => {
+                    tracing::warn!(slug = %trade.slug, err = %e, "Copy-exit: failed to resolve market slug");
+                    continue;
+                }
+            };
             let open_bets = portfolio.open_bets().await?;
             let matching = open_bets
                 .iter()
-                .find(|b| b.market_id == trade.market_id && b.strategy == strategy_name);
+                .find(|b| b.market_id == gamma_id && b.strategy == strategy_name);
 
             if let Some(bet) = matching {
                 let ids = [bet.market_id.as_str()];
@@ -79,7 +87,7 @@ pub async fn copy_trade_cycle(
 
                 let Some(current_yes_price) = yes_price else {
                     tracing::warn!(
-                        market = %trade.market_id,
+                        market = %gamma_id,
                         trader = wallet_short,
                         "Copy-exit: could not fetch current price, skipping"
                     );
@@ -129,7 +137,7 @@ pub async fn copy_trade_cycle(
                         );
                         broadcast(notifier, portfolio, &msg).await;
                         tracing::info!(
-                            market = %trade.market_id,
+                            market = %gamma_id,
                             trader = %trader_name,
                             pnl = format_args!("€{:+.2}", r.pnl),
                             "Copy-exit executed"
@@ -141,7 +149,7 @@ pub async fn copy_trade_cycle(
                 }
             } else {
                 tracing::debug!(
-                    market = %trade.market_id,
+                    slug = %trade.slug,
                     trader = wallet_short,
                     "Copy-exit: no matching open bet, ignoring SELL"
                 );
@@ -154,20 +162,20 @@ pub async fn copy_trade_cycle(
             continue;
         }
 
-        // Skip if we already have an open bet on this market
-        if skip_ids.contains(&trade.market_id) {
-            tracing::debug!(market = %trade.market_id, "Copy-trade skip: already have open bet");
-            continue;
-        }
-
-        // Fetch market data
-        let market = match scanner.fetch_market_with_events(&trade.market_id).await {
+        // Fetch market data (resolves slug → Gamma numeric ID + events)
+        let market = match scanner.fetch_market_by_slug(&trade.slug).await {
             Ok(m) => m,
             Err(e) => {
-                tracing::warn!(market = %trade.market_id, err = %e, "Failed to fetch market for copy-trade");
+                tracing::warn!(slug = %trade.slug, err = %e, "Failed to fetch market for copy-trade");
                 continue;
             }
         };
+
+        // Skip if we already have an open bet on this market (use Gamma numeric ID)
+        if skip_ids.contains(&market.market_id) {
+            tracing::debug!(market = %market.market_id, "Copy-trade skip: already have open bet");
+            continue;
+        }
 
         // Skip if same event already has an open bet
         if let Some(slug) = market.event_slug()
@@ -228,7 +236,7 @@ pub async fn copy_trade_cycle(
         }
 
         // Run ML model for informational purposes (not a gate)
-        let ml_info = match scanner.predict_market(&trade.market_id, entry_price).await {
+        let ml_info = match scanner.predict_market(&market.market_id, entry_price).await {
             Some((ml_prob, ml_conf)) => {
                 let agrees = (ml_prob > 0.5 && entry_price < 0.5)
                     || (ml_prob < 0.5 && entry_price > 0.5)
@@ -269,7 +277,7 @@ pub async fn copy_trade_cycle(
         );
 
         let new_bet = NewBet {
-            market_id: trade.market_id.clone(),
+            market_id: market.market_id.clone(),
             question: market.question.clone(),
             side: BetSide::Yes,
             entry_price,
@@ -293,7 +301,7 @@ pub async fn copy_trade_cycle(
         // Log prediction for model learning (Brier score tracking)
         let _ = portfolio
             .log_prediction(
-                &trade.market_id,
+                &market.market_id,
                 SignalSource::CopyTrade.as_str(),
                 entry_price,
                 estimated_prob,
