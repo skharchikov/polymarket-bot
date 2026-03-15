@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 use crate::config::AppConfig;
+use crate::data::models::fetch_yes_prices;
 use crate::format;
 use crate::live::broadcast;
 use crate::metrics;
@@ -36,12 +37,107 @@ pub async fn copy_trade_cycle(
     let skip_ids = portfolio.open_bet_market_ids().await?;
     let skip_event_slugs = portfolio.open_bet_event_slugs().await?;
 
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
     let mut bets_placed = 0usize;
+    let mut exits_triggered = 0usize;
 
     for dt in &detected {
         let trade = &dt.trade;
 
-        // Only copy BUY-side trades (entries, not exits)
+        let wallet_short = &dt.trader_wallet[..8.min(dt.trader_wallet.len())];
+        let strategy_name = format!("copy:{wallet_short}");
+
+        // Mirror exits: if the trader sold a position we copied, exit ours too.
+        if trade.side == "SELL" {
+            let open_bets = portfolio.open_bets().await?;
+            let matching = open_bets
+                .iter()
+                .find(|b| b.market_id == trade.market_id && b.strategy == strategy_name);
+
+            if let Some(bet) = matching {
+                let ids = [bet.market_id.as_str()];
+                let yes_price = fetch_yes_prices(&http, &ids)
+                    .await
+                    .into_iter()
+                    .next()
+                    .flatten();
+
+                let Some(current_yes_price) = yes_price else {
+                    tracing::warn!(
+                        market = %trade.market_id,
+                        trader = wallet_short,
+                        "Copy-exit: could not fetch current price, skipping"
+                    );
+                    continue;
+                };
+
+                let trader = portfolio
+                    .get_trader_by_wallet(&dt.trader_wallet)
+                    .await
+                    .ok()
+                    .flatten();
+                let trader_name = trader
+                    .as_ref()
+                    .and_then(|t| t.username.as_deref())
+                    .unwrap_or(wallet_short);
+
+                let reason = format!(
+                    "copy-exit: {trader_name} sold at {:.1}¢",
+                    trade.price * 100.0
+                );
+
+                match portfolio
+                    .early_exit(bet.id, current_yes_price, &reason)
+                    .await
+                {
+                    Ok(Some(r)) => {
+                        let side_emoji = match r.side {
+                            BetSide::Yes => "🟢 YES",
+                            BetSide::No => "🔴 NO",
+                        };
+                        let msg = format!(
+                            "👥 *Copy Exit*\n\
+                             📋 _{question}_\n\
+                             🎲 Side: *{side}* — {shares:.1} shares @ `{entry:.1}¢` → `{now:.1}¢`\n\
+                             👤 Trader: `{trader}` sold at `{sold:.1}¢`\n\
+                             💵 PnL: `€{pnl:+.2}`\n\
+                             💰 Trader bankroll: `€{bankroll:.2}`",
+                            question = format::truncate(&r.question, 60),
+                            side = side_emoji,
+                            shares = r.shares,
+                            entry = r.entry_price * 100.0,
+                            now = current_yes_price * 100.0,
+                            trader = trader_name,
+                            sold = trade.price * 100.0,
+                            pnl = r.pnl,
+                            bankroll = r.bankroll,
+                        );
+                        broadcast(notifier, portfolio, &msg).await;
+                        tracing::info!(
+                            market = %trade.market_id,
+                            trader = %trader_name,
+                            pnl = format_args!("€{:+.2}", r.pnl),
+                            "Copy-exit executed"
+                        );
+                        exits_triggered += 1;
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::error!(err = %e, "Copy-exit early_exit failed"),
+                }
+            } else {
+                tracing::debug!(
+                    market = %trade.market_id,
+                    trader = wallet_short,
+                    "Copy-exit: no matching open bet, ignoring SELL"
+                );
+            }
+            continue;
+        }
+
+        // BUY path below — only copy entries
         if trade.side != "BUY" {
             continue;
         }
@@ -71,10 +167,6 @@ pub async fn copy_trade_cycle(
             );
             continue;
         }
-
-        // Trader's strategy name: "copy:<first 8 chars of wallet>"
-        let wallet_short = &dt.trader_wallet[..8.min(dt.trader_wallet.len())];
-        let strategy_name = format!("copy:{wallet_short}");
 
         // Get trader's dedicated bankroll
         let trader_bankroll = portfolio.strategy_bankroll(&strategy_name).await?;
@@ -234,8 +326,8 @@ pub async fn copy_trade_cycle(
         }
     }
 
-    if bets_placed > 0 {
-        tracing::info!(bets_placed, "Copy-trade cycle complete");
+    if bets_placed > 0 || exits_triggered > 0 {
+        tracing::info!(bets_placed, exits_triggered, "Copy-trade cycle complete");
     }
     Ok(())
 }
