@@ -321,7 +321,7 @@ impl LiveScanner {
     }
 
     /// Get prediction from the ML sidecar.
-    async fn predict(&self, features: &[f64], market_price: f64) -> Option<(f64, f64)> {
+    async fn predict(&self, features: &MarketFeatures, market_price: f64) -> Option<(f64, f64)> {
         let sidecar = self.sidecar.as_ref()?;
         match sidecar.predict(features, market_price).await {
             Ok(pred) => {
@@ -342,7 +342,7 @@ impl LiveScanner {
     }
 
     /// Batch prediction from the ML sidecar.
-    async fn predict_batch(&self, items: &[(Vec<f64>, f64)]) -> Vec<Option<(f64, f64)>> {
+    async fn predict_batch(&self, items: &[(MarketFeatures, f64)]) -> Vec<Option<(f64, f64)>> {
         let Some(sidecar) = &self.sidecar else {
             return vec![None; items.len()];
         };
@@ -539,7 +539,7 @@ impl LiveScanner {
             .await
             .unwrap_or_default();
         let features = MarketFeatures::from_market_and_history(&market, current_price, &history);
-        self.predict(&features.to_vec(), current_price).await
+        self.predict(&features, current_price).await
     }
 
     fn expires_within_window(&self, end_date: Option<&str>) -> bool {
@@ -901,17 +901,11 @@ impl LiveScanner {
             book_stats: OrderBookStats,
             /// Model score for ranking: |edge| * confidence
             score: f64,
-            /// Feature vector as JSON for online learning feature store (ADR 004).
-            feature_json: serde_json::Value,
+            /// Typed feature struct — used for re-prediction and online learning (ADR 004).
+            features: MarketFeatures,
         }
 
-        type MarketDataEntry = (
-            GammaMarket,
-            f64,
-            Vec<PriceTick>,
-            Vec<f64>,
-            serde_json::Value,
-        );
+        type MarketDataEntry = (GammaMarket, f64, Vec<PriceTick>, MarketFeatures);
 
         // Collect features and histories for all markets
         let mut market_data: Vec<MarketDataEntry> = Vec::new();
@@ -929,24 +923,18 @@ impl LiveScanner {
                 .unwrap_or_default();
 
             let features = MarketFeatures::from_market_and_history(market, current_price, &history);
-            market_data.push((
-                market.clone(),
-                current_price,
-                history,
-                features.to_vec(),
-                features.to_json(),
-            ));
+            market_data.push((market.clone(), current_price, history, features));
         }
 
         // Batch predict via sidecar or per-item XGBoost
-        let batch_items: Vec<(Vec<f64>, f64)> = market_data
+        let batch_items: Vec<(MarketFeatures, f64)> = market_data
             .iter()
-            .map(|(_, price, _, fv, _)| (fv.clone(), *price))
+            .map(|(_, price, _, f)| (f.clone(), *price))
             .collect();
         let predictions = self.predict_batch(&batch_items).await;
 
         let mut scored: Vec<ModelCandidate> = Vec::new();
-        for ((market, current_price, history, _fv, feature_json), pred) in
+        for ((market, current_price, history, features), pred) in
             market_data.into_iter().zip(predictions.into_iter())
         {
             let (ml_prob, ml_conf) = match pred {
@@ -965,7 +953,7 @@ impl LiveScanner {
                 history,
                 book_stats: OrderBookStats::default(),
                 score,
-                feature_json,
+                features,
             });
         }
 
@@ -1108,8 +1096,8 @@ impl LiveScanner {
                 };
 
             // Re-run model with news + order book features
-            let (ml_prob, ml_conf, signal_feature_json) = if news_count > 0 {
-                let features = MarketFeatures::from_market_and_news(
+            let (ml_prob, ml_conf, signal_features) = if news_count > 0 {
+                let f = MarketFeatures::from_market_and_news(
                     &c.market,
                     c.current_price,
                     &c.history,
@@ -1117,20 +1105,16 @@ impl LiveScanner {
                     best_news_score,
                     avg_news_age_hours,
                 );
-                let fv = features.to_vec();
-                let fj = features.to_json();
-                match self.predict(&fv, c.current_price).await {
-                    Some(p) => (p.0, p.1, fj),
-                    None => (c.ml_prob, c.ml_conf, c.feature_json.clone()),
+                match self.predict(&f, c.current_price).await {
+                    Some(p) => (p.0, p.1, f),
+                    None => (c.ml_prob, c.ml_conf, c.features.clone()),
                 }
             } else {
-                let features =
+                let f =
                     MarketFeatures::from_market_and_history(&c.market, c.current_price, &c.history);
-                let fv = features.to_vec();
-                let fj = features.to_json();
-                match self.predict(&fv, c.current_price).await {
-                    Some(p) => (p.0, p.1, fj),
-                    None => (c.ml_prob, c.ml_conf, c.feature_json.clone()),
+                match self.predict(&f, c.current_price).await {
+                    Some(p) => (p.0, p.1, f),
+                    None => (c.ml_prob, c.ml_conf, c.features.clone()),
                 }
             };
 
@@ -1273,7 +1257,7 @@ impl LiveScanner {
                     book_depth: c.book_stats.depth,
                     news_headlines,
                 },
-                features: Some(signal_feature_json),
+                features: Some(signal_features.to_json()),
             });
         }
 
@@ -1600,8 +1584,7 @@ impl LiveScanner {
             .unwrap_or_default();
 
         let features = MarketFeatures::from_market_and_history(&market, current_price, &history);
-        let feature_vec = features.to_vec();
-        let (ml_prob, ml_conf) = match self.predict(&feature_vec, current_price).await {
+        let (ml_prob, ml_conf) = match self.predict(&features, current_price).await {
             Some(p) => p,
             None => return Ok(None),
         };

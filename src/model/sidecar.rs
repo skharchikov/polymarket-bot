@@ -5,6 +5,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+use crate::model::features::MarketFeatures;
+
 const MAX_RETRIES: usize = 3;
 const RETRY_DELAY: Duration = Duration::from_secs(2);
 
@@ -17,7 +19,7 @@ pub struct SidecarClient {
 
 #[derive(Serialize, Clone)]
 struct PredictRequest {
-    features: Vec<f64>,
+    features: MarketFeatures,
     market_price: f64,
 }
 
@@ -75,9 +77,13 @@ impl SidecarClient {
     }
 
     /// Get prediction from the full ensemble, with retries.
-    pub async fn predict(&self, features: &[f64], market_price: f64) -> Result<Prediction> {
+    pub async fn predict(
+        &self,
+        features: &MarketFeatures,
+        market_price: f64,
+    ) -> Result<Prediction> {
         let req = PredictRequest {
-            features: features.to_vec(),
+            features: features.clone(),
             market_price,
         };
 
@@ -118,7 +124,7 @@ impl SidecarClient {
     }
 
     /// Batch prediction with retries.
-    pub async fn predict_batch(&self, items: &[(Vec<f64>, f64)]) -> Result<Vec<Prediction>> {
+    pub async fn predict_batch(&self, items: &[(MarketFeatures, f64)]) -> Result<Vec<Prediction>> {
         let req = BatchRequest {
             items: items
                 .iter()

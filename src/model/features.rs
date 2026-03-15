@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::data::models::{GammaMarket, PriceTick};
+use serde::Serialize;
 
 /// Order book statistics computed from CLOB book endpoint.
 #[derive(Debug, Clone, Default)]
@@ -17,7 +18,7 @@ pub struct OrderBookStats {
 /// order_imbalance, spread — these were always 0 in training (not available
 /// retroactively for historical markets) but non-zero in live inference,
 /// causing distribution shift with zero learning signal.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MarketFeatures {
     pub yes_price: f64,
     pub momentum_1h: f64,

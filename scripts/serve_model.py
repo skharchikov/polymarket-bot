@@ -298,8 +298,25 @@ def startup():
         log.info("Scheduled retrain: checking every 1h, max model age %dh", MAX_AGE_HOURS)
 
 
+class FeatureMap(BaseModel):
+    """Named feature schema — must stay in sync with MarketFeatures in src/model/features.rs."""
+    yes_price: float
+    momentum_1h: float
+    momentum_24h: float
+    volatility_24h: float
+    rsi: float
+    log_volume: float
+    log_liquidity: float
+    days_to_expiry: float
+    is_crypto: float
+    is_politics: float
+    is_sports: float
+    price_change_1d: float
+    price_change_1w: float
+
+
 class PredictRequest(BaseModel):
-    features: list[float]
+    features: FeatureMap
     market_price: float = 0.5
 
 
@@ -350,7 +367,7 @@ def predict(req: PredictRequest):
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
-    features = pd.DataFrame([req.features], columns=FEATURE_NAMES, dtype=np.float64)
+    features = pd.DataFrame([req.features.model_dump()], dtype=np.float64)[FEATURE_NAMES]
     if scaler is not None:
         features = pd.DataFrame(scaler.transform(features), columns=FEATURE_NAMES)
 
@@ -375,7 +392,7 @@ def predict_batch(req: PredictBatchRequest):
     if not req.items:
         return BatchResponse(predictions=[])
 
-    features = pd.DataFrame([item.features for item in req.items], columns=FEATURE_NAMES, dtype=np.float64)
+    features = pd.DataFrame([item.features.model_dump() for item in req.items], dtype=np.float64)[FEATURE_NAMES]
     if scaler is not None:
         features = pd.DataFrame(scaler.transform(features), columns=FEATURE_NAMES)
 
