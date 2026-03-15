@@ -40,7 +40,7 @@ sqlx = { version = "0.8.6", features = [
 ] }
 
 # WebSocket
-tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 
 # TLS (explicit crypto provider selection — both ring and aws-lc-rs in dep tree)
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
