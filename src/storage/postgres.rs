@@ -572,17 +572,9 @@ impl PgPortfolio {
         self.get_f64("bankroll").await
     }
 
-    pub async fn set_bankroll(&self, val: f64) -> Result<()> {
-        self.set_f64("bankroll", val).await
-    }
-
     /// Get bankroll for a specific strategy.
     pub async fn strategy_bankroll(&self, strategy: &str) -> Result<f64> {
         self.get_f64(&format!("bankroll:{strategy}")).await
-    }
-
-    pub async fn set_strategy_bankroll(&self, strategy: &str, val: f64) -> Result<()> {
-        self.set_f64(&format!("bankroll:{strategy}"), val).await
     }
 
     /// Check if a portfolio key exists.
@@ -688,6 +680,8 @@ impl PgPortfolio {
             .as_ref()
             .map(|c| serde_json::to_value(c).unwrap_or_default());
 
+        let mut tx = self.pool.begin().await?;
+
         let row: (i32,) = sqlx::query_as(
             "INSERT INTO bets (market_id, question, side, entry_price, slipped_price, shares, cost, fee_paid, \
              estimated_prob, confidence, edge, kelly_size, reasoning, end_date, context, strategy, source, url, event_slug) \
@@ -712,7 +706,7 @@ impl PgPortfolio {
         .bind(&bet.source)
         .bind(&bet.url)
         .bind(bet.event_slug.as_deref())
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
 
         // Batch update: deduct bankrolls and increment signal counters in one query
@@ -730,8 +724,10 @@ impl PgPortfolio {
         .bind(&strat_bankroll_key)
         .bind(total_deduction)
         .bind(&strat_signals_key)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+
+        tx.commit().await?;
 
         Ok(row.0)
     }
@@ -808,6 +804,10 @@ impl PgPortfolio {
         // PnL includes both entry and exit fees for accurate accounting
         let pnl = net_payout - cost - entry_fee;
 
+        let strat_bankroll_key = format!("bankroll:{strategy}");
+
+        let mut tx = self.pool.begin().await?;
+
         sqlx::query(
             "UPDATE bets SET resolved = true, won = $1, pnl = $2, fee_paid = fee_paid + $3, \
              resolved_at = NOW() WHERE id = $4",
@@ -816,17 +816,31 @@ impl PgPortfolio {
         .bind(pnl)
         .bind(exit_fee)
         .bind(bet_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
-        // Credit strategy bankroll
-        let strat_bankroll = self.strategy_bankroll(&strategy).await?;
-        self.set_strategy_bankroll(&strategy, strat_bankroll + net_payout)
+        // Atomically credit strategy bankroll
+        sqlx::query("UPDATE portfolio SET value_f64 = value_f64 + $1 WHERE key = $2")
+            .bind(net_payout)
+            .bind(&strat_bankroll_key)
+            .execute(&mut *tx)
             .await?;
 
-        // Also update global bankroll
-        let bankroll = self.bankroll().await?;
-        self.set_bankroll(bankroll + net_payout).await?;
+        // Atomically credit global bankroll
+        sqlx::query("UPDATE portfolio SET value_f64 = value_f64 + $1 WHERE key = 'bankroll'")
+            .bind(net_payout)
+            .execute(&mut *tx)
+            .await?;
+
+        // Read the updated strategy bankroll within the transaction for the return value
+        let updated_strat_bankroll: Option<(Option<f64>,)> =
+            sqlx::query_as("SELECT value_f64 FROM portfolio WHERE key = $1")
+                .bind(&strat_bankroll_key)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let strat_bankroll = updated_strat_bankroll.and_then(|r| r.0).unwrap_or(0.0);
+
+        tx.commit().await?;
 
         // Gather cumulative stats for the message
         let resolved = self.resolved_bets().await?;
@@ -854,7 +868,7 @@ impl PgPortfolio {
             edge,
             confidence,
             pnl,
-            bankroll: strat_bankroll + net_payout,
+            bankroll: strat_bankroll,
             total_wins: wins,
             total_losses: losses,
             total_pnl,
@@ -921,25 +935,47 @@ impl PgPortfolio {
         let net_payout = gross_payout - exit_fee;
         let pnl = net_payout - r.cost - r.fee_paid;
 
+        let bet_won = pnl > 0.0;
+        let strat_bankroll_key = format!("bankroll:{}", r.strategy);
+
         let reasoning = format!("Early exit: {reason}");
+
+        let mut tx = self.pool.begin().await?;
+
         sqlx::query(
-            "UPDATE bets SET resolved = true, won = false, pnl = $1, fee_paid = fee_paid + $2, \
-             reasoning = reasoning || E'\\n' || $3, resolved_at = NOW() WHERE id = $4",
+            "UPDATE bets SET resolved = true, won = $1, pnl = $2, fee_paid = fee_paid + $3, \
+             reasoning = reasoning || E'\\n' || $4, resolved_at = NOW() WHERE id = $5",
         )
+        .bind(bet_won)
         .bind(pnl)
         .bind(exit_fee)
         .bind(&reasoning)
         .bind(r.id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
-        // Credit strategy bankroll with sell proceeds
-        let strat_bankroll = self.strategy_bankroll(&r.strategy).await?;
-        self.set_strategy_bankroll(&r.strategy, strat_bankroll + net_payout)
+        // Atomically credit strategy bankroll with sell proceeds
+        sqlx::query("UPDATE portfolio SET value_f64 = value_f64 + $1 WHERE key = $2")
+            .bind(net_payout)
+            .bind(&strat_bankroll_key)
+            .execute(&mut *tx)
             .await?;
 
-        let bankroll = self.bankroll().await?;
-        self.set_bankroll(bankroll + net_payout).await?;
+        // Atomically credit global bankroll
+        sqlx::query("UPDATE portfolio SET value_f64 = value_f64 + $1 WHERE key = 'bankroll'")
+            .bind(net_payout)
+            .execute(&mut *tx)
+            .await?;
+
+        // Read the updated strategy bankroll within the transaction for the return value
+        let updated_strat_bankroll: Option<(Option<f64>,)> =
+            sqlx::query_as("SELECT value_f64 FROM portfolio WHERE key = $1")
+                .bind(&strat_bankroll_key)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let strat_bankroll = updated_strat_bankroll.and_then(|r| r.0).unwrap_or(0.0);
+
+        tx.commit().await?;
 
         let resolved = self.resolved_bets().await?;
         let wins = resolved.iter().filter(|b| b.won == Some(true)).count();
@@ -962,14 +998,14 @@ impl PgPortfolio {
         Ok(Some(ResolvedBet {
             question: r.question,
             side,
-            won: false,
+            won: bet_won,
             entry_price: r.entry_price,
             cost: r.cost,
             shares: r.shares,
             edge: r.edge,
             confidence: r.confidence,
             pnl,
-            bankroll: strat_bankroll + net_payout,
+            bankroll: strat_bankroll,
             total_wins: wins,
             total_losses: losses,
             total_pnl,
