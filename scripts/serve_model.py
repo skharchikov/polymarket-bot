@@ -166,6 +166,7 @@ class _RetrainState:
         self.started_at: str | None = None
         self.finished_at: str | None = None
         self.error: str | None = None
+        self.step: str | None = None  # current progress step
         self.lock = threading.Lock()
 
 
@@ -191,6 +192,9 @@ def load_model():
                 scaler_features,
                 FEATURE_NAMES,
             )
+            # Clear globals so predict returns 503 instead of crashing with 500.
+            model = None
+            scaler = None
             threading.Thread(target=_force_retrain, daemon=True).start()
             return False
 
@@ -219,6 +223,7 @@ def _run_retrain():
     _retrain.started_at = datetime.now(timezone.utc).isoformat()
     _retrain.finished_at = None
     _retrain.error = None
+    _retrain.step = "fetch"
 
     try:
         log.info("retrain.fetch_start: markets=%d", RETRAIN_MARKETS)
@@ -231,6 +236,7 @@ def _run_retrain():
             fetch_args += ["--db", DATABASE_URL]
         subprocess.run(fetch_args, check=True, capture_output=True, text=True)
 
+        _retrain.step = "train"
         log.info("retrain.train_start")
         subprocess.run(
             [sys.executable, "train_model.py",
@@ -239,8 +245,10 @@ def _run_retrain():
             check=True, capture_output=True, text=True,
         )
 
+        _retrain.step = "load"
         load_model()
         _retrain.status = RetrainStatus.success
+        _retrain.step = None
         log.info("retrain.complete")
     except subprocess.CalledProcessError as e:
         _retrain.status = RetrainStatus.failed
@@ -573,6 +581,7 @@ class RetrainRequest(BaseModel):
 
 class RetrainStatusResponse(BaseModel):
     status: RetrainStatus
+    step: str | None = None
     model_age_hours: float | None = None
     max_age_hours: int = MAX_AGE_HOURS
     started_at: str | None = None
@@ -618,6 +627,7 @@ def retrain_warmstart():
 def retrain_status():
     return RetrainStatusResponse(
         status=_retrain.status,
+        step=_retrain.step,
         model_age_hours=model_age_hours(),
         started_at=_retrain.started_at,
         finished_at=_retrain.finished_at,
