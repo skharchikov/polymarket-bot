@@ -114,16 +114,17 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 WARMSTART_TRIGGER_N = int(os.environ.get("WARMSTART_TRIGGER_N", "10"))
 
 # Feature names — must stay in sync with MarketFeatures::NAMES in src/model/features.rs
+# v3: removed log_liquidity, is_politics, is_sports (zero SHAP importance).
 FEATURE_NAMES = [
     "yes_price", "momentum_1h", "momentum_24h", "volatility_24h", "rsi",
-    "log_volume", "log_liquidity", "days_to_expiry",
-    "is_crypto", "is_politics", "is_sports",
+    "log_volume", "days_to_expiry",
+    "is_crypto",
     "price_change_1d", "price_change_1w",
     "days_since_created", "created_to_expiry_span",
 ]
 
 # Category columns subject to target encoding (binary → historical YES rate)
-CATEGORY_COLS = ["is_crypto", "is_politics", "is_sports"]
+CATEGORY_COLS = ["is_crypto"]
 
 app = FastAPI(title="Polymarket ML Sidecar")
 
@@ -377,11 +378,8 @@ class FeatureMap(BaseModel):
     volatility_24h: float
     rsi: float
     log_volume: float
-    log_liquidity: float
     days_to_expiry: float
     is_crypto: float
-    is_politics: float
-    is_sports: float
     price_change_1d: float
     price_change_1w: float
     days_since_created: float

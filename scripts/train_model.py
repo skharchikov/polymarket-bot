@@ -58,9 +58,10 @@ except ImportError:
 
 
 # Feature columns in fixed order — must match Rust inference (MarketFeatures::NAMES).
-# Category flags (is_crypto/is_politics/is_sports) are target-encoded at training time
-# and during inference (sidecar applies saved encoding before model prediction).
-# Rust still sends binary 0/1 flags; encoding is a sidecar-internal transformation.
+# is_crypto is target-encoded at training time and during inference (sidecar applies
+# saved encoding before model prediction). Rust sends binary 0/1; encoding is a
+# sidecar-internal transformation.
+# v3: removed log_liquidity, is_politics, is_sports (zero SHAP importance).
 FEATURE_COLS = [
     "yes_price",
     "momentum_1h",
@@ -68,11 +69,8 @@ FEATURE_COLS = [
     "volatility_24h",
     "rsi",
     "log_volume",
-    "log_liquidity",
     "days_to_expiry",
     "is_crypto",
-    "is_politics",
-    "is_sports",
     "price_change_1d",
     "price_change_1w",
     "days_since_created",
@@ -80,7 +78,7 @@ FEATURE_COLS = [
 ]
 
 # Binary category columns subject to target encoding (binary → historical YES rate)
-CATEGORY_COLS = ["is_crypto", "is_politics", "is_sports"]
+CATEGORY_COLS = ["is_crypto"]
 
 N_FEATURES = len(FEATURE_COLS)
 
@@ -97,21 +95,14 @@ def load_data(path: str) -> pd.DataFrame:
 
     # Derived features
     df["log_volume"] = np.log1p(df["volume"])
-    df["log_liquidity"] = np.log1p(df["liquidity"])
 
-    # Category one-hot — keywords must match live Rust logic in features.rs exactly.
+    # Category flag — keywords must match live Rust logic in features.rs exactly.
     # fetch_data.py stores combined "category + question" in the category field.
     combined = df["category"].fillna("").str.lower()
     df["is_crypto"] = combined.str.contains(
         "crypto|bitcoin|btc|ethereum|eth|solana|sol|defi|nft|blockchain"
         "|dogecoin|doge|xrp|ripple|cardano|polkadot|avalanche|chainlink|bnb|binance"
         "|coinbase|stablecoin|memecoin|token"
-    ).astype(float)
-    df["is_politics"] = combined.str.contains(
-        "politic|election|president|vote|congress|senate|democrat|republican"
-    ).astype(float)
-    df["is_sports"] = combined.str.contains(
-        "sport|nba|nfl|soccer|tennis|mma|mlb|nhl|football|basketball|baseball"
     ).astype(float)
 
     # Fill NaN momentum with 0 (no price reference available)
