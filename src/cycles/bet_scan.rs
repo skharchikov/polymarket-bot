@@ -13,7 +13,7 @@ use crate::storage::postgres::PgPortfolio;
 use crate::strategy::StrategyProfile;
 use crate::telegram::notifier::TelegramNotifier;
 
-pub async fn news_scan_cycle(
+pub async fn bet_scan_cycle(
     portfolio: &PgPortfolio,
     notifier: &TelegramNotifier,
     scanner: &LiveScanner,
@@ -30,7 +30,7 @@ pub async fn news_scan_cycle(
     let bankroll = portfolio.bankroll().await?;
     tracing::info!(
         bankroll = format_args!("€{bankroll:.2}"),
-        "Starting news scan..."
+        "Starting bet scan..."
     );
 
     let mut skip_ids = portfolio.open_bet_market_ids().await?;
@@ -320,7 +320,7 @@ pub async fn news_scan_cycle(
             }
         }
         Err(e) => {
-            tracing::error!(err = %e, "News scan failed");
+            tracing::error!(err = %e, "Bet scan failed");
         }
     }
 
@@ -329,7 +329,7 @@ pub async fn news_scan_cycle(
     tracing::info!(
         signals_today = signals_today,
         open_bets = open_count,
-        "News scan cycle complete"
+        "Bet scan cycle complete"
     );
     Ok(())
 }

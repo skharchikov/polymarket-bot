@@ -74,7 +74,7 @@ pub async fn notify_owner(notifier: &TelegramNotifier, message: &str) {
 
 pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     tracing::info!(
-        news_interval_mins = cfg.news_scan_interval_mins,
+        bet_scan_interval_mins = cfg.bet_scan_interval_mins,
         housekeeping_interval_mins = cfg.scan_interval_mins,
         "Polymarket Signal Bot starting (dual-loop)..."
     );
@@ -206,7 +206,7 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
              📊 Open: {open_count} | Record: {wins}W/{losses}L\n\n\
              {strat_details}\n\n\
              ⚙️ *Config:*\n\
-             ⏱ News: {news_status} | Housekeeping: every {hk_min}min\n\
+             ⏱ Bet scan: every {bet_min}min | News: {news_status} | HK: every {hk_min}min\n\
              🎯 Max {max_sig} signals/day (per strategy) | Kelly: {kelly:.0}%\n\
              🔍 Min edge: {edge:.0}% | Min volume: ${vol:.0}\n\
              🧠 Pipeline: {pipeline}\n\
@@ -215,6 +215,7 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             wins = resolved.iter().filter(|b| b.won == Some(true)).count(),
             losses = resolved.iter().filter(|b| b.won == Some(false)).count(),
             strat_details = strat_lines.join("\n"),
+            bet_min = cfg.bet_scan_interval_mins,
             news_status = if cfg.news_enabled {
                 format!("every {}min", cfg.news_scan_interval_mins)
             } else {
@@ -279,39 +280,34 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         }
     });
 
-    // Spawn news scanning loop (faster cycle) — disabled when NEWS_ENABLED=false
-    let ns_portfolio = Arc::clone(&portfolio);
-    let ns_notifier = Arc::clone(&notifier);
-    let ns_scanner = Arc::clone(&scanner);
-    let ns_cfg = Arc::clone(&cfg);
-    let ns_stats = Arc::clone(&stats);
-    let ns_strategies = Arc::clone(&strategies);
-    let news_scan = tokio::spawn(async move {
-        if !ns_cfg.news_enabled {
-            tracing::info!("News cycle disabled (NEWS_ENABLED=false) — parked");
-            std::future::pending::<()>().await;
-            return;
-        }
+    // Spawn bet scanning loop (market scoring + betting, always on)
+    let bs_portfolio = Arc::clone(&portfolio);
+    let bs_notifier = Arc::clone(&notifier);
+    let bs_scanner = Arc::clone(&scanner);
+    let bs_cfg = Arc::clone(&cfg);
+    let bs_stats = Arc::clone(&stats);
+    let bs_strategies = Arc::clone(&strategies);
+    let bet_scan = tokio::spawn(async move {
         let mut seen_headlines: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
         loop {
             let scan_start = std::time::Instant::now();
-            if let Err(e) = cycles::news_scan_cycle(
-                &ns_portfolio,
-                &ns_notifier,
-                &ns_scanner,
-                &ns_cfg,
-                &ns_stats,
-                &ns_strategies,
+            if let Err(e) = cycles::bet_scan_cycle(
+                &bs_portfolio,
+                &bs_notifier,
+                &bs_scanner,
+                &bs_cfg,
+                &bs_stats,
+                &bs_strategies,
                 &mut seen_headlines,
             )
             .await
             {
-                tracing::error!(err = %e, "News scan cycle failed");
+                tracing::error!(err = %e, "Bet scan cycle failed");
             }
             metrics::record_duration("bot_scan_duration_seconds", scan_start.elapsed());
-            tokio::time::sleep(Duration::from_secs(ns_cfg.news_scan_interval_mins * 60)).await;
+            tokio::time::sleep(Duration::from_secs(bs_cfg.bet_scan_interval_mins * 60)).await;
         }
     });
 
@@ -542,8 +538,8 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         r = housekeeping => {
             tracing::error!("Housekeeping loop exited: {:?}", r);
         }
-        r = news_scan => {
-            tracing::error!("News scan loop exited: {:?}", r);
+        r = bet_scan => {
+            tracing::error!("Bet scan loop exited: {:?}", r);
         }
         r = heartbeat => {
             tracing::error!("Heartbeat loop exited: {:?}", r);
