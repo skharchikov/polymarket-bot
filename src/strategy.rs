@@ -18,73 +18,53 @@ pub struct AcceptedSignal {
 }
 
 impl StrategyProfile {
-    pub fn aggressive() -> Self {
-        Self {
-            name: "aggressive".into(),
-            kelly_fraction: 0.50,
-            min_effective_edge: 0.05,
-            min_confidence: 0.40,
-            max_signals_per_day: 10,
-            min_bet: 5.0,
-        }
-    }
-
-    pub fn balanced() -> Self {
-        Self {
-            name: "balanced".into(),
-            kelly_fraction: 0.25,
-            min_effective_edge: 0.06,
-            min_confidence: 0.40,
-            max_signals_per_day: 5,
-            min_bet: 5.0,
-        }
-    }
-
-    pub fn conservative() -> Self {
-        Self {
-            name: "conservative".into(),
-            kelly_fraction: 0.15,
-            min_effective_edge: 0.08,
-            min_confidence: 0.50,
-            max_signals_per_day: 3,
-            min_bet: 15.0,
-        }
-    }
-
-    /// Parse active strategies from comma-separated string.
-    /// `max_signals_str` optionally overrides max_signals_per_day per strategy
-    /// (format: "aggressive:10,balanced:5,conservative:3").
-    pub fn from_config(strategies_str: &str, max_signals_str: &str) -> Vec<Self> {
+    /// Build strategies from config. All parameters come from env vars with defaults.
+    pub fn from_config(cfg: &crate::config::AppConfig) -> Vec<Self> {
         let mut profiles = Vec::new();
-        for name in strategies_str.split(',').map(|s| s.trim().to_lowercase()) {
-            match name.as_str() {
-                "aggressive" => profiles.push(Self::aggressive()),
-                "balanced" => profiles.push(Self::balanced()),
-                "conservative" => profiles.push(Self::conservative()),
+        for name in cfg.strategies.split(',').map(|s| s.trim().to_lowercase()) {
+            let profile = match name.as_str() {
+                "aggressive" => Self {
+                    name: name.clone(),
+                    kelly_fraction: cfg.aggressive_kelly_fraction,
+                    min_effective_edge: cfg.aggressive_min_edge,
+                    min_confidence: cfg.aggressive_min_confidence,
+                    max_signals_per_day: cfg.aggressive_max_signals,
+                    min_bet: cfg.aggressive_min_bet,
+                },
+                "balanced" => Self {
+                    name: name.clone(),
+                    kelly_fraction: cfg.balanced_kelly_fraction,
+                    min_effective_edge: cfg.balanced_min_edge,
+                    min_confidence: cfg.balanced_min_confidence,
+                    max_signals_per_day: cfg.balanced_max_signals,
+                    min_bet: cfg.balanced_min_bet,
+                },
+                "conservative" => Self {
+                    name: name.clone(),
+                    kelly_fraction: cfg.conservative_kelly_fraction,
+                    min_effective_edge: cfg.conservative_min_edge,
+                    min_confidence: cfg.conservative_min_confidence,
+                    max_signals_per_day: cfg.conservative_max_signals,
+                    min_bet: cfg.conservative_min_bet,
+                },
                 other => {
                     tracing::warn!(name = other, "Unknown strategy, skipping");
+                    continue;
                 }
-            }
+            };
+            profiles.push(profile);
         }
         if profiles.is_empty() {
-            tracing::warn!("No valid strategies configured, defaulting to all three");
-            profiles = vec![Self::aggressive(), Self::balanced(), Self::conservative()];
+            tracing::warn!("No valid strategies configured, defaulting to aggressive");
+            profiles.push(Self {
+                name: "aggressive".into(),
+                kelly_fraction: cfg.aggressive_kelly_fraction,
+                min_effective_edge: cfg.aggressive_min_edge,
+                min_confidence: cfg.aggressive_min_confidence,
+                max_signals_per_day: cfg.aggressive_max_signals,
+                min_bet: cfg.aggressive_min_bet,
+            });
         }
-
-        // Apply per-strategy max signals overrides
-        if !max_signals_str.is_empty() {
-            for pair in max_signals_str.split(',').map(|s| s.trim()) {
-                if let Some((name, val)) = pair.split_once(':') {
-                    let name = name.trim().to_lowercase();
-                    if let Ok(max) = val.trim().parse::<usize>()
-                        && let Some(p) = profiles.iter_mut().find(|p| p.name == name)
-                    {
-                        p.max_signals_per_day = max;
-                    }
-                }
-            }
-        }
-
         profiles
     }
 
@@ -166,7 +146,7 @@ mod tests {
             estimated_prob: prob,
             confidence,
             edge,
-            kelly_size: 0.0, // unused by evaluate()
+            kelly_size: 0.0,
             reasoning: "test".into(),
             end_date: None,
             volume: 1000.0,
@@ -182,9 +162,37 @@ mod tests {
         }
     }
 
+    fn make_strategy(
+        name: &str,
+        kelly: f64,
+        edge: f64,
+        conf: f64,
+        signals: usize,
+        min_bet: f64,
+    ) -> StrategyProfile {
+        StrategyProfile {
+            name: name.into(),
+            kelly_fraction: kelly,
+            min_effective_edge: edge,
+            min_confidence: conf,
+            max_signals_per_day: signals,
+            min_bet,
+        }
+    }
+
+    fn aggressive() -> StrategyProfile {
+        make_strategy("aggressive", 0.50, 0.05, 0.40, 10, 5.0)
+    }
+    fn balanced() -> StrategyProfile {
+        make_strategy("balanced", 0.25, 0.06, 0.40, 5, 5.0)
+    }
+    fn conservative() -> StrategyProfile {
+        make_strategy("conservative", 0.15, 0.08, 0.50, 3, 15.0)
+    }
+
     #[test]
     fn test_aggressive_accepts_low_edge() {
-        let s = StrategyProfile::aggressive();
+        let s = aggressive();
         let signal = test_signal(0.10, 0.55, 0.50, 0.60);
         // effective_edge = 0.10 * 0.55 = 0.055 >= 0.05 ✓
         assert!(s.evaluate(&signal).is_some());
@@ -192,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_conservative_rejects_low_edge() {
-        let s = StrategyProfile::conservative();
+        let s = conservative();
         let signal = test_signal(0.05, 0.45, 0.50, 0.55);
         // effective_edge = 0.05 * 0.45 = 0.0225 < 0.08 ✗
         assert!(s.evaluate(&signal).is_none());
@@ -200,7 +208,7 @@ mod tests {
 
     #[test]
     fn test_conservative_rejects_low_confidence() {
-        let s = StrategyProfile::conservative();
+        let s = conservative();
         let signal = test_signal(0.20, 0.35, 0.50, 0.70);
         // effective_edge = 0.07 >= 0.08? no → reject (also conf 0.35 < 0.50 ✗)
         assert!(s.evaluate(&signal).is_none());
@@ -208,7 +216,7 @@ mod tests {
 
     #[test]
     fn test_conservative_accepts_strong_signal() {
-        let s = StrategyProfile::conservative();
+        let s = conservative();
         let signal = test_signal(0.20, 0.60, 0.50, 0.70);
         // effective_edge = 0.12 >= 0.08 ✓, confidence 0.60 >= 0.50 ✓
         assert!(s.evaluate(&signal).is_some());
@@ -217,8 +225,8 @@ mod tests {
     #[test]
     fn test_aggressive_kelly_larger_than_conservative() {
         let signal = test_signal(0.20, 0.80, 0.50, 0.70);
-        let agg = StrategyProfile::aggressive().evaluate(&signal).unwrap();
-        let con = StrategyProfile::conservative().evaluate(&signal).unwrap();
+        let agg = aggressive().evaluate(&signal).unwrap();
+        let con = conservative().evaluate(&signal).unwrap();
         assert!(
             agg.kelly_size > con.kelly_size,
             "aggressive kelly {} should be > conservative {}",
@@ -229,7 +237,9 @@ mod tests {
 
     #[test]
     fn test_from_config_parses() {
-        let profiles = StrategyProfile::from_config("aggressive, conservative", "");
+        let mut cfg = crate::config::AppConfig::test_default();
+        cfg.strategies = "aggressive, conservative".into();
+        let profiles = StrategyProfile::from_config(&cfg);
         assert_eq!(profiles.len(), 2);
         assert_eq!(profiles[0].name, "aggressive");
         assert_eq!(profiles[1].name, "conservative");
@@ -237,20 +247,27 @@ mod tests {
 
     #[test]
     fn test_from_config_unknown_fallback() {
-        let profiles = StrategyProfile::from_config("invalid", "");
-        assert_eq!(profiles.len(), 3); // falls back to all three
+        let mut cfg = crate::config::AppConfig::test_default();
+        cfg.strategies = "invalid".into();
+        let profiles = StrategyProfile::from_config(&cfg);
+        assert_eq!(profiles.len(), 1); // falls back to aggressive
+        assert_eq!(profiles[0].name, "aggressive");
     }
 
     #[test]
     fn test_from_config_single_strategy() {
-        let profiles = StrategyProfile::from_config("balanced", "");
+        let mut cfg = crate::config::AppConfig::test_default();
+        cfg.strategies = "balanced".into();
+        let profiles = StrategyProfile::from_config(&cfg);
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].name, "balanced");
     }
 
     #[test]
     fn test_from_config_trims_whitespace() {
-        let profiles = StrategyProfile::from_config("  Aggressive , BALANCED  ", "");
+        let mut cfg = crate::config::AppConfig::test_default();
+        cfg.strategies = "  Aggressive , BALANCED  ".into();
+        let profiles = StrategyProfile::from_config(&cfg);
         assert_eq!(profiles.len(), 2);
         assert_eq!(profiles[0].name, "aggressive");
         assert_eq!(profiles[1].name, "balanced");
@@ -258,51 +275,45 @@ mod tests {
 
     #[test]
     fn test_evaluate_no_edge_rejects() {
-        // price == prob → zero edge
-        let s = StrategyProfile::aggressive();
+        let s = aggressive();
         let signal = test_signal(0.0, 0.80, 0.50, 0.50);
         assert!(s.evaluate(&signal).is_none());
     }
 
     #[test]
     fn test_evaluate_kelly_too_small_rejects() {
-        // Tiny edge → kelly < 0.01
-        let s = StrategyProfile::aggressive();
+        let s = aggressive();
         let signal = test_signal(0.005, 0.80, 0.50, 0.505);
         assert!(s.evaluate(&signal).is_none());
     }
 
     #[test]
     fn test_balanced_thresholds() {
-        let s = StrategyProfile::balanced();
-        // effective_edge = 0.10 * 0.55 = 0.055 < 0.08 → reject
+        let s = balanced();
+        // effective_edge = 0.10 * 0.55 = 0.055 < 0.06 → reject
         let weak = test_signal(0.10, 0.55, 0.50, 0.60);
         assert!(s.evaluate(&weak).is_none());
 
-        // effective_edge = 0.20 * 0.55 = 0.11 >= 0.08, conf 0.55 >= 0.50 → accept
+        // effective_edge = 0.20 * 0.55 = 0.11 >= 0.06, conf 0.55 >= 0.40 → accept
         let strong = test_signal(0.20, 0.55, 0.50, 0.70);
         assert!(s.evaluate(&strong).is_some());
     }
 
     #[test]
     fn test_label() {
-        assert_eq!(StrategyProfile::aggressive().label(), "🔥");
-        assert_eq!(StrategyProfile::balanced().label(), "⚖️");
-        assert_eq!(StrategyProfile::conservative().label(), "🛡️");
+        assert_eq!(aggressive().label(), "🔥");
+        assert_eq!(balanced().label(), "⚖️");
+        assert_eq!(conservative().label(), "🛡️");
     }
 
     #[test]
-    fn test_max_signals_override() {
-        let profiles =
-            StrategyProfile::from_config("aggressive,balanced", "aggressive:20,balanced:8");
-        assert_eq!(profiles[0].max_signals_per_day, 20);
-        assert_eq!(profiles[1].max_signals_per_day, 8);
-    }
-
-    #[test]
-    fn test_max_signals_partial_override() {
-        let profiles = StrategyProfile::from_config("aggressive,balanced", "balanced:12");
-        assert_eq!(profiles[0].max_signals_per_day, 10); // default
-        assert_eq!(profiles[1].max_signals_per_day, 12); // overridden
+    fn test_env_override_applies() {
+        let mut cfg = crate::config::AppConfig::test_default();
+        cfg.strategies = "aggressive".into();
+        cfg.aggressive_min_edge = 0.02;
+        cfg.aggressive_max_signals = 30;
+        let profiles = StrategyProfile::from_config(&cfg);
+        assert_eq!(profiles[0].min_effective_edge, 0.02);
+        assert_eq!(profiles[0].max_signals_per_day, 30);
     }
 }
