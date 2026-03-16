@@ -113,9 +113,41 @@ pub struct AppConfig {
     #[config(env = "STRATEGIES", default = "aggressive,balanced,conservative")]
     pub strategies: String,
 
-    /// Per-strategy max signals/day (e.g. "aggressive:10,balanced:5,conservative:3").
-    #[config(env = "STRATEGY_MAX_SIGNALS", default = "")]
-    pub strategy_max_signals: String,
+    // --- Strategy: aggressive ---
+    #[config(env = "AGGRESSIVE_KELLY_FRACTION", default = 0.50)]
+    pub aggressive_kelly_fraction: f64,
+    #[config(env = "AGGRESSIVE_MIN_EDGE", default = 0.05)]
+    pub aggressive_min_edge: f64,
+    #[config(env = "AGGRESSIVE_MIN_CONFIDENCE", default = 0.40)]
+    pub aggressive_min_confidence: f64,
+    #[config(env = "AGGRESSIVE_MAX_SIGNALS", default = 10)]
+    pub aggressive_max_signals: usize,
+    #[config(env = "AGGRESSIVE_MIN_BET", default = 5.0)]
+    pub aggressive_min_bet: f64,
+
+    // --- Strategy: balanced ---
+    #[config(env = "BALANCED_KELLY_FRACTION", default = 0.25)]
+    pub balanced_kelly_fraction: f64,
+    #[config(env = "BALANCED_MIN_EDGE", default = 0.06)]
+    pub balanced_min_edge: f64,
+    #[config(env = "BALANCED_MIN_CONFIDENCE", default = 0.40)]
+    pub balanced_min_confidence: f64,
+    #[config(env = "BALANCED_MAX_SIGNALS", default = 5)]
+    pub balanced_max_signals: usize,
+    #[config(env = "BALANCED_MIN_BET", default = 5.0)]
+    pub balanced_min_bet: f64,
+
+    // --- Strategy: conservative ---
+    #[config(env = "CONSERVATIVE_KELLY_FRACTION", default = 0.15)]
+    pub conservative_kelly_fraction: f64,
+    #[config(env = "CONSERVATIVE_MIN_EDGE", default = 0.08)]
+    pub conservative_min_edge: f64,
+    #[config(env = "CONSERVATIVE_MIN_CONFIDENCE", default = 0.50)]
+    pub conservative_min_confidence: f64,
+    #[config(env = "CONSERVATIVE_MAX_SIGNALS", default = 3)]
+    pub conservative_max_signals: usize,
+    #[config(env = "CONSERVATIVE_MIN_BET", default = 15.0)]
+    pub conservative_min_bet: f64,
 
     // --- Early exit (disabled by default — let all bets resolve for learning) ---
     /// Stop-loss: exit if unrealized loss exceeds this fraction of cost.
@@ -150,5 +182,58 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn load() -> Result<Self, confique::Error> {
         Self::builder().env().load()
+    }
+
+    #[cfg(test)]
+    pub fn test_default() -> Self {
+        Self {
+            database_url: String::new(),
+            telegram_bot_token: String::new(),
+            telegram_chat_id: String::new(),
+            scan_interval_mins: 30,
+            news_scan_interval_mins: 10,
+            bet_scan_interval_mins: 10,
+            news_enabled: false,
+            slippage_pct: 0.01,
+            fee_pct: 0.02,
+            min_volume: 1000.0,
+            min_book_depth: 200.0,
+            kelly_fraction: 0.25,
+            max_days_to_expiry: 14,
+            max_llm_candidates: 1,
+            max_model_candidates: 15,
+            min_effective_edge: 0.08,
+            llm_model: "gpt-4o".into(),
+            heartbeat_interval_mins: 60,
+            retrain_interval_hours: 24,
+            consensus_agents: 2,
+            calibration_min_samples: 20,
+            max_markets_fetch: 1000,
+            min_price: 0.03,
+            max_price: 0.97,
+            strategy_bankroll: 300.0,
+            strategies: "aggressive,balanced,conservative".into(),
+            aggressive_kelly_fraction: 0.50,
+            aggressive_min_edge: 0.05,
+            aggressive_min_confidence: 0.40,
+            aggressive_max_signals: 10,
+            aggressive_min_bet: 5.0,
+            balanced_kelly_fraction: 0.25,
+            balanced_min_edge: 0.06,
+            balanced_min_confidence: 0.40,
+            balanced_max_signals: 5,
+            balanced_min_bet: 5.0,
+            conservative_kelly_fraction: 0.15,
+            conservative_min_edge: 0.08,
+            conservative_min_confidence: 0.50,
+            conservative_max_signals: 3,
+            conservative_min_bet: 15.0,
+            stop_loss_pct: 999.0,
+            exit_days_before_expiry: 0,
+            model_sidecar_url: String::new(),
+            metrics_port: 9000,
+            copy_trade_enabled: false,
+            copy_trade_interval_mins: 5,
+        }
     }
 }

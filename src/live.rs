@@ -119,10 +119,7 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             .expect("failed to init scanner"),
     );
 
-    let strategies = Arc::new(StrategyProfile::from_config(
-        &cfg.strategies,
-        &cfg.strategy_max_signals,
-    ));
+    let strategies = Arc::new(StrategyProfile::from_config(&cfg));
     portfolio
         .init_strategy_bankrolls(&strategies, cfg.strategy_bankroll)
         .await?;
