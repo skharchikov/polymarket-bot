@@ -286,10 +286,10 @@ mod tests {
 
         // Test prediction with a typical market feature vector matching MarketFeatures::NAMES:
         // [yes_price, momentum_1h, momentum_24h, volatility_24h, rsi,
-        //  log_volume, log_liquidity, days_to_expiry, is_crypto, is_politics, is_sports,
+        //  log_volume, days_to_expiry, is_crypto,
         //  price_change_1d, price_change_1w, days_since_created, created_to_expiry_span]
         let features = vec![
-            0.55, 0.02, -0.05, 0.03, 0.6, 12.0, 10.0, 15.0, 1.0, 0.0, 0.0, 0.03, -0.02, 20.0, 30.0,
+            0.55, 0.02, -0.05, 0.03, 0.6, 12.0, 15.0, 1.0, 0.03, -0.02, 20.0, 30.0,
         ];
         let prob = model.predict_prob(&features);
         assert!(

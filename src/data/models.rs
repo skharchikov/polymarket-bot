@@ -62,6 +62,7 @@ pub struct GammaMarket {
     #[serde(default)]
     pub volume_num: f64,
     #[serde(default)]
+    #[allow(dead_code)]
     pub liquidity_num: f64,
     #[serde(default)]
     pub one_day_price_change: Option<f64>,

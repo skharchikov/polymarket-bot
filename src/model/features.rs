@@ -20,8 +20,10 @@ pub struct OrderBookStats {
 /// causing distribution shift with zero learning signal.
 ///
 /// v2 additions: days_since_created, created_to_expiry_span (temporal features).
-/// Category flags (is_crypto/is_politics/is_sports) are sent as binary 0/1 from Rust;
+/// Category flag (is_crypto) is sent as binary 0/1 from Rust;
 /// the Python sidecar applies target encoding before model inference.
+///
+/// v3: removed log_liquidity, is_politics, is_sports — zero SHAP importance.
 #[derive(Debug, Clone, Serialize)]
 pub struct MarketFeatures {
     pub yes_price: f64,
@@ -30,11 +32,8 @@ pub struct MarketFeatures {
     pub volatility_24h: f64,
     pub rsi: f64,
     pub log_volume: f64,
-    pub log_liquidity: f64,
     pub days_to_expiry: f64,
     pub is_crypto: f64,
-    pub is_politics: f64,
-    pub is_sports: f64,
     // Gamma API price changes (more reliable than computed momentum)
     pub price_change_1d: f64,
     pub price_change_1w: f64,
@@ -52,11 +51,8 @@ impl MarketFeatures {
         "volatility_24h",
         "rsi",
         "log_volume",
-        "log_liquidity",
         "days_to_expiry",
         "is_crypto",
-        "is_politics",
-        "is_sports",
         "price_change_1d",
         "price_change_1w",
         "days_since_created",
@@ -72,11 +68,8 @@ impl MarketFeatures {
             self.volatility_24h,
             self.rsi,
             self.log_volume,
-            self.log_liquidity,
             self.days_to_expiry,
             self.is_crypto,
-            self.is_politics,
-            self.is_sports,
             self.price_change_1d,
             self.price_change_1w,
             self.days_since_created,
@@ -119,9 +112,8 @@ impl MarketFeatures {
         // RSI (14-period)
         let rsi = compute_rsi(history, 14);
 
-        // Volume/liquidity
+        // Volume
         let log_volume = (market.volume_num + 1.0).ln();
-        let log_liquidity = (market.liquidity_num + 1.0).ln();
 
         // Days to expiry
         let end_ts = market
@@ -150,33 +142,8 @@ impl MarketFeatures {
             _ => 30.0,
         };
 
-        // Category flags (sent as binary; sidecar applies target encoding)
-        let cat = market
-            .category
-            .as_deref()
-            .unwrap_or_default()
-            .to_lowercase();
-        let q = market.question.to_lowercase();
-
+        // Category flag (sent as binary; sidecar applies target encoding)
         let is_crypto = if market.is_crypto_related() { 1.0 } else { 0.0 };
-        let is_politics = if cat.contains("politic")
-            || q.contains("election")
-            || q.contains("president")
-            || q.contains("vote")
-        {
-            1.0
-        } else {
-            0.0
-        };
-        let is_sports = if cat.contains("sport")
-            || q.contains("nba")
-            || q.contains("nfl")
-            || q.contains("soccer")
-        {
-            1.0
-        } else {
-            0.0
-        };
 
         // Gamma API price changes (fallback to computed momentum)
         let price_change_1d = market.one_day_price_change.unwrap_or(momentum_24h);
@@ -189,11 +156,8 @@ impl MarketFeatures {
             volatility_24h,
             rsi,
             log_volume,
-            log_liquidity,
             days_to_expiry,
             is_crypto,
-            is_politics,
-            is_sports,
             price_change_1d,
             price_change_1w,
             days_since_created,
@@ -342,11 +306,8 @@ mod tests {
             volatility_24h: 0.05,
             rsi: 0.55,
             log_volume: 10.0,
-            log_liquidity: 8.0,
             days_to_expiry: 15.0,
             is_crypto: 1.0,
-            is_politics: 0.0,
-            is_sports: 0.0,
             price_change_1d: 0.03,
             price_change_1w: -0.05,
             days_since_created: 20.0,
