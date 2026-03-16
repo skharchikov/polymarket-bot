@@ -162,6 +162,21 @@ def load_model():
         return False
     model = joblib.load(MODEL_PATH)
     scaler = joblib.load(SCALER_PATH) if SCALER_PATH.exists() else None
+
+    # Detect feature schema mismatch between the loaded model and current FEATURE_NAMES.
+    # This happens when a new model is deployed but the artifact on disk was trained on
+    # a different feature set (e.g. old prod model with 13 features vs new code with 12).
+    if scaler is not None and hasattr(scaler, "feature_names_in_"):
+        scaler_features = list(scaler.feature_names_in_)
+        if scaler_features != FEATURE_NAMES:
+            log.error(
+                "model.schema_mismatch: scaler has features %s but expected %s — triggering retrain",
+                scaler_features,
+                FEATURE_NAMES,
+            )
+            threading.Thread(target=_force_retrain, daemon=True).start()
+            return False
+
     model_loaded_at = time.time()
     if ENCODING_PATH.exists():
         import json
@@ -325,6 +340,17 @@ def _run_warmstart():
     # Hot-reload so next predictions use the updated model
     load_model()
     log.info("warmstart.complete", n_samples=len(records))
+
+
+def _force_retrain():
+    """Trigger an unconditional retrain, regardless of model age."""
+    if not _retrain.lock.acquire(blocking=False):
+        log.info("retrain.skip: already in progress")
+        return
+    try:
+        _run_retrain()
+    finally:
+        _retrain.lock.release()
 
 
 def _retrain_if_stale():
