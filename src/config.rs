@@ -22,6 +22,10 @@ pub struct AppConfig {
     #[config(env = "NEWS_SCAN_INTERVAL_MINS", default = 10)]
     pub news_scan_interval_mins: u64,
 
+    /// Bet scan loop interval in minutes (market scoring + betting).
+    #[config(env = "BET_SCAN_INTERVAL_MINS", default = 10)]
+    pub bet_scan_interval_mins: u64,
+
     /// Enable news fetching and embedding-based matching.
     /// When the model sidecar is active, news has no effect on predictions —
     /// disable to save RSS + OpenAI embedding costs.
