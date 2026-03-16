@@ -84,12 +84,12 @@ pub async fn bet_scan_cycle(
                     let sent = portfolio.strategy_signals_today(&strat.name).await?;
                     let remaining = strat.max_signals_per_day.saturating_sub(sent);
                     if remaining == 0 {
-                        tracing::debug!(
+                        tracing::info!(
                             strategy = %strat.name,
                             market = %signal.question,
                             sent = sent,
                             max = strat.max_signals_per_day,
-                            "Strategy daily limit reached, skipping"
+                            "Strategy rejected signal (daily limit)"
                         );
                         continue;
                     }
@@ -121,11 +121,12 @@ pub async fn bet_scan_cycle(
                     let strat_bankroll = portfolio.strategy_bankroll(&strat.name).await?;
                     let raw_bet = strat_bankroll * accepted.kelly_size;
                     if raw_bet < strat.min_bet {
-                        tracing::debug!(
+                        tracing::info!(
                             strategy = %strat.name,
+                            market = %signal.question,
                             kelly_bet = format_args!("€{raw_bet:.2}"),
                             min_bet = format_args!("€{:.2}", strat.min_bet),
-                            "Kelly bet below minimum, skipping"
+                            "Strategy rejected signal (kelly below min)"
                         );
                         strategy_rejections.push(format!(
                             "{} {}: kelly €{:.2} < min €{:.2}",
