@@ -29,6 +29,8 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -126,7 +128,22 @@ FEATURE_NAMES = [
 # Category columns subject to target encoding (binary → historical YES rate)
 CATEGORY_COLS = ["is_crypto"]
 
-app = FastAPI(title="Polymarket ML Sidecar")
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    if not MODEL_PATH.exists():
+        _retrain_if_stale()
+    else:
+        load_model()
+
+    if RETRAIN_ON_SCHEDULE:
+        t = threading.Thread(target=_schedule_loop, daemon=True)
+        t.start()
+        log.info("retrain.scheduled: checking every 1h, max age %dh", MAX_AGE_HOURS)
+
+    yield
+
+
+app = FastAPI(title="Polymarket ML Sidecar", lifespan=_lifespan)
 
 # Global state
 model = None
@@ -383,17 +400,6 @@ def _schedule_loop():
             log.error("retrain.schedule_error: %s", e)
 
 
-@app.on_event("startup")
-def startup():
-    if not MODEL_PATH.exists():
-        _retrain_if_stale()
-    else:
-        load_model()
-
-    if RETRAIN_ON_SCHEDULE:
-        t = threading.Thread(target=_schedule_loop, daemon=True)
-        t.start()
-        log.info("retrain.scheduled: checking every 1h, max age %dh", MAX_AGE_HOURS)
 
 
 class FeatureMap(BaseModel):
