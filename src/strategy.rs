@@ -52,6 +52,15 @@ impl StrategyProfile {
                     continue;
                 }
             };
+            tracing::info!(
+                strategy = %profile.name,
+                kelly_fraction = profile.kelly_fraction,
+                min_edge = format!("{:.1}%", profile.min_effective_edge * 100.0),
+                min_confidence = format!("{:.0}%", profile.min_confidence * 100.0),
+                max_signals = profile.max_signals_per_day,
+                min_bet = profile.min_bet,
+                "Strategy loaded",
+            );
             profiles.push(profile);
         }
         if profiles.is_empty() {
