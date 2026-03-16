@@ -1232,7 +1232,7 @@ impl LiveScanner {
                 kelly = format_args!("{:.1}%", kelly_size * 100.0),
                 conf = format_args!("{:.0}%", ml_conf * 100.0),
                 news = news_count,
-                "ACCEPTED — model signal"
+                "SIGNAL — passed model filters"
             );
 
             let news_headlines: Vec<String> =

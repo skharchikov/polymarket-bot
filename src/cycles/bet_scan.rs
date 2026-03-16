@@ -280,6 +280,15 @@ pub async fn bet_scan_cycle(
                 }
             }
 
+            if !strategy_rejections.is_empty() || !bets_placed.is_empty() {
+                tracing::info!(
+                    signals = result.signals.len(),
+                    bets = bets_placed.len(),
+                    rejected = strategy_rejections.len(),
+                    "Strategy filter summary"
+                );
+            }
+
             // Persist rejected signals to DB for analysis
             if let Err(e) = portfolio.save_rejected_signals(&result.rejections).await {
                 tracing::warn!(err = %e, "Failed to save rejected signals");
@@ -329,7 +338,7 @@ pub async fn bet_scan_cycle(
     tracing::info!(
         signals_today = signals_today,
         open_bets = open_count,
-        "Bet scan cycle complete"
+        "Bet scan complete"
     );
     Ok(())
 }
