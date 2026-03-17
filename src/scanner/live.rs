@@ -152,6 +152,13 @@ pub struct ScanResult {
     pub source_counts: Vec<(String, usize)>,
 }
 
+/// Result of the portfolio correlation check for a single bet candidate.
+#[derive(Debug, Clone)]
+pub struct CorrelationDecision {
+    pub keep: bool,
+    pub reason: String,
+}
+
 /// A signal that was evaluated by the LLM but didn't pass the scanner gate.
 #[derive(Debug, Clone)]
 pub struct RejectedSignal {
@@ -1666,6 +1673,159 @@ impl LiveScanner {
             features: Some(features),
         }))
     }
+
+    /// Check all bet candidates against existing open bets in a single LLM call.
+    ///
+    /// Sends only question + side for each candidate and open bet — no amounts.
+    /// Returns one `CorrelationDecision` per candidate.
+    /// Fails open: on any error every candidate is returned with `keep = true`.
+    pub async fn check_portfolio_correlation(
+        &self,
+        candidates: &[(String, String, BetSide)],
+        open_bets: &[crate::storage::portfolio::Bet],
+    ) -> Result<Vec<CorrelationDecision>> {
+        let open: Vec<(String, BetSide)> = open_bets
+            .iter()
+            .map(|b| (b.question.clone(), b.side.clone()))
+            .collect();
+        run_correlation_check(&self.openai_client, &self.cfg.llm_model, candidates, &open).await
+    }
+}
+
+/// Core logic for the portfolio correlation check, decoupled from `LiveScanner`
+/// so it can be called directly in tests.
+async fn run_correlation_check(
+    openai_client: &openai::Client,
+    model: &str,
+    candidates: &[(String, String, BetSide)],
+    open_bets: &[(String, BetSide)],
+) -> Result<Vec<CorrelationDecision>> {
+    if candidates.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let candidate_ids: Vec<char> = (b'A'..=b'Z')
+        .take(candidates.len())
+        .map(|c| c as char)
+        .collect();
+
+    let open_section = if open_bets.is_empty() {
+        "None".to_string()
+    } else {
+        open_bets
+            .iter()
+            .enumerate()
+            .map(|(i, (q, s))| format!("{}. {} — \"{}\"", i + 1, s, q))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let candidate_section = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, (_, q, s))| format!("{}. {} — \"{}\"", candidate_ids[i], s, q))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let prompt = format!(
+        "EXISTING OPEN BETS:\n{open_section}\n\n\
+         NEW BET CANDIDATES:\n{candidate_section}\n\n\
+         Respond with ONLY a JSON array, one object per candidate:\n\
+         [{{\"id\":\"A\",\"keep\":true,\"reason\":\"...\"}}]\n\
+         - keep: false only if the candidate is logically correlated with, mutually \
+           exclusive with, or essentially the same event as an existing open bet\n\
+         - keep: true if the candidate is genuinely independent\n\
+         - reason: one short sentence"
+    );
+
+    let agent = openai_client
+        .agent(model)
+        .preamble(
+            "You are a portfolio overlap detector for a prediction market trading bot.\n\
+             REJECT a candidate only for clear overlaps:\n\
+             - Threshold ladders: e.g. NO on oil hitting $100 while already NO on oil hitting $105 \
+               (if $100 hits so does $105 — positions are entangled)\n\
+             - Partition buckets: e.g. YES on tweet range 260-279 while already YES on 280-299 \
+               for the same period (at most one resolves YES)\n\
+             - Same event different framing: essentially identical question under a different title\n\
+             KEEP everything else. Be conservative — only reject clear logical overlaps.",
+        )
+        .temperature(0.0)
+        .build();
+
+    let response = agent
+        .chat(&prompt, vec![])
+        .await
+        .map_err(|e| anyhow::anyhow!("Correlation check LLM call failed: {e}"))?;
+
+    tracing::info!(response = %response, "Correlation check raw response");
+
+    let json_str = match extract_json_array(&response) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(err = %e, "Failed to extract JSON array from correlation response, keeping all");
+            return Ok(candidates
+                .iter()
+                .map(|_| CorrelationDecision {
+                    keep: true,
+                    reason: "Parse error — defaulting to keep".to_string(),
+                })
+                .collect());
+        }
+    };
+
+    let items: Vec<serde_json::Value> = match serde_json::from_str(&json_str) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(err = %e, "Failed to parse correlation JSON, keeping all");
+            return Ok(candidates
+                .iter()
+                .map(|_| CorrelationDecision {
+                    keep: true,
+                    reason: "Parse error — defaulting to keep".to_string(),
+                })
+                .collect());
+        }
+    };
+
+    Ok(parse_correlation_decisions(&items, &candidate_ids))
+}
+
+/// Map parsed JSON items back to `CorrelationDecision`s using letter IDs (A, B, C...).
+/// Missing entries default to keep=true.
+fn parse_correlation_decisions(
+    items: &[serde_json::Value],
+    candidate_ids: &[char],
+) -> Vec<CorrelationDecision> {
+    candidate_ids
+        .iter()
+        .map(|id| {
+            let id_str = id.to_string();
+            let item = items.iter().find(|v| v["id"].as_str() == Some(&id_str));
+            match item {
+                Some(v) => CorrelationDecision {
+                    keep: v["keep"].as_bool().unwrap_or(true),
+                    reason: v["reason"]
+                        .as_str()
+                        .unwrap_or("no reason provided")
+                        .to_string(),
+                },
+                None => CorrelationDecision {
+                    keep: true,
+                    reason: "No decision returned — defaulting to keep".to_string(),
+                },
+            }
+        })
+        .collect()
+}
+
+fn extract_json_array(response: &str) -> Result<String> {
+    if let Some(start) = response.find('[')
+        && let Some(end) = response[start..].rfind(']')
+    {
+        return Ok(response[start..=start + end].to_string());
+    }
+    anyhow::bail!("No JSON array found in correlation check response")
 }
 
 pub fn parse_days_to_expiry(end_date: &Option<String>) -> f64 {
@@ -2009,5 +2169,188 @@ mod tests {
             }
             _ => panic!("expected RawProbability"),
         }
+    }
+
+    // --- extract_json_array ---
+
+    #[test]
+    fn test_extract_json_array_clean() {
+        let input = r#"[{"id":"A","keep":true,"reason":"independent"}]"#;
+        assert_eq!(extract_json_array(input).unwrap(), input);
+    }
+
+    #[test]
+    fn test_extract_json_array_with_surrounding_text() {
+        let input = "Here is my analysis:\n[{\"id\":\"A\",\"keep\":false,\"reason\":\"correlated\"}]\nDone.";
+        let extracted = extract_json_array(input).unwrap();
+        assert!(extracted.starts_with('['));
+        assert!(extracted.ends_with(']'));
+        assert!(extracted.contains("correlated"));
+    }
+
+    #[test]
+    fn test_extract_json_array_in_markdown_block() {
+        let input = "```json\n[{\"id\":\"A\",\"keep\":true,\"reason\":\"ok\"}]\n```";
+        let extracted = extract_json_array(input).unwrap();
+        assert!(extracted.starts_with('['));
+        assert!(extracted.contains("ok"));
+    }
+
+    #[test]
+    fn test_extract_json_array_missing_fails() {
+        assert!(extract_json_array("no array here {}").is_err());
+        assert!(extract_json_array("").is_err());
+    }
+
+    // --- parse_correlation_decisions ---
+
+    #[test]
+    fn test_parse_correlation_all_keep() {
+        let json: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[
+                {"id":"A","keep":true,"reason":"independent event"},
+                {"id":"B","keep":true,"reason":"different topic"}
+            ]"#,
+        )
+        .unwrap();
+        let ids = vec!['A', 'B'];
+        let decisions = parse_correlation_decisions(&json, &ids);
+        assert_eq!(decisions.len(), 2);
+        assert!(decisions[0].keep);
+        assert_eq!(decisions[0].reason, "independent event");
+        assert!(decisions[1].keep);
+    }
+
+    #[test]
+    fn test_parse_correlation_reject_one() {
+        let json: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[
+                {"id":"A","keep":false,"reason":"tweet bucket overlap with open bet"},
+                {"id":"B","keep":true,"reason":"unrelated market"}
+            ]"#,
+        )
+        .unwrap();
+        let ids = vec!['A', 'B'];
+        let decisions = parse_correlation_decisions(&json, &ids);
+        assert!(!decisions[0].keep);
+        assert_eq!(decisions[0].reason, "tweet bucket overlap with open bet");
+        assert!(decisions[1].keep);
+    }
+
+    #[test]
+    fn test_parse_correlation_missing_entry_defaults_keep() {
+        // LLM only returns decision for A, skips B
+        let json: Vec<serde_json::Value> =
+            serde_json::from_str(r#"[{"id":"A","keep":false,"reason":"correlated"}]"#).unwrap();
+        let ids = vec!['A', 'B'];
+        let decisions = parse_correlation_decisions(&json, &ids);
+        assert!(!decisions[0].keep);
+        assert!(decisions[1].keep, "missing entry should default to keep");
+        assert_eq!(
+            decisions[1].reason,
+            "No decision returned — defaulting to keep"
+        );
+    }
+
+    #[test]
+    fn test_parse_correlation_missing_keep_field_defaults_true() {
+        // keep field omitted — should default to true (fail-open)
+        let json: Vec<serde_json::Value> =
+            serde_json::from_str(r#"[{"id":"A","reason":"something"}]"#).unwrap();
+        let ids = vec!['A'];
+        let decisions = parse_correlation_decisions(&json, &ids);
+        assert!(decisions[0].keep);
+    }
+
+    #[test]
+    fn test_parse_correlation_empty_candidates() {
+        let json: Vec<serde_json::Value> = vec![];
+        let ids: Vec<char> = vec![];
+        let decisions = parse_correlation_decisions(&json, &ids);
+        assert!(decisions.is_empty());
+    }
+
+    // --- run_correlation_check (real OpenAI) ---
+
+    /// Integration test — requires OPENAI_API_KEY in environment.
+    /// Run with: cargo test test_correlation_check_real_llm -- --ignored
+    #[tokio::test]
+    #[ignore = "requires OPENAI_API_KEY"]
+    async fn test_correlation_check_real_llm() {
+        let client = openai::Client::from_env();
+
+        // Scenario: two partition buckets (should be rejected) + one independent (should be kept)
+        let candidates = vec![
+            (
+                "market-a".to_string(),
+                "Will Elon Musk post 280-299 tweets from March 10 to March 17?".to_string(),
+                BetSide::Yes,
+            ),
+            (
+                "market-b".to_string(),
+                "Will Crude Oil CL hit HIGH $100 by end of March?".to_string(),
+                BetSide::No,
+            ),
+            (
+                "market-c".to_string(),
+                "Will France win the 2026 FIFA World Cup?".to_string(),
+                BetSide::Yes,
+            ),
+        ];
+
+        let open_bets = vec![
+            (
+                "Will Elon Musk post 260-279 tweets from March 10 to March 17?".to_string(),
+                BetSide::Yes,
+            ),
+            (
+                "Will Crude Oil CL hit HIGH $105 by end of March?".to_string(),
+                BetSide::No,
+            ),
+        ];
+
+        let decisions = run_correlation_check(&client, "gpt-4o", &candidates, &open_bets)
+            .await
+            .expect("LLM call failed");
+
+        assert_eq!(decisions.len(), 3);
+
+        // A: tweet bucket 280-299 vs open bet on 260-279 — same period, partition → reject
+        assert!(
+            !decisions[0].keep,
+            "tweet bucket overlap should be rejected, got: {}",
+            decisions[0].reason
+        );
+
+        // B: oil $100 NO vs open bet oil $105 NO — threshold ladder → reject
+        assert!(
+            !decisions[1].keep,
+            "oil threshold ladder should be rejected, got: {}",
+            decisions[1].reason
+        );
+
+        // C: FIFA World Cup — unrelated → keep
+        assert!(
+            decisions[2].keep,
+            "independent market should be kept, got: {}",
+            decisions[2].reason
+        );
+    }
+
+    #[test]
+    fn test_parse_correlation_out_of_order_ids() {
+        // LLM returns B before A — should still map correctly
+        let json: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[
+                {"id":"B","keep":false,"reason":"threshold ladder"},
+                {"id":"A","keep":true,"reason":"independent"}
+            ]"#,
+        )
+        .unwrap();
+        let ids = vec!['A', 'B'];
+        let decisions = parse_correlation_decisions(&json, &ids);
+        assert!(decisions[0].keep, "A should be keep=true");
+        assert!(!decisions[1].keep, "B should be keep=false");
+        assert_eq!(decisions[1].reason, "threshold ladder");
     }
 }
