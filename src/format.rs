@@ -232,7 +232,7 @@ pub struct StatsData {
 /// Render the `/stats` message from structured data.
 pub fn format_stats(data: &StatsData) -> String {
     let total_roi = if data.starting > 0.0 {
-        (data.total_bankroll - data.starting) / data.starting * 100.0
+        data.total_pnl / data.starting * 100.0
     } else {
         0.0
     };
@@ -617,5 +617,85 @@ mod tests {
         let output = format_open_bets(&views, true);
         assert!(output.contains("(2)"));
         assert!(output.contains("€25.00")); // total cost
+    }
+
+    fn make_stats(starting: f64, total_bankroll: f64, total_pnl: f64) -> StatsData {
+        StatsData {
+            total_bankroll,
+            starting,
+            total_pnl,
+            total_wins: 0,
+            total_losses: 0,
+            total_open: 0,
+            unrealized: 0.0,
+            exposure: 0.0,
+            strategies: vec![],
+            sources: vec![],
+            copy_trade: None,
+        }
+    }
+
+    // ROI = realized pnl / starting, independent of current bankroll.
+    // Before the fix, ROI was (bankroll - starting) / starting which is wrong
+    // when money is deployed in open bets (bankroll < starting + pnl).
+    #[test]
+    fn test_stats_roi_uses_pnl_not_bankroll_diff() {
+        // €50 pnl on €1000 start = +5%, regardless of current bankroll
+        let data = make_stats(1000.0, 800.0, 50.0); // €200 deployed in open bets
+        let output = format_stats(&data);
+        assert!(
+            output.contains("+5.0%"),
+            "expected +5.0% ROI, got: {output}"
+        );
+    }
+
+    #[test]
+    fn test_stats_roi_negative_loss() {
+        let data = make_stats(1000.0, 950.0, -100.0);
+        let output = format_stats(&data);
+        assert!(
+            output.contains("-10.0%"),
+            "expected -10.0% ROI, got: {output}"
+        );
+    }
+
+    #[test]
+    fn test_stats_roi_zero_when_no_starting() {
+        let data = make_stats(0.0, 0.0, 100.0);
+        let output = format_stats(&data);
+        assert!(
+            output.contains("+0.0%"),
+            "expected +0.0% ROI, got: {output}"
+        );
+    }
+
+    #[test]
+    fn test_stats_roi_zero_pnl() {
+        let data = make_stats(1000.0, 1000.0, 0.0);
+        let output = format_stats(&data);
+        assert!(
+            output.contains("+0.0%"),
+            "expected +0.0% ROI, got: {output}"
+        );
+    }
+
+    #[test]
+    fn test_stats_per_strategy_roi_shown() {
+        let mut data = make_stats(1000.0, 900.0, 50.0);
+        data.strategies = vec![StratStats {
+            name: "aggressive".to_string(),
+            bankroll: 450.0,
+            roi: 10.0, // pre-computed: pnl / starting_per_strat * 100
+            pnl: 50.0,
+            wins: 3,
+            losses: 1,
+            open: 2,
+        }];
+        let output = format_stats(&data);
+        assert!(
+            output.contains("+10.0%"),
+            "expected per-strategy ROI in output: {output}"
+        );
+        assert!(output.contains("aggressive"));
     }
 }

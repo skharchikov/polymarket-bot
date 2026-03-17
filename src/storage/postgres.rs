@@ -225,13 +225,6 @@ impl PgPortfolio {
         } else {
             strat_str.split(',').map(|s| s.trim().to_string()).collect()
         };
-        let num_strategies = strategies.len() as f64;
-        let starting_per_strat = if num_strategies > 0.0 {
-            starting / num_strategies
-        } else {
-            0.0
-        };
-
         // Build per-strategy stats
         let mut strat_stats = Vec::new();
         let mut total_bankroll = 0.0_f64;
@@ -247,8 +240,9 @@ impl PgPortfolio {
             let s_losses = s_resolved.iter().filter(|b| b.won == Some(false)).count();
             let s_pnl: f64 = s_resolved.iter().filter_map(|b| b.pnl).sum();
             let s_bankroll = self.strategy_bankroll(strat).await?;
-            let s_roi = if starting_per_strat > 0.0 {
-                (s_bankroll - starting_per_strat) / starting_per_strat * 100.0
+            let s_starting = self.strategy_starting_bankroll(strat).await.unwrap_or(0.0);
+            let s_roi = if s_starting > 0.0 {
+                s_pnl / s_starting * 100.0
             } else {
                 0.0
             };
@@ -572,6 +566,11 @@ impl PgPortfolio {
         self.get_f64(&format!("bankroll:{strategy}")).await
     }
 
+    /// Get the starting (initial) bankroll for a specific strategy.
+    pub async fn strategy_starting_bankroll(&self, strategy: &str) -> Result<f64> {
+        self.get_f64(&format!("starting_bankroll:{strategy}")).await
+    }
+
     /// Ensure a portfolio key exists with a default value; no-op if it already exists.
     pub async fn ensure_key(&self, key: &str, default: f64) -> Result<()> {
         sqlx::query(
@@ -609,6 +608,10 @@ impl PgPortfolio {
                     bankroll = format_args!("€{strategy_bankroll:.2}"),
                     "Initialized strategy bankroll"
                 );
+            }
+            let start_key = format!("starting_bankroll:{}", s.name);
+            if !self.key_exists(&start_key).await? {
+                self.upsert_f64(&start_key, strategy_bankroll).await?;
             }
         }
 

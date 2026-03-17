@@ -188,45 +188,18 @@ pub async fn bet_scan_cycle(
             }
 
             // Phase 2: LLM portfolio correlation check (single batch call)
-            let open_bets = portfolio.open_bets().await?;
-            let correlation_decisions = if !pending.is_empty() && !open_bets.is_empty() {
-                let candidates: Vec<(String, String, BetSide)> = pending
-                    .iter()
-                    .map(|pb| {
-                        (
-                            pb.signal.market_id.clone(),
-                            pb.signal.question.clone(),
-                            pb.signal.side.clone(),
-                        )
-                    })
-                    .collect();
-                tracing::info!(
-                    candidates = candidates.len(),
-                    open_bets = open_bets.len(),
-                    "Running portfolio correlation check"
-                );
-                scanner
-                    .check_portfolio_correlation(&candidates, &open_bets)
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::warn!(err = %e, "Correlation check failed, keeping all candidates");
-                        pending
-                            .iter()
-                            .map(|_| crate::scanner::live::CorrelationDecision {
-                                keep: true,
-                                reason: "Check failed — defaulting to keep".to_string(),
-                            })
-                            .collect()
-                    })
-            } else {
-                pending
-                    .iter()
-                    .map(|_| crate::scanner::live::CorrelationDecision {
-                        keep: true,
-                        reason: "No open bets to correlate against".to_string(),
-                    })
-                    .collect()
-            };
+            let candidates: Vec<(String, String, BetSide)> = pending
+                .iter()
+                .map(|pb| {
+                    (
+                        pb.signal.market_id.clone(),
+                        pb.signal.question.clone(),
+                        pb.signal.side.clone(),
+                    )
+                })
+                .collect();
+            let correlation_decisions =
+                super::portfolio_correlation_check(scanner, portfolio, &candidates).await;
 
             // Phase 3: place surviving bets; log + notify rejected ones
             let mut bets_placed: Vec<String> = Vec::new();

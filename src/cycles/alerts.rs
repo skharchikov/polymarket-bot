@@ -130,6 +130,43 @@ pub async fn alert_loop(
                     }
                 }
 
+                // LLM portfolio correlation check
+                let corr_candidates = vec![(
+                    signal.market_id.clone(),
+                    signal.question.clone(),
+                    signal.side.clone(),
+                )];
+                let corr_decisions =
+                    super::portfolio_correlation_check(&scanner, &portfolio, &corr_candidates)
+                        .await;
+                let corr_reason = corr_decisions
+                    .first()
+                    .map(|d| d.reason.clone())
+                    .unwrap_or_default();
+                if let Some(decision) = corr_decisions.first()
+                    && !decision.keep
+                {
+                    tracing::info!(
+                        market = %signal.question,
+                        reason = %decision.reason,
+                        "WS signal blocked by correlation check"
+                    );
+                    let side_emoji = match signal.side {
+                        BetSide::Yes => "🟢 YES",
+                        BetSide::No => "🔴 NO",
+                    };
+                    let msg = format!(
+                        "🚫 *WS Correlation check blocked bet*\n\
+                             {side} on _{question}_\n\
+                             💬 _{reason}_",
+                        side = side_emoji,
+                        question = format::truncate(&signal.question, 60),
+                        reason = decision.reason,
+                    );
+                    let _ = notifier.send(&msg).await;
+                    continue;
+                }
+
                 // Process through strategies — only first matching strategy bets
                 for strat in strategies.iter() {
                     let sent = portfolio
@@ -215,7 +252,8 @@ pub async fn alert_loop(
                                 "⚡ *WS-Triggered Bet* ({label} {strat_name})\n\
                                  {signal_msg}\n\n\
                                  💸 Bet: *{side}* `€{cost:.2}` ({shares:.1} shares @ `{price:.1}¢`)\n\
-                                 💰 Strategy bankroll: `€{bankroll:.2}`",
+                                 💰 Strategy bankroll: `€{bankroll:.2}`\n\
+                                 ✅ _Correlation: {corr_reason}_",
                                 label = strat.label(),
                                 strat_name = strat.name,
                                 side = side_emoji,
@@ -224,6 +262,7 @@ pub async fn alert_loop(
                                 shares = shares,
                                 price = slipped_price * 100.0,
                                 bankroll = new_bankroll,
+                                corr_reason = corr_reason,
                             );
                             broadcast(&notifier, &portfolio, &msg).await;
                             break;
