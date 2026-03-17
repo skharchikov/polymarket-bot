@@ -33,11 +33,7 @@ pub async fn housekeeping_cycle(
                 if let Some(r) = portfolio.resolve_bet(market_id, yes_won).await? {
                     let emoji = if r.won { "✅" } else { "❌" };
                     let result_label = if r.won { "WON" } else { "LOST" };
-                    let roi = if r.cost > 0.0 {
-                        r.pnl / r.cost * 100.0
-                    } else {
-                        0.0
-                    };
+                    let roi = bet_roi(r.pnl, r.cost, r.entry_fee);
                     let strat_label = strategy::strategy_label(&r.strategy);
                     let src_icon = strategy::source_icon(&r.source);
                     let side_emoji = match r.side {
@@ -256,4 +252,81 @@ pub async fn housekeeping_cycle(
     metrics::record_open_bets(open_bets.len() as u64);
     tracing::info!(open_bets = open_bets.len(), "Housekeeping cycle complete");
     Ok(())
+}
+
+fn bet_roi(pnl: f64, cost: f64, entry_fee: f64) -> f64 {
+    let total_invested = cost + entry_fee;
+    if total_invested > 0.0 {
+        pnl / total_invested * 100.0
+    } else {
+        0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // fee_pct used by resolve_bet
+    const FEE_PCT: f64 = 0.02;
+
+    fn resolve_pnl(shares: f64, cost: f64, entry_fee: f64, won: bool) -> f64 {
+        let gross = if won { shares } else { 0.0 };
+        let exit_fee = gross * FEE_PCT;
+        gross - exit_fee - cost - entry_fee
+    }
+
+    #[test]
+    fn test_loss_roi_never_exceeds_100_pct() {
+        // Stake €6.11, entry fee €0.12 (2%), 15.6 shares — reproduces the reported bug
+        let cost = 6.11;
+        let entry_fee = cost * FEE_PCT;
+        let shares = 15.6;
+        let pnl = resolve_pnl(shares, cost, entry_fee, false);
+
+        // PnL on a loss = -(cost + entry_fee)
+        assert!((pnl - (-(cost + entry_fee))).abs() < 0.001);
+
+        let roi = bet_roi(pnl, cost, entry_fee);
+        // Must be exactly -100%, not -102%
+        assert!((roi - (-100.0)).abs() < 0.01, "roi was {roi:.2}%");
+    }
+
+    #[test]
+    fn test_old_formula_would_have_been_wrong() {
+        let cost = 6.11;
+        let entry_fee = cost * FEE_PCT;
+        let pnl = -(cost + entry_fee);
+
+        // The old denominator was just `cost`, giving < -100%
+        let old_roi = pnl / cost * 100.0;
+        assert!(
+            old_roi < -100.0,
+            "old formula should exceed -100%: {old_roi:.2}%"
+        );
+
+        // The fixed denominator gives exactly -100%
+        let new_roi = bet_roi(pnl, cost, entry_fee);
+        assert!((new_roi - (-100.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_win_roi_positive() {
+        let cost = 10.0;
+        let entry_fee = cost * FEE_PCT;
+        let shares = 20.0; // bought at 0.5, resolves at 1.0
+        let pnl = resolve_pnl(shares, cost, entry_fee, true);
+
+        assert!(pnl > 0.0);
+        let roi = bet_roi(pnl, cost, entry_fee);
+        assert!(roi > 0.0);
+        // gross = 20, exit_fee = 0.4, net = 19.6, pnl = 19.6 - 10 - 0.2 = 9.4
+        // roi = 9.4 / 10.2 * 100 ≈ 92.2%
+        assert!((roi - 92.16).abs() < 0.1, "roi was {roi:.2}%");
+    }
+
+    #[test]
+    fn test_roi_zero_when_no_investment() {
+        assert_eq!(bet_roi(-5.0, 0.0, 0.0), 0.0);
+    }
 }
