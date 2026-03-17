@@ -64,25 +64,34 @@ impl TelegramNotifier {
         } else {
             "_This is not financial advice. Do your own research._"
         };
-        let full_message = format!("{message}\n\n{disclaimer}");
+        let footer = format!("\n\n{disclaimer}");
+        let chunks = split_message(message, 4096 - footer.len());
 
-        let resp = self
-            .client
-            .post(&url)
-            .json(&serde_json::json!({
-                "chat_id": chat_id,
-                "text": full_message,
-                "parse_mode": parse_mode,
-                "disable_web_page_preview": true,
-            }))
-            .send()
-            .await
-            .context("failed to send telegram message")?;
+        for (i, chunk) in chunks.iter().enumerate() {
+            let text = if i == chunks.len() - 1 {
+                format!("{chunk}{footer}")
+            } else {
+                chunk.to_string()
+            };
 
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            tracing::warn!(chat_id = chat_id, body = body, "Telegram send failed");
-            anyhow::bail!("Telegram API error: {body}");
+            let resp = self
+                .client
+                .post(&url)
+                .json(&serde_json::json!({
+                    "chat_id": chat_id,
+                    "text": text,
+                    "parse_mode": parse_mode,
+                    "disable_web_page_preview": true,
+                }))
+                .send()
+                .await
+                .context("failed to send telegram message")?;
+
+            if !resp.status().is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                tracing::warn!(chat_id = chat_id, body = body, "Telegram send failed");
+                anyhow::bail!("Telegram API error: {body}");
+            }
         }
 
         let preview = message.chars().take(60).collect::<String>();
@@ -187,5 +196,87 @@ impl TelegramNotifier {
         }
 
         commands
+    }
+}
+
+/// Split `text` into chunks of at most `max_chars` characters, breaking at
+/// newline boundaries where possible. Each chunk is guaranteed ≤ `max_chars`.
+fn split_message(text: &str, max_chars: usize) -> Vec<String> {
+    if text.chars().count() <= max_chars {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+
+    for line in text.split('\n') {
+        let line_with_newline = if current.is_empty() {
+            line.to_string()
+        } else {
+            format!("\n{line}")
+        };
+
+        if current.chars().count() + line_with_newline.chars().count() > max_chars {
+            if !current.is_empty() {
+                chunks.push(current.clone());
+                current.clear();
+            }
+            // Line itself may exceed limit — hard-split by chars
+            let mut remaining = line;
+            while !remaining.is_empty() {
+                let take: String = remaining.chars().take(max_chars).collect();
+                let byte_len = take.len();
+                chunks.push(take);
+                remaining = &remaining[byte_len..];
+            }
+        } else {
+            current.push_str(&line_with_newline);
+        }
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_short_message_unchanged() {
+        let msg = "Hello world";
+        let chunks = split_message(msg, 100);
+        assert_eq!(chunks, vec!["Hello world"]);
+    }
+
+    #[test]
+    fn test_split_at_newline_boundary() {
+        let msg = "line one\nline two\nline three";
+        // limit forces split after "line one"
+        let chunks = split_message(msg, 10);
+        assert!(chunks.iter().all(|c| c.chars().count() <= 10));
+        // recombined content equals original
+        assert_eq!(chunks.join("\n"), msg);
+    }
+
+    #[test]
+    fn test_split_preserves_all_content() {
+        let msg = (0..100)
+            .map(|i| format!("Line {i}: some content here"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let chunks = split_message(&msg, 200);
+        assert!(chunks.iter().all(|c| c.chars().count() <= 200));
+        assert_eq!(chunks.join("\n"), msg);
+    }
+
+    #[test]
+    fn test_split_exact_limit_no_split() {
+        let msg = "abcde";
+        let chunks = split_message(msg, 5);
+        assert_eq!(chunks, vec!["abcde"]);
     }
 }
