@@ -24,4 +24,5 @@ Sections:
 | [004](004-online-learning.md) | Online learning: feature store + warm-start retraining | draft | 2026-03-15 |
 | [005](005-feature-improvements.md) | Temporal features, target encoding, SHAP analysis | active | 2026-03-15 |
 | [006](006-remove-dead-features.md) | Remove dead features: log_liquidity, is_politics, is_sports | active | 2026-03-16 |
+| [007](007-portfolio-correlation-check.md) | Portfolio correlation check via LLM batch call | draft | 2026-03-17 |
 

@@ -7,11 +7,21 @@ use crate::config::AppConfig;
 use crate::format;
 use crate::live::{ScanStats, broadcast, notify_owner};
 use crate::metrics;
-use crate::scanner::live::LiveScanner;
+use crate::scanner::live::{LiveScanner, Signal};
 use crate::storage::portfolio::{BetSide, NewBet};
 use crate::storage::postgres::PgPortfolio;
 use crate::strategy::StrategyProfile;
 use crate::telegram::notifier::TelegramNotifier;
+
+struct PendingBet<'a> {
+    signal: &'a Signal,
+    strat: &'a StrategyProfile,
+    kelly_size: f64,
+    bet_amount: f64,
+    shares: f64,
+    slipped_price: f64,
+    fee: f64,
+}
 
 pub async fn bet_scan_cycle(
     portfolio: &PgPortfolio,
@@ -70,11 +80,13 @@ pub async fn bet_scan_cycle(
                 result.signals.len() as u64,
             );
 
-            let mut bets_placed: Vec<String> = Vec::new();
             let mut strategy_rejections: Vec<String> = Vec::new();
             // One bet per market — first accepting strategy wins
             let mut bet_market_ids: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
+
+            // Phase 1: collect all candidates that pass every guard (strategy + kelly + bankroll)
+            let mut pending: Vec<PendingBet> = Vec::new();
 
             for signal in &result.signals {
                 if bet_market_ids.contains(&signal.market_id) {
@@ -160,124 +172,209 @@ pub async fn bet_scan_cycle(
                         continue;
                     }
 
-                    let new_bet = NewBet {
-                        market_id: signal.market_id.clone(),
-                        question: signal.question.clone(),
-                        side: signal.side.clone(),
-                        entry_price: signal.current_price,
-                        slipped_price,
-                        shares,
-                        cost: bet_amount,
-                        fee,
-                        estimated_prob: signal.estimated_prob,
-                        confidence: signal.confidence,
-                        edge: signal.edge,
+                    // Passed all guards — queue for correlation check
+                    bet_market_ids.insert(signal.market_id.clone());
+                    pending.push(PendingBet {
+                        signal,
+                        strat,
                         kelly_size: accepted.kelly_size,
-                        reasoning: signal.reasoning.clone(),
-                        end_date: signal.end_date.clone(),
-                        context: Some(signal.context.clone()),
-                        strategy: strat.name.clone(),
-                        source: signal.source.as_str().to_string(),
-                        url: signal.polymarket_url.clone(),
-                        event_slug: signal.event_slug.clone(),
-                        features: signal.features.clone(),
-                    };
+                        bet_amount,
+                        shares,
+                        slipped_price,
+                        fee,
+                    });
+                    break;
+                }
+            }
 
-                    // Log prediction for Brier score tracking
-                    let _ = portfolio
-                        .log_prediction(
-                            &signal.market_id,
-                            signal.source.as_str(),
-                            signal.prior,
-                            signal.estimated_prob,
-                            signal.estimated_prob,
-                            signal.confidence,
-                            signal.edge,
+            // Phase 2: LLM portfolio correlation check (single batch call)
+            let open_bets = portfolio.open_bets().await?;
+            let correlation_decisions = if !pending.is_empty() && !open_bets.is_empty() {
+                let candidates: Vec<(String, String, BetSide)> = pending
+                    .iter()
+                    .map(|pb| {
+                        (
+                            pb.signal.market_id.clone(),
+                            pb.signal.question.clone(),
+                            pb.signal.side.clone(),
                         )
-                        .await;
+                    })
+                    .collect();
+                tracing::info!(
+                    candidates = candidates.len(),
+                    open_bets = open_bets.len(),
+                    "Running portfolio correlation check"
+                );
+                scanner
+                    .check_portfolio_correlation(&candidates, &open_bets)
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(err = %e, "Correlation check failed, keeping all candidates");
+                        pending
+                            .iter()
+                            .map(|_| crate::scanner::live::CorrelationDecision {
+                                keep: true,
+                                reason: "Check failed — defaulting to keep".to_string(),
+                            })
+                            .collect()
+                    })
+            } else {
+                pending
+                    .iter()
+                    .map(|_| crate::scanner::live::CorrelationDecision {
+                        keep: true,
+                        reason: "No open bets to correlate against".to_string(),
+                    })
+                    .collect()
+            };
 
-                    match portfolio.place_bet(&new_bet).await {
-                        Ok(_bet_id) => {
-                            let new_strat_bankroll =
-                                portfolio.strategy_bankroll(&strat.name).await?;
-                            let open_count = portfolio.open_bets().await?.len();
-                            let strat_signals =
-                                portfolio.strategy_signals_today(&strat.name).await?;
-                            metrics::record_bet(&strat.name, signal.source.as_str(), bet_amount);
-                            metrics::record_bankroll(&strat.name, new_strat_bankroll);
-                            metrics::record_open_bets(open_count as u64);
-                            tracing::info!(
-                                strategy = %strat.name,
-                                market = %signal.question,
-                                side = %signal.side,
-                                cost = format_args!("€{bet_amount:.2}"),
-                                edge = format_args!("+{:.1}%", signal.edge * 100.0),
-                                bankroll = format_args!("€{new_strat_bankroll:.2}"),
-                                "Bet placed"
-                            );
+            // Phase 3: place surviving bets; log + notify rejected ones
+            let mut bets_placed: Vec<String> = Vec::new();
 
-                            bets_placed.push(format!(
-                                "{} {} €{:.2}",
-                                strat.label(),
-                                format::truncate(&signal.question, 40),
-                                bet_amount,
-                            ));
+            for (pb, decision) in pending.iter().zip(correlation_decisions.iter()) {
+                let signal = pb.signal;
+                let strat = pb.strat;
 
-                            let news_section = if !signal.context.news_headlines.is_empty() {
-                                let headlines: Vec<String> = signal
-                                    .context
-                                    .news_headlines
-                                    .iter()
-                                    .take(3)
-                                    .map(|h| format!("  • _{}_", format::truncate(h, 80)))
-                                    .collect();
-                                format!("\n📰 *Triggered by:*\n{}\n", headlines.join("\n"))
-                            } else {
-                                String::new()
-                            };
+                if !decision.keep {
+                    tracing::info!(
+                        market = %signal.question,
+                        side = %signal.side,
+                        reason = %decision.reason,
+                        "Correlation check rejected candidate"
+                    );
+                    let side_emoji = match signal.side {
+                        BetSide::Yes => "🟢 YES",
+                        BetSide::No => "🔴 NO",
+                    };
+                    notify_owner(
+                        notifier,
+                        &format!(
+                            "🚫 *Correlation check blocked bet*\n\
+                             {side} on _{question}_\n\
+                             💬 _{reason}_",
+                            side = side_emoji,
+                            question = format::truncate(&signal.question, 60),
+                            reason = decision.reason,
+                        ),
+                    )
+                    .await;
+                    continue;
+                }
 
-                            let side_emoji = match signal.side {
-                                BetSide::Yes => "🟢 YES",
-                                BetSide::No => "🔴 NO",
-                            };
-                            let msg = format!(
-                                "{label} *{strat_name}*\n\
-                                 {signal}\n\
-                                 {news}\n\
-                                 💸 *Bet: {side}*\n\
-                                 💵 Stake: `€{cost:.2}` ({shares:.1} shares @ `{price:.1}¢`)\n\
-                                 🏷 Fees: `€{fee:.2}` (slippage + trading)\n\
-                                 💰 Strategy bankroll: `€{bankroll:.2}`\n\
-                                 📊 Open bets: {open} | Strategy signals: {today}/{max}",
-                                label = strat.label(),
-                                strat_name = strat.name,
-                                signal = signal.to_telegram_message(),
-                                news = news_section,
-                                side = side_emoji,
-                                cost = bet_amount,
-                                shares = shares,
-                                price = slipped_price * 100.0,
-                                fee = fee,
-                                bankroll = new_strat_bankroll,
-                                open = open_count,
-                                today = strat_signals,
-                                max = strat.max_signals_per_day,
-                            );
-                            broadcast(notifier, portfolio, &msg).await;
-                            // One bet per market — stop trying other strategies
-                            bet_market_ids.insert(signal.market_id.clone());
-                            break;
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                strategy = %strat.name,
-                                err = %e,
-                                "Failed to place bet in DB"
-                            );
-                        }
+                let new_bet = NewBet {
+                    market_id: signal.market_id.clone(),
+                    question: signal.question.clone(),
+                    side: signal.side.clone(),
+                    entry_price: signal.current_price,
+                    slipped_price: pb.slipped_price,
+                    shares: pb.shares,
+                    cost: pb.bet_amount,
+                    fee: pb.fee,
+                    estimated_prob: signal.estimated_prob,
+                    confidence: signal.confidence,
+                    edge: signal.edge,
+                    kelly_size: pb.kelly_size,
+                    reasoning: signal.reasoning.clone(),
+                    end_date: signal.end_date.clone(),
+                    context: Some(signal.context.clone()),
+                    strategy: strat.name.clone(),
+                    source: signal.source.as_str().to_string(),
+                    url: signal.polymarket_url.clone(),
+                    event_slug: signal.event_slug.clone(),
+                    features: signal.features.clone(),
+                };
+
+                // Log prediction for Brier score tracking
+                let _ = portfolio
+                    .log_prediction(
+                        &signal.market_id,
+                        signal.source.as_str(),
+                        signal.prior,
+                        signal.estimated_prob,
+                        signal.estimated_prob,
+                        signal.confidence,
+                        signal.edge,
+                    )
+                    .await;
+
+                match portfolio.place_bet(&new_bet).await {
+                    Ok(_bet_id) => {
+                        let new_strat_bankroll = portfolio.strategy_bankroll(&strat.name).await?;
+                        let open_count = portfolio.open_bets().await?.len();
+                        let strat_signals = portfolio.strategy_signals_today(&strat.name).await?;
+                        metrics::record_bet(&strat.name, signal.source.as_str(), pb.bet_amount);
+                        metrics::record_bankroll(&strat.name, new_strat_bankroll);
+                        metrics::record_open_bets(open_count as u64);
+                        tracing::info!(
+                            strategy = %strat.name,
+                            market = %signal.question,
+                            side = %signal.side,
+                            cost = format_args!("€{:.2}", pb.bet_amount),
+                            edge = format_args!("+{:.1}%", signal.edge * 100.0),
+                            bankroll = format_args!("€{new_strat_bankroll:.2}"),
+                            "Bet placed"
+                        );
+
+                        bets_placed.push(format!(
+                            "{} {} €{:.2}",
+                            strat.label(),
+                            format::truncate(&signal.question, 40),
+                            pb.bet_amount,
+                        ));
+
+                        let news_section = if !signal.context.news_headlines.is_empty() {
+                            let headlines: Vec<String> = signal
+                                .context
+                                .news_headlines
+                                .iter()
+                                .take(3)
+                                .map(|h| format!("  • _{}_", format::truncate(h, 80)))
+                                .collect();
+                            format!("\n📰 *Triggered by:*\n{}\n", headlines.join("\n"))
+                        } else {
+                            String::new()
+                        };
+
+                        let side_emoji = match signal.side {
+                            BetSide::Yes => "🟢 YES",
+                            BetSide::No => "🔴 NO",
+                        };
+                        let msg = format!(
+                            "{label} *{strat_name}*\n\
+                             {signal_msg}\n\
+                             {news}\n\
+                             💸 *Bet: {side}*\n\
+                             💵 Stake: `€{cost:.2}` ({shares:.1} shares @ `{price:.1}¢`)\n\
+                             🏷 Fees: `€{fee:.2}` (slippage + trading)\n\
+                             💰 Strategy bankroll: `€{bankroll:.2}`\n\
+                             📊 Open bets: {open} | Strategy signals: {today}/{max}\n\
+                             ✅ _Correlation: {corr_reason}_",
+                            label = strat.label(),
+                            strat_name = strat.name,
+                            signal_msg = signal.to_telegram_message(),
+                            news = news_section,
+                            side = side_emoji,
+                            cost = pb.bet_amount,
+                            shares = pb.shares,
+                            price = pb.slipped_price * 100.0,
+                            fee = pb.fee,
+                            bankroll = new_strat_bankroll,
+                            open = open_count,
+                            today = strat_signals,
+                            max = strat.max_signals_per_day,
+                            corr_reason = decision.reason,
+                        );
+                        broadcast(notifier, portfolio, &msg).await;
+
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
-
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    Err(e) => {
+                        tracing::error!(
+                            strategy = %strat.name,
+                            err = %e,
+                            "Failed to place bet in DB"
+                        );
+                    }
                 }
             }
 
