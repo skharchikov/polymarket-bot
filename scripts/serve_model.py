@@ -17,6 +17,7 @@ Endpoints:
 import json
 import logging
 import os
+import structlog
 import subprocess
 import sys
 import threading
@@ -100,7 +101,16 @@ def _configure_logging() -> None:
 
 
 _configure_logging()
-log = logging.getLogger("sidecar")
+structlog.configure(
+    processors=[
+        structlog.stdlib.add_log_level,
+        structlog.processors.TimeStamper(fmt="%Y-%m-%dT%H:%M:%SZ", utc=True, key="ts"),
+        structlog.processors.JSONRenderer(),
+    ],
+    logger_factory=structlog.PrintLoggerFactory(),
+    cache_logger_on_first_use=True,
+)
+log = structlog.get_logger("sidecar")
 
 # ---------------------------------------------------------------------------
 
