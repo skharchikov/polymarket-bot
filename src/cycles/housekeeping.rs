@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::time::Duration;
 
 use crate::format;
-use crate::live::{broadcast, notify_owner, random_victory_gif, should_send_gif};
+use crate::live::{broadcast, notify_owner, random_victory_gif};
 use crate::metrics;
 use crate::scanner::live::LiveScanner;
 use crate::storage::portfolio::BetSide;
@@ -66,7 +66,7 @@ pub async fn housekeeping_cycle(
                         total_pnl = r.total_pnl,
                     );
                     broadcast(notifier, portfolio, &msg).await;
-                    if r.won && should_send_gif() {
+                    if r.won && r.cost > 0.0 && r.pnl / r.cost >= 1.5 {
                         let gif = random_victory_gif();
                         let subs = portfolio.telegram_subscribers().await.unwrap_or_default();
                         notifier.broadcast_animation(&subs, gif).await;

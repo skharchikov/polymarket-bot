@@ -40,16 +40,6 @@ pub fn random_victory_gif() -> &'static str {
     VICTORY_GIFS[seed % VICTORY_GIFS.len()]
 }
 
-/// ~30% chance of sending a victory GIF.
-pub fn should_send_gif() -> bool {
-    use std::time::SystemTime;
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
-    nanos % 100 < 30
-}
-
 /// Shared scan stats for heartbeat reporting.
 pub struct ScanStats {
     pub scans_completed: AtomicU64,
