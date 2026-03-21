@@ -205,7 +205,7 @@ fn compute_volatility(history: &[PriceTick], hours: usize) -> f64 {
     variance.sqrt()
 }
 
-/// Compute RSI on 0-1 scale.
+/// Compute RSI on 0-1 scale, time-weighted by the duration each price persisted.
 fn compute_rsi(history: &[PriceTick], period: usize) -> f64 {
     if history.len() < period + 1 {
         return 0.5;
@@ -213,18 +213,24 @@ fn compute_rsi(history: &[PriceTick], period: usize) -> f64 {
     let recent = &history[history.len() - period - 1..];
     let mut gains = 0.0;
     let mut losses = 0.0;
+    let mut total_time = 0.0;
 
     for w in recent.windows(2) {
         let delta = w[1].p - w[0].p;
+        let dt = (w[1].t - w[0].t).max(1) as f64;
+        total_time += dt;
         if delta > 0.0 {
-            gains += delta;
+            gains += delta * dt;
         } else {
-            losses -= delta;
+            losses -= delta * dt;
         }
     }
 
-    let avg_gain = gains / period as f64;
-    let avg_loss = losses / period as f64;
+    if total_time == 0.0 {
+        return 0.5;
+    }
+    let avg_gain = gains / total_time;
+    let avg_loss = losses / total_time;
 
     if avg_loss == 0.0 {
         return 1.0;
