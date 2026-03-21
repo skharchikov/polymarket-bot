@@ -145,6 +145,52 @@ impl PgPortfolio {
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
+    /// Persist a correlation-blocked signal so future checks treat it like an open bet.
+    pub async fn save_correlation_blocked(
+        &self,
+        market_id: &str,
+        question: &str,
+        side: &BetSide,
+        reason: &str,
+        end_date: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO correlation_blocked (market_id, question, side, reason, end_date) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(market_id)
+        .bind(question)
+        .bind(match side {
+            BetSide::Yes => "Yes",
+            BetSide::No => "No",
+        })
+        .bind(reason)
+        .bind(end_date)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Fetch recent correlation-blocked signals that are still relevant:
+    /// - has an end_date in the future, OR
+    /// - no end_date but was blocked within the last 7 days.
+    pub async fn recent_correlation_blocked(&self) -> Result<Vec<(String, BetSide)>> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT question, side FROM correlation_blocked \
+             WHERE (end_date IS NOT NULL AND end_date::timestamptz > NOW()) \
+                OR (end_date IS NULL AND created_at > NOW() - INTERVAL '7 days')",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(q, s)| {
+                let side = if s == "No" { BetSide::No } else { BetSide::Yes };
+                (q, side)
+            })
+            .collect())
+    }
+
     /// Market IDs that already have resolved bets — avoid re-betting.
     pub async fn resolved_bet_market_ids(&self) -> Result<Vec<String>> {
         let rows: Vec<(String,)> =

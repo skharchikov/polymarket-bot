@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::time::Duration;
 
 use crate::format;
-use crate::live::{broadcast, notify_owner, random_victory_gif};
+use crate::live::{broadcast, random_victory_gif};
 use crate::metrics;
 use crate::scanner::live::LiveScanner;
 use crate::storage::portfolio::BetSide;
@@ -243,9 +243,6 @@ pub async fn housekeeping_cycle(
             .await;
         let _ = portfolio.upsert_f64_pub("open_exposure", total_cost).await;
         metrics::record_unrealized_pnl(total_unrealized);
-
-        let msg = format::format_open_bets(&views, true);
-        notify_owner(notifier, &msg).await;
     }
 
     metrics::record_housekeeping();

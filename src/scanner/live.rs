@@ -1683,11 +1683,13 @@ impl LiveScanner {
         &self,
         candidates: &[(String, String, BetSide)],
         open_bets: &[crate::storage::portfolio::Bet],
+        blocked: &[(String, BetSide)],
     ) -> Result<Vec<CorrelationDecision>> {
-        let open: Vec<(String, BetSide)> = open_bets
+        let mut open: Vec<(String, BetSide)> = open_bets
             .iter()
             .map(|b| (b.question.clone(), b.side.clone()))
             .collect();
+        open.extend(blocked.iter().cloned());
         run_correlation_check(&self.openai_client, &self.cfg.llm_model, candidates, &open).await
     }
 }

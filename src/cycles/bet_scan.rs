@@ -215,6 +215,18 @@ pub async fn bet_scan_cycle(
                         reason = %decision.reason,
                         "Correlation check rejected candidate"
                     );
+                    if let Err(e) = portfolio
+                        .save_correlation_blocked(
+                            &signal.market_id,
+                            &signal.question,
+                            &signal.side,
+                            &decision.reason,
+                            signal.end_date.as_deref(),
+                        )
+                        .await
+                    {
+                        tracing::warn!(err = %e, "Failed to persist correlation block");
+                    }
                     let side_emoji = match signal.side {
                         BetSide::Yes => "🟢 YES",
                         BetSide::No => "🔴 NO",
