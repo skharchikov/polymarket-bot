@@ -65,6 +65,7 @@ except ImportError:
 FEATURE_COLS = [
     "yes_price",
     "momentum_1h",
+    "momentum_6h",
     "momentum_24h",
     "volatility_24h",
     "rsi",
@@ -75,6 +76,8 @@ FEATURE_COLS = [
     "price_change_1w",
     "days_since_created",
     "created_to_expiry_span",
+    "volatility_ratio",
+    "trend_consistency",
 ]
 
 # Binary category columns subject to target encoding (binary → historical YES rate)

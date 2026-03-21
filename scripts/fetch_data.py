@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import re
 import json
 import os
 import time
@@ -24,6 +25,25 @@ from urllib3.util.retry import Retry
 
 GAMMA_URL = "https://gamma-api.polymarket.com"
 CLOB_URL = "https://clob.polymarket.com"
+
+# Sports markets are excluded from training — our live data shows consistent
+# losses regardless of model version, and the model has no edge over sportsbooks.
+_SPORTS_RE = re.compile(
+    r"\b(nfl|nba|nhl|mlb|super\s+bowl|world\s+series|stanley\s+cup"
+    r"|premier\s+league|champions\s+league|world\s+cup|la\s+liga|serie\s+a"
+    r"|bundesliga|ligue\s+1|eredivisie|uefa|fifa"
+    r"|ufc|mma|boxing|fight|bout|knockout"
+    r"|formula\s*1|\bf1\b|nascar|motogp"
+    r"|tennis|atp|wta|wimbledon|grand\s+slam"
+    r"|basketball|soccer|football|hockey|baseball|cricket|rugby|golf"
+    r"|win\s+on\s+202\d|\bvs\.\s|\bspread:|\bo/u\s+\d|moneyline"
+    r"|match\s+result|correct\s+score)\b",
+    re.IGNORECASE,
+)
+
+
+def is_sports(question: str, category: str) -> bool:
+    return bool(_SPORTS_RE.search(f"{category} {question}"))
 
 
 class PolymarketScraper:
@@ -102,6 +122,12 @@ class PolymarketScraper:
                     outcome = False
                 else:
                     continue  # Skip unresolved or ambiguous
+
+                # Skip sports markets — no model edge over sportsbooks
+                question = m.get("question", "")
+                category = m.get("groupSlug") or m.get("category", "") or ""
+                if is_sports(question, category):
+                    continue
 
                 markets.append({
                     "market_id": m.get("id", ""),
@@ -231,6 +257,7 @@ def _extract_snapshot(prices: np.ndarray, timestamps: np.ndarray,
     p_24h = _price_at_offset(prices, timestamps, idx, hours=24)
 
     momentum_1h = current_price - p_1h if p_1h else 0.0
+    momentum_6h = current_price - p_6h if p_6h else 0.0
     momentum_24h = current_price - p_24h if p_24h else 0.0
 
     # Volatility: std of returns over last 24h of ticks
@@ -241,6 +268,29 @@ def _extract_snapshot(prices: np.ndarray, timestamps: np.ndarray,
         volatility = float(np.std(returns))
     else:
         volatility = 0.0
+
+    # Volatility 6h (for volatility_ratio)
+    lookback_6h = min(idx, 6)
+    window_6h = prices[idx - lookback_6h:idx + 1]
+    if len(window_6h) > 1:
+        returns_6h = np.diff(window_6h) / (window_6h[:-1] + 1e-10)
+        volatility_6h = float(np.std(returns_6h))
+    else:
+        volatility_6h = 0.0
+    volatility_ratio = min(volatility_6h / volatility, 5.0) if volatility > 1e-10 else 1.0
+
+    # Trend consistency: fraction of last 14 ticks aligned with net direction
+    period_tc = min(14, idx)
+    if period_tc > 0:
+        window_tc = prices[idx - period_tc:idx + 1]
+        net_tc = window_tc[-1] - window_tc[0]
+        if abs(net_tc) < 1e-10:
+            trend_consistency = 0.5
+        else:
+            moves_tc = np.diff(window_tc)
+            trend_consistency = float(np.sum(moves_tc * net_tc > 0) / len(moves_tc))
+    else:
+        trend_consistency = 0.5
 
     # RSI (14-period)
     rsi = _compute_rsi(prices[:idx + 1], period=14)
@@ -294,8 +344,11 @@ def _extract_snapshot(prices: np.ndarray, timestamps: np.ndarray,
         "price_6h_ago": p_6h,
         "price_24h_ago": p_24h,
         "momentum_1h": momentum_1h,
+        "momentum_6h": momentum_6h,
         "momentum_24h": momentum_24h,
         "volatility_24h": volatility,
+        "volatility_ratio": volatility_ratio,
+        "trend_consistency": trend_consistency,
         "rsi": rsi,
         "volume": market.get("volume_24h", volume),  # prefer 24h volume over total
         "liquidity": liquidity,
@@ -369,14 +422,16 @@ def fetch_bet_snapshots(database_url: str, scraper: PolymarketScraper,
     try:
         cur.execute("""
             SELECT b.market_id, b.side, b.entry_price, b.estimated_prob, b.confidence,
-                   b.edge, b.won, bf.features
+                   b.edge, b.won, bf.features, b.question
             FROM bets b
             JOIN bet_features bf ON bf.bet_id = b.id
             WHERE b.resolved = TRUE AND b.won IS NOT NULL
             ORDER BY b.placed_at
         """)
-        for market_id, side, entry_price, est_prob, confidence, edge, won, features_json in cur.fetchall():
+        for market_id, side, entry_price, est_prob, confidence, edge, won, features_json, question in cur.fetchall():
             if features_json is None:
+                continue
+            if is_sports(question or "", ""):
                 continue
             outcome_yes = won if side == "Yes" else not won
             snap = {k: float(v) if v is not None else 0.0 for k, v in features_json.items()}
@@ -421,6 +476,11 @@ def fetch_bet_snapshots(database_url: str, scraper: PolymarketScraper,
     for i, row in enumerate(legacy_rows):
         market_id, side, entry_price, est_prob, confidence, edge, won, placed_at, end_date, ctx = row
         outcome_yes = won if side == "Yes" else not won
+
+        # Skip sports bets from training data
+        ctx_category = ctx.get("category", "") if ctx and isinstance(ctx, dict) else ""
+        if is_sports("", ctx_category):
+            continue
 
         token_id = None
         if ctx and isinstance(ctx, dict):

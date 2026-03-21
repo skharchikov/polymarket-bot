@@ -24,10 +24,13 @@ pub struct OrderBookStats {
 /// the Python sidecar applies target encoding before model inference.
 ///
 /// v3: removed log_liquidity, is_politics, is_sports — zero SHAP importance.
+///
+/// v4: added momentum_6h, volatility_ratio, trend_consistency.
 #[derive(Debug, Clone, Serialize)]
 pub struct MarketFeatures {
     pub yes_price: f64,
     pub momentum_1h: f64,
+    pub momentum_6h: f64,
     pub momentum_24h: f64,
     pub volatility_24h: f64,
     pub rsi: f64,
@@ -40,6 +43,13 @@ pub struct MarketFeatures {
     // Temporal features (v2)
     pub days_since_created: f64,
     pub created_to_expiry_span: f64,
+    // Momentum quality features (v4)
+    /// Ratio of short-term (6h) to long-term (24h) volatility.
+    /// > 1 means uncertainty is expanding; < 1 means market is settling.
+    pub volatility_ratio: f64,
+    /// Fraction of last 14 ticks moving in the same direction as net momentum.
+    /// High = consistent trend; low = noisy chop.
+    pub trend_consistency: f64,
 }
 
 impl MarketFeatures {
@@ -47,6 +57,7 @@ impl MarketFeatures {
     pub const NAMES: &[&str] = &[
         "yes_price",
         "momentum_1h",
+        "momentum_6h",
         "momentum_24h",
         "volatility_24h",
         "rsi",
@@ -57,6 +68,8 @@ impl MarketFeatures {
         "price_change_1w",
         "days_since_created",
         "created_to_expiry_span",
+        "volatility_ratio",
+        "trend_consistency",
     ];
 
     /// Convert to fixed-order f64 vector for model input.
@@ -64,6 +77,7 @@ impl MarketFeatures {
         vec![
             self.yes_price,
             self.momentum_1h,
+            self.momentum_6h,
             self.momentum_24h,
             self.volatility_24h,
             self.rsi,
@@ -74,6 +88,8 @@ impl MarketFeatures {
             self.price_change_1w,
             self.days_since_created,
             self.created_to_expiry_span,
+            self.volatility_ratio,
+            self.trend_consistency,
         ]
     }
 
@@ -101,13 +117,25 @@ impl MarketFeatures {
 
         // Price lookbacks
         let p_1h = price_at_offset(history, now_ts, 3600);
+        let p_6h = price_at_offset(history, now_ts, 21600);
         let p_24h = price_at_offset(history, now_ts, 86400);
 
         let momentum_1h = p_1h.map(|p| current_price - p).unwrap_or(0.0);
+        let momentum_6h = p_6h.map(|p| current_price - p).unwrap_or(0.0);
         let momentum_24h = p_24h.map(|p| current_price - p).unwrap_or(0.0);
 
         // Volatility: std of returns over recent ticks
         let volatility_24h = compute_volatility(history, 24);
+        let volatility_6h = compute_volatility(history, 6);
+        // > 1: short-term vol expanding; < 1: market settling
+        let volatility_ratio = if volatility_24h > 1e-10 {
+            (volatility_6h / volatility_24h).clamp(0.0, 5.0)
+        } else {
+            1.0
+        };
+
+        // Trend consistency: fraction of last 14 ticks moving with net momentum
+        let trend_consistency = compute_trend_consistency(history, 14);
 
         // RSI (14-period)
         let rsi = compute_rsi(history, 14);
@@ -152,6 +180,7 @@ impl MarketFeatures {
         Self {
             yes_price: current_price,
             momentum_1h,
+            momentum_6h,
             momentum_24h,
             volatility_24h,
             rsi,
@@ -162,6 +191,8 @@ impl MarketFeatures {
             price_change_1w,
             days_since_created,
             created_to_expiry_span,
+            volatility_ratio,
+            trend_consistency,
         }
     }
 }
@@ -203,6 +234,23 @@ fn compute_volatility(history: &[PriceTick], hours: usize) -> f64 {
     let mean = returns.iter().sum::<f64>() / returns.len() as f64;
     let variance = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64;
     variance.sqrt()
+}
+
+/// Fraction of the last `period` ticks moving in the same direction as net momentum.
+/// Returns 0.5 when there is no history or no net movement.
+/// High (> 0.7) = consistent trend; low (< 0.4) = noisy chop.
+fn compute_trend_consistency(history: &[PriceTick], period: usize) -> f64 {
+    if history.len() < period + 1 {
+        return 0.5;
+    }
+    let recent = &history[history.len() - period - 1..];
+    let net = recent.last().unwrap().p - recent.first().unwrap().p;
+    if net.abs() < 1e-10 {
+        return 0.5;
+    }
+    let moves: Vec<f64> = recent.windows(2).map(|w| w[1].p - w[0].p).collect();
+    let aligned = moves.iter().filter(|&&m| m * net > 0.0).count();
+    aligned as f64 / moves.len() as f64
 }
 
 /// Compute RSI on 0-1 scale, time-weighted by the duration each price persisted.
@@ -308,6 +356,7 @@ mod tests {
         let features = MarketFeatures {
             yes_price: 0.5,
             momentum_1h: 0.01,
+            momentum_6h: 0.005,
             momentum_24h: -0.02,
             volatility_24h: 0.05,
             rsi: 0.55,
@@ -318,6 +367,8 @@ mod tests {
             price_change_1w: -0.05,
             days_since_created: 20.0,
             created_to_expiry_span: 30.0,
+            volatility_ratio: 1.2,
+            trend_consistency: 0.6,
         };
         assert_eq!(features.to_vec().len(), MarketFeatures::NAMES.len());
     }
