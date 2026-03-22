@@ -827,22 +827,38 @@ impl LiveScanner {
     ) -> Result<ScanResult> {
         // Step 1: Fetch all active markets
         let markets = self.fetch_active_markets().await?;
-        tracing::info!(total = markets.len(), "Fetched active markets");
+        let total = markets.len();
+        tracing::info!(total, "Fetched active markets");
 
-        let eligible: Vec<GammaMarket> = markets
+        let m = markets;
+        let m: Vec<_> = m.into_iter().filter(|m| m.is_binary()).collect();
+        let n_binary = m.len();
+        let m: Vec<_> = m
             .into_iter()
-            .filter(|m| m.is_binary())
             .filter(|m| m.volume_num >= self.cfg.min_volume)
+            .collect();
+        let n_volume = m.len();
+        let m: Vec<_> = m
+            .into_iter()
             .filter(|m| m.yes_token_id().is_some())
             .filter(|m| self.expires_within_window(m.end_date.as_deref()))
+            .collect();
+        let n_expiry = m.len();
+        let m: Vec<_> = m
+            .into_iter()
             .filter(|m| !skip_market_ids.contains(&m.market_id))
-            .filter(|m| {
-                // Skip markets belonging to an event we already have a bet on
-                match m.event_slug() {
-                    Some(slug) => !skip_event_slugs.iter().any(|s| s == slug),
-                    None => true,
-                }
+            .collect();
+        let n_skip = m.len();
+        let m: Vec<_> = m
+            .into_iter()
+            .filter(|m| match m.event_slug() {
+                Some(slug) => !skip_event_slugs.iter().any(|s| s == slug),
+                None => true,
             })
+            .collect();
+        let n_event = m.len();
+        let eligible: Vec<GammaMarket> = m
+            .into_iter()
             .filter(|m| {
                 let price = Self::get_yes_price(m).unwrap_or(0.0);
                 price > self.cfg.min_price && price < self.cfg.max_price
@@ -850,8 +866,14 @@ impl LiveScanner {
             .collect();
 
         tracing::info!(
+            total,
+            binary = n_binary,
+            volume = n_volume,
+            expiry = n_expiry,
+            skip_ids = n_skip,
+            event_slug = n_event,
             eligible = eligible.len(),
-            "Eligible markets (vol>${}, ≤{}d expiry)",
+            "Market filter breakdown (vol>${}, ≤{}d expiry)",
             self.cfg.min_volume,
             self.cfg.max_days_to_expiry,
         );
