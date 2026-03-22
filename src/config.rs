@@ -175,7 +175,7 @@ pub struct AppConfig {
     pub copy_trade_enabled: bool,
 
     /// Copy trading poll interval in minutes.
-    #[config(env = "COPY_TRADE_INTERVAL_MINS", default = 5)]
+    #[config(env = "COPY_TRADE_INTERVAL_MINS", default = 1)]
     pub copy_trade_interval_mins: u64,
 }
 
@@ -233,7 +233,7 @@ impl AppConfig {
             model_sidecar_url: String::new(),
             metrics_port: 9000,
             copy_trade_enabled: false,
-            copy_trade_interval_mins: 5,
+            copy_trade_interval_mins: 1,
         }
     }
 }
