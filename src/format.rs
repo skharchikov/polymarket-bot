@@ -480,6 +480,7 @@ mod tests {
             won: None,
             pnl: None,
             resolved_at: None,
+            copy_ref: None,
         }
     }
 
