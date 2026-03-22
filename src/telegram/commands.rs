@@ -35,7 +35,7 @@ pub async fn handle_command(
                  Commands:\n\
                  /stats — portfolio statistics\n\
                  /open — open model positions\n\
-                 /positions — open copy-trade positions\n\
+                 /opencopy — open copy-trade positions\n\
                  /brier — model accuracy\n\
                  /health — bot health\n\
                  /traders — followed traders\n\
@@ -57,7 +57,7 @@ pub async fn handle_command(
                 "⚠️ Failed to load open bets".to_string()
             }
         },
-        "positions" => match portfolio.open_copy_summary().await {
+        "opencopy" => match portfolio.open_copy_summary().await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(err = %e, "Failed to build copy positions");
@@ -195,7 +195,7 @@ pub async fn handle_command(
         "help" => "📖 *Commands*\n\n\
                  /stats — portfolio statistics\n\
                  /open — open model positions\n\
-                 /positions — open copy-trade positions\n\
+                 /opencopy — open copy-trade positions\n\
                  /brier — model accuracy\n\
                  /health — bot health & uptime\n\
                  /traders — followed traders\n\
