@@ -211,8 +211,12 @@ pub struct SourceStats {
 pub struct CopyTradeSummary {
     pub traders: usize,
     pub open: usize,
+    pub wins: usize,
+    pub losses: usize,
     pub pnl: f64,
     pub bankroll: f64,
+    pub unrealized: f64,
+    pub exposure: f64,
 }
 
 /// All data required to render the `/stats` message.
@@ -223,8 +227,8 @@ pub struct StatsData {
     pub total_wins: usize,
     pub total_losses: usize,
     pub total_open: usize,
-    pub unrealized: f64,
-    pub exposure: f64,
+    pub ml_unrealized: f64,
+    pub ml_exposure: f64,
     pub strategies: Vec<StratStats>,
     pub sources: Vec<SourceStats>,
     pub copy_trade: Option<CopyTradeSummary>,
@@ -239,10 +243,10 @@ pub fn format_stats(data: &StatsData) -> String {
     };
     let total_wr = win_rate(data.total_wins, data.total_losses);
 
-    let unrealized_section = if data.total_open > 0 {
+    let ml_unrealized_section = if data.total_open > 0 {
         format!(
             "\n📈 Unrealized: `€{:+.2}` (€{:.2} deployed)\n",
-            data.unrealized, data.exposure
+            data.ml_unrealized, data.ml_exposure
         )
     } else {
         String::new()
@@ -313,18 +317,37 @@ pub fn format_stats(data: &StatsData) -> String {
     };
 
     let copy_section = match &data.copy_trade {
-        Some(ct) if ct.traders > 0 => format!(
-            "\n\n👥 *Copy Trading*: {} traders | `€{:.2}` | {} open | PnL `€{:+.2}`",
-            ct.traders, ct.bankroll, ct.open, ct.pnl
-        ),
+        Some(ct) if ct.traders > 0 => {
+            let copy_wr = win_rate(ct.wins, ct.losses);
+            let copy_unrealized = if ct.open > 0 {
+                format!(
+                    "\n  📈 Unrealized: `€{:+.2}` (€{:.2} deployed)",
+                    ct.unrealized, ct.exposure
+                )
+            } else {
+                String::new()
+            };
+            format!(
+                "\n\n👥 *Copy Trading* ({} traders)\n\
+                 \u{00a0}\u{00a0}💰 `€{bankroll:.2}` | PnL `€{pnl:+.2}`\n\
+                 \u{00a0}\u{00a0}📋 {wins}W/{losses}L ({wr:.0}%) | {open} open{copy_unrealized}",
+                ct.traders,
+                bankroll = ct.bankroll,
+                pnl = ct.pnl,
+                wins = ct.wins,
+                losses = ct.losses,
+                wr = copy_wr,
+                open = ct.open,
+            )
+        }
         _ => String::new(),
     };
 
     format!(
         "📊 *Bot Statistics*\n\n\
          {bankroll_line}\n\
-         💵 Realized PnL: `€{pnl:+.2}` | ROI: `{roi:+.1}%`\n\
-         {unrealized_section}\
+         💵 ML PnL: `€{pnl:+.2}` | ROI: `{roi:+.1}%`\n\
+         {ml_unrealized_section}\
          📋 {wins}W / {losses}L ({wr:.0}%) | {open} open\n\n\
          {strat_details}{source_section}{copy_section}",
         pnl = data.total_pnl,
@@ -649,8 +672,8 @@ mod tests {
             total_wins: 0,
             total_losses: 0,
             total_open: 0,
-            unrealized: 0.0,
-            exposure: 0.0,
+            ml_unrealized: 0.0,
+            ml_exposure: 0.0,
             strategies: vec![],
             sources: vec![],
             copy_trade: None,

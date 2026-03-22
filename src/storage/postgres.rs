@@ -330,11 +330,11 @@ impl PgPortfolio {
             });
         }
 
-        // Fetch live unrealized PnL from current market prices
-        let (unrealized, exposure) = if total_open > 0 {
+        // Fetch live unrealized PnL from current market prices (split ML vs copy)
+        let ((ml_unrealized, ml_exposure), (copy_unrealized, copy_exposure)) = if !open.is_empty() {
             self.live_unrealized().await
         } else {
-            (0.0, 0.0)
+            ((0.0, 0.0), (0.0, 0.0))
         };
 
         // Copy-trade aggregate
@@ -346,20 +346,29 @@ impl PgPortfolio {
             let strat = format!("copy:{short}");
             copy_bankroll += self.strategy_bankroll(&strat).await.unwrap_or(0.0);
         }
+        let copy_resolved: Vec<_> = resolved
+            .iter()
+            .filter(|b| b.strategy.starts_with("copy:"))
+            .collect();
         let copy_open = open
             .iter()
             .filter(|b| b.strategy.starts_with("copy:"))
             .count();
-        let copy_pnl: f64 = resolved
+        let copy_wins = copy_resolved.iter().filter(|b| b.won == Some(true)).count();
+        let copy_losses = copy_resolved
             .iter()
-            .filter(|b| b.strategy.starts_with("copy:"))
-            .filter_map(|b| b.pnl)
-            .sum();
+            .filter(|b| b.won == Some(false))
+            .count();
+        let copy_pnl: f64 = copy_resolved.iter().filter_map(|b| b.pnl).sum();
         let copy_trade = Some(crate::format::CopyTradeSummary {
             traders: copy_traders,
             open: copy_open,
+            wins: copy_wins,
+            losses: copy_losses,
             pnl: copy_pnl,
             bankroll: copy_bankroll,
+            unrealized: copy_unrealized,
+            exposure: copy_exposure,
         });
 
         let stats_data = crate::format::StatsData {
@@ -369,8 +378,8 @@ impl PgPortfolio {
             total_wins,
             total_losses,
             total_open,
-            unrealized,
-            exposure,
+            ml_unrealized,
+            ml_exposure,
             strategies: strat_stats,
             sources: source_stats,
             copy_trade,
@@ -416,17 +425,17 @@ impl PgPortfolio {
         Ok(format::format_open_bets(&views, false))
     }
 
-    /// Fetch live unrealized PnL and exposure for open bets.
-    async fn live_unrealized(&self) -> (f64, f64) {
+    /// Fetch live unrealized PnL and exposure, split into (ml, copy) tuples of (unrealized, exposure).
+    async fn live_unrealized(&self) -> ((f64, f64), (f64, f64)) {
         use crate::data::models::fetch_yes_prices;
         use crate::storage::portfolio::BetSide;
 
         let open = match self.open_bets().await {
             Ok(b) => b,
-            Err(_) => return (0.0, 0.0),
+            Err(_) => return ((0.0, 0.0), (0.0, 0.0)),
         };
         if open.is_empty() {
-            return (0.0, 0.0);
+            return ((0.0, 0.0), (0.0, 0.0));
         }
 
         let http = match reqwest::Client::builder()
@@ -434,25 +443,41 @@ impl PgPortfolio {
             .build()
         {
             Ok(c) => c,
-            Err(_) => return (0.0, 0.0),
+            Err(_) => return ((0.0, 0.0), (0.0, 0.0)),
         };
 
         let ids: Vec<&str> = open.iter().map(|b| b.market_id.as_str()).collect();
         let prices = fetch_yes_prices(&http, &ids).await;
 
-        let mut unrealized = 0.0_f64;
-        let mut exposure = 0.0_f64;
+        let mut ml_unrealized = 0.0_f64;
+        let mut ml_exposure = 0.0_f64;
+        let mut copy_unrealized = 0.0_f64;
+        let mut copy_exposure = 0.0_f64;
+
         for (bet, yes_price) in open.iter().zip(prices) {
-            exposure += bet.cost;
+            let is_copy = bet.strategy.starts_with("copy:");
+            if is_copy {
+                copy_exposure += bet.cost;
+            } else {
+                ml_exposure += bet.cost;
+            }
             if let Some(yp) = yes_price {
                 let cur = match bet.side {
                     BetSide::Yes => yp,
                     BetSide::No => 1.0 - yp,
                 };
-                unrealized += bet.shares * cur - bet.cost;
+                let pnl = bet.shares * cur - bet.cost;
+                if is_copy {
+                    copy_unrealized += pnl;
+                } else {
+                    ml_unrealized += pnl;
+                }
             }
         }
-        (unrealized, exposure)
+        (
+            (ml_unrealized, ml_exposure),
+            (copy_unrealized, copy_exposure),
+        )
     }
 
     /// Build a model accuracy summary for /brier command.
