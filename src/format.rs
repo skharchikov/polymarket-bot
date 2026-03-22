@@ -212,11 +212,12 @@ pub struct CopyTradeSummary {
     pub traders: usize,
     pub open: usize,
     pub pnl: f64,
+    pub bankroll: f64,
 }
 
 /// All data required to render the `/stats` message.
 pub struct StatsData {
-    pub total_bankroll: f64,
+    pub ml_bankroll: f64,
     pub starting: f64,
     pub total_pnl: f64,
     pub total_wins: usize,
@@ -289,23 +290,43 @@ pub fn format_stats(data: &StatsData) -> String {
         format!("\n\n📡 *By Source*\n{}", source_lines.join("\n"))
     };
 
+    let copy_bankroll = data
+        .copy_trade
+        .as_ref()
+        .map(|ct| ct.bankroll)
+        .unwrap_or(0.0);
+    let total_bankroll = data.ml_bankroll + copy_bankroll;
+
+    let bankroll_line = if copy_bankroll > 0.0 {
+        format!(
+            "💰 Bankroll: `€{total:.2}` (ML `€{ml:.2}` + Copy `€{copy:.2}`) | started: `€{starting:.2}`",
+            total = total_bankroll,
+            ml = data.ml_bankroll,
+            copy = copy_bankroll,
+            starting = data.starting,
+        )
+    } else {
+        format!(
+            "💰 Bankroll: `€{:.2}` (started: `€{:.2}`)",
+            data.ml_bankroll, data.starting,
+        )
+    };
+
     let copy_section = match &data.copy_trade {
         Some(ct) if ct.traders > 0 => format!(
-            "\n\n👥 *Copy Trading*: {} traders | {} open | PnL `€{:+.2}`",
-            ct.traders, ct.open, ct.pnl
+            "\n\n👥 *Copy Trading*: {} traders | `€{:.2}` | {} open | PnL `€{:+.2}`",
+            ct.traders, ct.bankroll, ct.open, ct.pnl
         ),
         _ => String::new(),
     };
 
     format!(
         "📊 *Bot Statistics*\n\n\
-         💰 Bankroll: `€{bankroll:.2}` (started: `€{starting:.2}`)\n\
+         {bankroll_line}\n\
          💵 Realized PnL: `€{pnl:+.2}` | ROI: `{roi:+.1}%`\n\
          {unrealized_section}\
          📋 {wins}W / {losses}L ({wr:.0}%) | {open} open\n\n\
          {strat_details}{source_section}{copy_section}",
-        bankroll = data.total_bankroll,
-        starting = data.starting,
         pnl = data.total_pnl,
         roi = total_roi,
         wins = data.total_wins,
@@ -620,9 +641,9 @@ mod tests {
         assert!(output.contains("€25.00")); // total cost
     }
 
-    fn make_stats(starting: f64, total_bankroll: f64, total_pnl: f64) -> StatsData {
+    fn make_stats(starting: f64, ml_bankroll: f64, total_pnl: f64) -> StatsData {
         StatsData {
-            total_bankroll,
+            ml_bankroll,
             starting,
             total_pnl,
             total_wins: 0,

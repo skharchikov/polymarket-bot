@@ -338,11 +338,14 @@ impl PgPortfolio {
         };
 
         // Copy-trade aggregate
-        let copy_traders = self
-            .get_active_traders()
-            .await
-            .map(|v| v.len())
-            .unwrap_or(0);
+        let active_traders = self.get_active_traders().await.unwrap_or_default();
+        let copy_traders = active_traders.len();
+        let mut copy_bankroll = 0.0_f64;
+        for trader in &active_traders {
+            let short = &trader.proxy_wallet[..8.min(trader.proxy_wallet.len())];
+            let strat = format!("copy:{short}");
+            copy_bankroll += self.strategy_bankroll(&strat).await.unwrap_or(0.0);
+        }
         let copy_open = open
             .iter()
             .filter(|b| b.strategy.starts_with("copy:"))
@@ -356,10 +359,11 @@ impl PgPortfolio {
             traders: copy_traders,
             open: copy_open,
             pnl: copy_pnl,
+            bankroll: copy_bankroll,
         });
 
         let stats_data = crate::format::StatsData {
-            total_bankroll,
+            ml_bankroll: total_bankroll,
             starting,
             total_pnl,
             total_wins,
