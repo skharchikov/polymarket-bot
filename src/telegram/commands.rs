@@ -34,7 +34,8 @@ pub async fn handle_command(
                 "👋 Hi {name}! I'm the Polymarket Signal Bot.\n\n\
                  Commands:\n\
                  /stats — portfolio statistics\n\
-                 /open — open positions\n\
+                 /open — open model positions\n\
+                 /positions — open copy-trade positions\n\
                  /brier — model accuracy\n\
                  /health — bot health\n\
                  /traders — followed traders\n\
@@ -54,6 +55,13 @@ pub async fn handle_command(
             Err(e) => {
                 tracing::warn!(err = %e, "Failed to build open bets");
                 "⚠️ Failed to load open bets".to_string()
+            }
+        },
+        "positions" => match portfolio.open_copy_summary().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(err = %e, "Failed to build copy positions");
+                "⚠️ Failed to load copy positions".to_string()
             }
         },
         "brier" => match portfolio.brier_summary().await {
@@ -186,7 +194,8 @@ pub async fn handle_command(
         }
         "help" => "📖 *Commands*\n\n\
                  /stats — portfolio statistics\n\
-                 /open — open positions\n\
+                 /open — open model positions\n\
+                 /positions — open copy-trade positions\n\
                  /brier — model accuracy\n\
                  /health — bot health & uptime\n\
                  /traders — followed traders\n\

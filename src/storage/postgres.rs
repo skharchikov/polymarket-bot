@@ -388,18 +388,38 @@ impl PgPortfolio {
         Ok(crate::format::format_stats(&stats_data))
     }
 
-    /// Build a summary of open bets for /open command.
+    /// Build a summary of open ML bets for /open command.
     #[tracing::instrument(skip(self))]
     pub async fn open_bets_summary(&self) -> Result<String> {
+        self.open_bets_summary_filtered(false).await
+    }
+
+    /// Build a summary of open copy-trade positions for /positions command.
+    #[tracing::instrument(skip(self))]
+    pub async fn open_copy_summary(&self) -> Result<String> {
+        self.open_bets_summary_filtered(true).await
+    }
+
+    async fn open_bets_summary_filtered(&self, copy_only: bool) -> Result<String> {
         use crate::data::models::fetch_yes_prices;
         use crate::format::{self, OpenBetView};
 
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()?;
-        let open = self.open_bets().await?;
+        let all_open = self.open_bets().await?;
+        let open: Vec<_> = all_open
+            .iter()
+            .filter(|b| b.strategy.starts_with("copy:") == copy_only)
+            .collect();
+
+        let empty_msg = if copy_only {
+            "📭 No open copy-trade positions"
+        } else {
+            "📭 No open model positions"
+        };
         if open.is_empty() {
-            return Ok("📭 No open bets".to_string());
+            return Ok(empty_msg.to_string());
         }
 
         let ids: Vec<&str> = open.iter().map(|b| b.market_id.as_str()).collect();
