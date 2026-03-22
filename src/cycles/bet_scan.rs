@@ -267,6 +267,7 @@ pub async fn bet_scan_cycle(
                     url: signal.polymarket_url.clone(),
                     event_slug: signal.event_slug.clone(),
                     features: signal.features.clone(),
+                    copy_ref: None,
                 };
 
                 // Log prediction for Brier score tracking

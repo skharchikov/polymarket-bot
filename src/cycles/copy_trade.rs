@@ -8,7 +8,7 @@ use crate::metrics;
 use crate::pricing::kelly::fractional_kelly;
 use crate::scanner::copy_trader::{CopyTraderMonitor, fetch_trader_username};
 use crate::scanner::live::{LiveScanner, SignalSource};
-use crate::storage::portfolio::{BetSide, NewBet};
+use crate::storage::portfolio::{BetSide, CopyRef, NewBet};
 use crate::storage::postgres::PgPortfolio;
 use crate::telegram::notifier::TelegramNotifier;
 
@@ -297,6 +297,12 @@ pub async fn copy_trade_cycle(
             url: market.polymarket_url(),
             event_slug: market.event_slug().map(String::from),
             features: None,
+            copy_ref: Some(CopyRef {
+                trader: trader_display.clone(),
+                wallet: dt.trader_wallet.clone(),
+                price: trade.price,
+                size_usd: trade.size_usd,
+            }),
         };
 
         // Log prediction for model learning (Brier score tracking)

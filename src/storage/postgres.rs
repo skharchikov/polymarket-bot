@@ -4,7 +4,7 @@ use sqlx::PgPool;
 
 use crate::scanner::live::RejectedSignal;
 
-use super::portfolio::{Bet, BetContext, BetSide, NewBet};
+use super::portfolio::{Bet, BetContext, BetSide, CopyRef, NewBet};
 
 /// Returned from resolve_bet with all context needed for a rich Telegram message.
 #[allow(dead_code)]
@@ -739,10 +739,15 @@ impl PgPortfolio {
 
         let mut tx = self.pool.begin().await?;
 
+        let copy_ref_json = bet
+            .copy_ref
+            .as_ref()
+            .map(|c| serde_json::to_value(c).unwrap_or_default());
+
         let row: (i32,) = sqlx::query_as(
             "INSERT INTO bets (market_id, question, side, entry_price, slipped_price, shares, cost, fee_paid, \
-             estimated_prob, confidence, edge, kelly_size, reasoning, end_date, context, strategy, source, url, event_slug) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING id",
+             estimated_prob, confidence, edge, kelly_size, reasoning, end_date, context, strategy, source, url, event_slug, copy_ref) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING id",
         )
         .bind(&bet.market_id)
         .bind(&bet.question)
@@ -763,6 +768,7 @@ impl PgPortfolio {
         .bind(&bet.source)
         .bind(&bet.url)
         .bind(bet.event_slug.as_deref())
+        .bind(copy_ref_json)
         .fetch_one(&mut *tx)
         .await?;
 
@@ -1400,6 +1406,7 @@ struct BetRow {
     won: Option<bool>,
     pnl: Option<f64>,
     resolved_at: Option<DateTime<Utc>>,
+    copy_ref: Option<serde_json::Value>,
 }
 
 impl BetRow {
@@ -1410,6 +1417,7 @@ impl BetRow {
             BetSide::Yes
         };
         let context: Option<BetContext> = self.context.and_then(|v| serde_json::from_value(v).ok());
+        let copy_ref: Option<CopyRef> = self.copy_ref.and_then(|v| serde_json::from_value(v).ok());
 
         Bet {
             id: self.id,
@@ -1437,6 +1445,7 @@ impl BetRow {
             won: self.won,
             pnl: self.pnl,
             resolved_at: self.resolved_at,
+            copy_ref,
         }
     }
 }

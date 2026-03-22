@@ -30,6 +30,15 @@ pub struct BetContext {
     pub news_headlines: Vec<String>,
 }
 
+/// Original trade details from the copied trader — stored for PnL comparison on resolution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CopyRef {
+    pub trader: String,
+    pub wallet: String,
+    pub price: f64,
+    pub size_usd: f64,
+}
+
 /// Parameters for placing a new bet.
 pub struct NewBet {
     pub market_id: String,
@@ -53,6 +62,8 @@ pub struct NewBet {
     pub event_slug: Option<String>,
     /// Exact feature vector at bet-placement time for online learning.
     pub features: Option<crate::model::features::MarketFeatures>,
+    /// Original trader's trade details, set only for copy-trade bets.
+    pub copy_ref: Option<CopyRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +99,8 @@ pub struct Bet {
     pub won: Option<bool>,
     pub pnl: Option<f64>,
     pub resolved_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub copy_ref: Option<CopyRef>,
 }
 
 fn default_strategy() -> String {
