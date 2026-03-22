@@ -18,6 +18,8 @@ pub const COPY_TRADER_STARTING_BANKROLL: f64 = 1000.0;
 const KELLY_FRACTION: f64 = 0.25;
 /// Minimum bet size.
 const MIN_BET: f64 = 3.0;
+/// Maximum allowed price drift from trader's entry before skipping.
+const MAX_PRICE_DRIFT: f64 = 0.05; // 5 percentage points
 
 pub async fn copy_trade_cycle(
     portfolio: &PgPortfolio,
@@ -186,6 +188,29 @@ pub async fn copy_trade_cycle(
                 "Copy-trade skip: same event already bet on"
             );
             continue;
+        }
+
+        // Price drift check — skip if market has moved too far from trader's entry.
+        let current_yes_price = {
+            let ids = [market.market_id.as_str()];
+            fetch_yes_prices(&http, &ids)
+                .await
+                .into_iter()
+                .next()
+                .flatten()
+        };
+        if let Some(current) = current_yes_price {
+            let drift = (current - trade.price).abs();
+            if drift > MAX_PRICE_DRIFT {
+                tracing::info!(
+                    market = %market.market_id,
+                    trader_price = trade.price,
+                    current_price = current,
+                    drift = drift,
+                    "Copy-trade skip: price drifted too far"
+                );
+                continue;
+            }
         }
 
         // Get trader's dedicated bankroll

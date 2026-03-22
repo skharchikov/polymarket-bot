@@ -6,11 +6,15 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use futures_util::future::join_all;
 use reqwest::Client;
 use serde::Deserialize;
 use std::time::Duration;
 
 use crate::storage::postgres::{NewCopyTradeEvent, PgPortfolio};
+
+/// Trades older than this are skipped — price has likely moved too far.
+const STALE_TRADE_SECS: i64 = 300; // 5 minutes
 
 const DATA_API: &str = "https://data-api.polymarket.com";
 /// Default HTTP timeout for all data-API calls.
@@ -364,8 +368,8 @@ impl CopyTraderMonitor {
         Ok(trades)
     }
 
-    /// Iterate over all active traders, poll their recent activity, deduplicate
-    /// against the `copy_trade_events` table, and return unseen trades.
+    /// Iterate over all active traders, poll their recent activity in parallel,
+    /// deduplicate against the `copy_trade_events` table, and return unseen trades.
     ///
     /// Each new trade is persisted to `copy_trade_events` before being returned
     /// so subsequent calls within the same run do not emit the same signal twice.
@@ -378,26 +382,35 @@ impl CopyTraderMonitor {
 
         tracing::info!(count = traders.len(), "Polling active traders");
 
-        let mut detected = Vec::new();
-
-        for trader in &traders {
-            // Use last_checked_at as the lookback window; fall back to 24 h.
+        // Poll all traders concurrently.
+        let poll_futures = traders.iter().map(|trader| {
             let since = trader
                 .last_checked_at
                 .unwrap_or_else(|| Utc::now() - chrono::Duration::hours(24));
-
             let name = trader
                 .username
                 .as_deref()
-                .unwrap_or(&trader.proxy_wallet[..8.min(trader.proxy_wallet.len())]);
+                .unwrap_or(&trader.proxy_wallet[..8.min(trader.proxy_wallet.len())])
+                .to_string();
             tracing::info!(
                 trader = %name,
                 wallet = %trader.proxy_wallet,
                 since = %since.format("%Y-%m-%d %H:%M"),
                 "Polling trader"
             );
+            async move {
+                let result = self.poll_trader_activity(&trader.proxy_wallet, since).await;
+                (trader, name, result)
+            }
+        });
+        let poll_results = join_all(poll_futures).await;
 
-            let trades = match self.poll_trader_activity(&trader.proxy_wallet, since).await {
+        let now = Utc::now();
+        let mut detected = Vec::new();
+
+        // Process results sequentially for DB deduplication.
+        for (trader, name, poll_result) in poll_results {
+            let trades = match poll_result {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::warn!(
@@ -412,8 +425,16 @@ impl CopyTraderMonitor {
 
             let mut new_count = 0usize;
             let mut skipped_count = 0usize;
+            let mut stale_count = 0usize;
 
             for trade in trades {
+                // Skip trades that are too old — market price has likely moved.
+                let age_secs = (now - trade.timestamp).num_seconds();
+                if age_secs > STALE_TRADE_SECS {
+                    stale_count += 1;
+                    continue;
+                }
+
                 let already_seen = portfolio
                     .is_copy_trade_seen(
                         &trader.proxy_wallet,
@@ -455,6 +476,7 @@ impl CopyTraderMonitor {
                 trader = %name,
                 new = new_count,
                 skipped = skipped_count,
+                stale = stale_count,
                 "Trader poll complete"
             );
 
