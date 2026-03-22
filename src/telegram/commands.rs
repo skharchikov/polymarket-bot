@@ -101,7 +101,7 @@ pub async fn handle_command(
                     let strat_key = format!("copy:{short}");
                     if let Err(e) = portfolio
                         .ensure_key(
-                            &strat_key,
+                            &format!("bankroll:{strat_key}"),
                             crate::cycles::copy_trade::COPY_TRADER_STARTING_BANKROLL,
                         )
                         .await
