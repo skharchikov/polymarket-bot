@@ -64,6 +64,15 @@ pub async fn copy_trade_cycle(
         let wallet_short = &dt.trader_wallet[..8.min(dt.trader_wallet.len())];
         let strategy_name = format!("copy:{wallet_short}");
 
+        tracing::info!(
+            trader = wallet_short,
+            side = %trade.side,
+            slug = %trade.slug,
+            price = trade.price,
+            size_usd = trade.size_usd,
+            "Processing copy-trade signal"
+        );
+
         // Mirror exits: if the trader sold a position we copied, exit ours too.
         if trade.side == "SELL" {
             // Resolve slug → Gamma numeric ID to match against bets table
@@ -175,7 +184,7 @@ pub async fn copy_trade_cycle(
 
         // Skip if we already have an open bet on this market (use Gamma numeric ID)
         if skip_ids.contains(&market.market_id) {
-            tracing::debug!(market = %market.market_id, "Copy-trade skip: already have open bet");
+            tracing::info!(market = %market.market_id, trader = wallet_short, "Copy-trade skip: already have open bet");
             continue;
         }
 
@@ -183,8 +192,9 @@ pub async fn copy_trade_cycle(
         if let Some(slug) = market.event_slug()
             && skip_event_slugs.iter().any(|s| s == slug)
         {
-            tracing::debug!(
+            tracing::info!(
                 event_slug = slug,
+                trader = wallet_short,
                 "Copy-trade skip: same event already bet on"
             );
             continue;
@@ -215,8 +225,14 @@ pub async fn copy_trade_cycle(
 
         // Get trader's dedicated bankroll
         let trader_bankroll = portfolio.strategy_bankroll(&strategy_name).await?;
+        tracing::info!(
+            trader = wallet_short,
+            strategy = strategy_name,
+            bankroll = trader_bankroll,
+            "Copy-trade bankroll check"
+        );
         if trader_bankroll < MIN_BET {
-            tracing::debug!(
+            tracing::info!(
                 trader = wallet_short,
                 bankroll = trader_bankroll,
                 "Copy-trade skip: insufficient trader bankroll"
@@ -231,12 +247,18 @@ pub async fn copy_trade_cycle(
         // Kelly sizing
         let kelly = fractional_kelly(estimated_prob, entry_price, KELLY_FRACTION);
         if kelly <= 0.0 {
+            tracing::info!(
+                trader = wallet_short,
+                entry_price,
+                estimated_prob,
+                "Copy-trade skip: kelly <= 0"
+            );
             continue;
         }
 
         let raw_bet = trader_bankroll * kelly;
         if raw_bet < MIN_BET {
-            tracing::debug!(
+            tracing::info!(
                 trader = wallet_short,
                 kelly_bet = raw_bet,
                 "Copy-trade skip: kelly bet below minimum"
