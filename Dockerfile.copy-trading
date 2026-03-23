@@ -12,10 +12,8 @@ RUN apk update && apk upgrade --no-cache && \
       --uid 10001 \
       bot
 
-COPY target/x86_64-unknown-linux-musl/release/trading-bot /bin/trading-bot
-
-RUN mkdir -p /app/model
+COPY target/x86_64-unknown-linux-musl/release/copy-trading-bot /bin/copy-trading-bot
 
 USER bot:bot
 WORKDIR /app
-ENTRYPOINT ["/bin/trading-bot"]
+ENTRYPOINT ["/bin/copy-trading-bot"]

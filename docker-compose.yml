@@ -56,6 +56,22 @@ services:
     stop_grace_period: 15s
     restart: unless-stopped
 
+  copy-trading-bot:
+    image: ghcr.io/skharchikov/polymarket-bot-copy:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://bot:bot@postgres:5432/polymarket
+      TELEGRAM_BOT_TOKEN: ${COPY_TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${COPY_TELEGRAM_CHAT_ID}
+      METRICS_PORT: "9001"
+    ports:
+      - "9001:9001"
+    stop_grace_period: 15s
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:latest
     volumes:

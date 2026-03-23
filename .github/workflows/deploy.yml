@@ -7,6 +7,7 @@ on:
 env:
   DEPLOY_DIR: /opt/polymarket-bot
   IMAGE: ghcr.io/skharchikov/polymarket-bot:latest
+  IMAGE_COPY: ghcr.io/skharchikov/polymarket-bot-copy:latest
 
 jobs:
   deploy:
@@ -77,6 +78,7 @@ jobs:
             echo $GHCR_PAT | docker login ghcr.io -u skharchikov --password-stdin && \
             cd $DEPLOY_DIR && \
             docker pull $IMAGE && \
+            docker pull $IMAGE_COPY && \
             docker compose build model-server && \
             docker compose up -d && \
-            docker compose logs --tail=20 bot"
+            docker compose logs --tail=20 bot copy-trading-bot"

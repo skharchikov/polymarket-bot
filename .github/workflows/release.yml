@@ -26,7 +26,7 @@ jobs:
       - name: Compute new version
         id: version
         run: |
-          CURRENT=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          CURRENT=$(grep '^version' trading-bot/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
 
           case "${{ inputs.bump }}" in
@@ -42,7 +42,9 @@ jobs:
           echo "Bumping $CURRENT → $NEW"
 
       - name: Update Cargo.toml
-        run: sed -i "s/^version = \"${{ steps.version.outputs.current }}\"/version = \"${{ steps.version.outputs.new }}\"/" Cargo.toml
+        run: |
+          sed -i "s/^version = \"${{ steps.version.outputs.current }}\"/version = \"${{ steps.version.outputs.new }}\"/" trading-bot/Cargo.toml
+          sed -i "s/^version = \"${{ steps.version.outputs.current }}\"/version = \"${{ steps.version.outputs.new }}\"/" copy-trading-bot/Cargo.toml
 
       - name: Update Cargo.lock
         run: cargo generate-lockfile
@@ -51,7 +53,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock
+          git add trading-bot/Cargo.toml copy-trading-bot/Cargo.toml Cargo.lock
           git commit -m "release: ${{ steps.version.outputs.tag }}"
           git tag "${{ steps.version.outputs.tag }}"
           git push origin HEAD "${{ steps.version.outputs.tag }}"
@@ -84,8 +86,8 @@ jobs:
         with:
           key: musl-release
 
-      - name: Build release binary
-        run: cargo build --release --target x86_64-unknown-linux-musl
+      - name: Build release binaries
+        run: cargo build --workspace --release --target x86_64-unknown-linux-musl
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -97,19 +99,38 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push
+      - name: Build and push trading-bot
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile
           push: true
           tags: |
             ghcr.io/${{ github.repository }}:latest
             ghcr.io/${{ github.repository }}:${{ needs.release.outputs.tag }}
 
+      - name: Build and push copy-trading-bot
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.copy-trading
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}-copy:latest
+            ghcr.io/${{ github.repository }}-copy:${{ needs.release.outputs.tag }}
+
       - name: Prune old images (keep last 3)
         uses: actions/delete-package-versions@v5
         with:
           package-name: polymarket-bot
+          package-type: container
+          min-versions-to-keep: 3
+          delete-untagged-versions: true
+
+      - name: Prune old copy-trading-bot images (keep last 3)
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: polymarket-bot-copy
           package-type: container
           min-versions-to-keep: 3
           delete-untagged-versions: true

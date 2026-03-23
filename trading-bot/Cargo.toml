@@ -1,0 +1,32 @@
+[package]
+name = "trading-bot"
+version = "0.6.23"
+edition = "2024"
+
+[[bin]]
+name = "trading-bot"
+path = "src/main.rs"
+
+[dependencies]
+polymarket-common = { path = "../common" }
+
+tokio = { version = "1.50", features = ["full"] }
+reqwest = { version = "0.13.2", features = ["json", "multipart"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+chrono = { version = "0.4.44", features = ["serde"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "json", "migrate"] }
+dotenvy = "0.15"
+confique = "0.4"
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", features = ["http-listener"] }
+metrics-process = "2.3"
+tokio-metrics = { version = "0.4", features = ["rt"] }
+futures-util = "0.3"
+mimalloc = "0.1"
+rig-core = { version = "0.32", features = ["all"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+rustls = { version = "0.23", features = ["ring"] }
