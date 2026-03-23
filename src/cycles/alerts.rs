@@ -120,7 +120,10 @@ pub async fn alert_loop(
 
                 // Skip if another market in the same event already has an open bet
                 if let Some(ref slug) = signal.event_slug {
-                    let open_slugs = portfolio.open_bet_event_slugs().await.unwrap_or_default();
+                    let open_slugs = portfolio
+                        .open_ml_bet_event_slugs()
+                        .await
+                        .unwrap_or_default();
                     if open_slugs.iter().any(|s| s == slug) {
                         tracing::info!(
                             event_slug = slug,

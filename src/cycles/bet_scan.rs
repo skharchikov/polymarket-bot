@@ -50,8 +50,8 @@ pub async fn bet_scan_cycle(
     let resolved_ids = portfolio.resolved_bet_market_ids().await?;
     skip_ids.extend(rejected_ids);
     skip_ids.extend(resolved_ids);
-    // Skip markets belonging to events we already have open bets on
-    let skip_event_slugs = portfolio.open_bet_event_slugs().await?;
+    // Skip markets belonging to events we already have ML bets on (copy bets don't block ML)
+    let skip_event_slugs = portfolio.open_ml_bet_event_slugs().await?;
     let past_bets = portfolio.learning_summary().await?;
 
     match scanner

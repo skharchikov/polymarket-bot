@@ -1212,6 +1212,19 @@ impl PgPortfolio {
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
+    /// Event slugs with open ML-only bets (excludes copy-trade bets).
+    /// Used by the ML bet scan so copy positions don't block new model signals.
+    pub async fn open_ml_bet_event_slugs(&self) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT event_slug FROM bets \
+             WHERE resolved = false AND event_slug IS NOT NULL \
+             AND strategy NOT LIKE 'copy:%'",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+
     pub async fn open_bets(&self) -> Result<Vec<Bet>> {
         self.fetch_bets("SELECT * FROM bets WHERE resolved = false ORDER BY placed_at DESC")
             .await
