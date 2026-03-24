@@ -1221,10 +1221,20 @@ impl PgPortfolio {
     }
 
     pub async fn open_bet_market_ids(&self) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> =
-            sqlx::query_as("SELECT market_id FROM bets WHERE resolved = false")
-                .fetch_all(&self.pool)
-                .await?;
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT market_id FROM bets WHERE resolved = false AND strategy NOT LIKE 'copy:%'",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+
+    pub async fn open_copy_bet_market_ids(&self) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT market_id FROM bets WHERE resolved = false AND strategy LIKE 'copy:%'",
+        )
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
 

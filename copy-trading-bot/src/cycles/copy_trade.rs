@@ -35,7 +35,7 @@ pub async fn copy_trade_cycle(
     tracing::info!(count = detected.len(), "Processing copy-trade signals");
 
     // Skip sets to avoid duplicate bets on same market/event
-    let skip_ids = portfolio.open_bet_market_ids().await?;
+    let skip_ids = portfolio.open_copy_bet_market_ids().await?;
     let skip_event_slugs = portfolio.open_bet_event_slugs().await?;
 
     let http = reqwest::Client::builder()
