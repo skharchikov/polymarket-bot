@@ -379,6 +379,60 @@ pub fn format_stats(data: &StatsData) -> String {
     )
 }
 
+/// Aggregate data for the copy-trading `/stats` command.
+pub struct CopyStatsData {
+    pub traders: usize,
+    pub total_bankroll: f64,
+    pub starting_bankroll: f64,
+    pub wins: usize,
+    pub losses: usize,
+    pub pnl: f64,
+    pub open: usize,
+    pub unrealized: f64,
+    pub exposure: f64,
+}
+
+/// Render the copy-trading `/stats` message.
+pub fn format_copy_stats(data: &CopyStatsData) -> String {
+    if data.traders == 0 {
+        return "📊 *Copy Trading Stats*\n\nNo traders followed yet.\nUse `/follow <wallet>` to start.".to_string();
+    }
+
+    let wr = win_rate(data.wins, data.losses);
+    let roi = if data.starting_bankroll > 0.0 {
+        data.pnl / data.starting_bankroll * 100.0
+    } else {
+        0.0
+    };
+
+    let unrealized_line = if data.open > 0 {
+        format!(
+            "\n📈 Unrealized: `€{:+.2}` (€{:.2} deployed)",
+            data.unrealized, data.exposure
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        "📊 *Copy Trading Stats*\n\n\
+         👥 Traders followed: {traders}\n\
+         💰 Bankroll: `€{bankroll:.2}` (started: `€{starting:.2}`)\n\
+         💵 PnL: `€{pnl:+.2}` (ROI `{roi:+.1}%`)\n\
+         📋 Record: {wins}W/{losses}L ({wr:.0}%) | {open} open{unrealized}",
+        traders = data.traders,
+        bankroll = data.total_bankroll,
+        starting = data.starting_bankroll,
+        pnl = data.pnl,
+        roi = roi,
+        wins = data.wins,
+        losses = data.losses,
+        wr = wr,
+        open = data.open,
+        unrealized = unrealized_line,
+    )
+}
+
 /// A single followed-trader row for `/traders`.
 pub struct TraderRow {
     pub name: String,

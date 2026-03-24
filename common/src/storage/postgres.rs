@@ -268,6 +268,14 @@ impl PgPortfolio {
     /// Build a stats summary string for /stats command.
     #[tracing::instrument(skip(self))]
     pub async fn stats_summary(&self) -> Result<String> {
+        self.stats_summary_inner(true).await
+    }
+
+    pub async fn stats_summary_ml_only(&self) -> Result<String> {
+        self.stats_summary_inner(false).await
+    }
+
+    async fn stats_summary_inner(&self, include_copy: bool) -> Result<String> {
         let starting = self.starting_bankroll().await?;
         let resolved = self.resolved_bets().await?;
         let open = self.open_bets().await?;
@@ -348,39 +356,44 @@ impl PgPortfolio {
             ((0.0, 0.0), (0.0, 0.0))
         };
 
-        // Copy-trade aggregate
-        let active_traders = self.get_active_traders().await.unwrap_or_default();
-        let copy_traders = active_traders.len();
-        let mut copy_bankroll = 0.0_f64;
-        for trader in &active_traders {
-            let short = &trader.proxy_wallet[..8.min(trader.proxy_wallet.len())];
-            let strat = format!("copy:{short}");
-            copy_bankroll += self.strategy_bankroll(&strat).await.unwrap_or(0.0);
-        }
-        let copy_resolved: Vec<_> = resolved
-            .iter()
-            .filter(|b| b.strategy.starts_with("copy:"))
-            .collect();
-        let copy_open = open
-            .iter()
-            .filter(|b| b.strategy.starts_with("copy:"))
-            .count();
-        let copy_wins = copy_resolved.iter().filter(|b| b.won == Some(true)).count();
-        let copy_losses = copy_resolved
-            .iter()
-            .filter(|b| b.won == Some(false))
-            .count();
-        let copy_pnl: f64 = copy_resolved.iter().filter_map(|b| b.pnl).sum();
-        let copy_trade = Some(crate::format::CopyTradeSummary {
-            traders: copy_traders,
-            open: copy_open,
-            wins: copy_wins,
-            losses: copy_losses,
-            pnl: copy_pnl,
-            bankroll: copy_bankroll,
-            unrealized: copy_unrealized,
-            exposure: copy_exposure,
-        });
+        let copy_trade = if include_copy {
+            // Copy-trade aggregate
+            let active_traders = self.get_active_traders().await.unwrap_or_default();
+            let copy_traders = active_traders.len();
+            let mut copy_bankroll = 0.0_f64;
+            for trader in &active_traders {
+                let short = &trader.proxy_wallet[..8.min(trader.proxy_wallet.len())];
+                let strat = format!("copy:{short}");
+                copy_bankroll += self.strategy_bankroll(&strat).await.unwrap_or(0.0);
+            }
+            let copy_resolved: Vec<_> = resolved
+                .iter()
+                .filter(|b| b.strategy.starts_with("copy:"))
+                .collect();
+            let copy_open = open
+                .iter()
+                .filter(|b| b.strategy.starts_with("copy:"))
+                .count();
+            let copy_wins = copy_resolved.iter().filter(|b| b.won == Some(true)).count();
+            let copy_losses = copy_resolved
+                .iter()
+                .filter(|b| b.won == Some(false))
+                .count();
+            let copy_pnl: f64 = copy_resolved.iter().filter_map(|b| b.pnl).sum();
+            Some(crate::format::CopyTradeSummary {
+                traders: copy_traders,
+                open: copy_open,
+                wins: copy_wins,
+                losses: copy_losses,
+                pnl: copy_pnl,
+                bankroll: copy_bankroll,
+                unrealized: copy_unrealized,
+                exposure: copy_exposure,
+            })
+        } else {
+            let _ = (copy_unrealized, copy_exposure);
+            None
+        };
 
         let stats_data = crate::format::StatsData {
             ml_bankroll: total_bankroll,
@@ -457,7 +470,7 @@ impl PgPortfolio {
     }
 
     /// Fetch live unrealized PnL and exposure, split into (ml, copy) tuples of (unrealized, exposure).
-    async fn live_unrealized(&self) -> ((f64, f64), (f64, f64)) {
+    pub(super) async fn live_unrealized(&self) -> ((f64, f64), (f64, f64)) {
         use crate::data::models::fetch_yes_prices;
         use crate::storage::portfolio::BetSide;
 

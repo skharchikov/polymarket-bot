@@ -103,7 +103,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile
+          file: trading-bot/Dockerfile
           push: true
           tags: |
             ghcr.io/${{ github.repository }}:latest
@@ -113,7 +113,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.copy-trading
+          file: copy-trading-bot/Dockerfile
           push: true
           tags: |
             ghcr.io/${{ github.repository }}-copy:latest

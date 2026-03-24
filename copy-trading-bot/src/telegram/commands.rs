@@ -27,6 +27,7 @@ pub async fn handle_command(
             format!(
                 "👋 Hi {name}! I'm the Polymarket Copy Trading Bot.\n\n\
                  Commands:\n\
+                 /stats — copy trading results\n\
                  /opencopy — open copy-trade positions\n\
                  /traders — followed traders\n\
                  /leaderboard — top traders\n\
@@ -35,6 +36,13 @@ pub async fn handle_command(
                  /help — show commands"
             )
         }
+        "stats" => match portfolio.stats_summary_copy().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(err = %e, "Failed to build copy stats");
+                "⚠️ Failed to load stats".to_string()
+            }
+        },
         "opencopy" => match portfolio.open_copy_summary().await {
             Ok(s) => s,
             Err(e) => {
@@ -136,6 +144,7 @@ pub async fn handle_command(
             }
         }
         "help" => "📖 *Commands*\n\n\
+                 /stats — copy trading results\n\
                  /opencopy — open copy-trade positions\n\
                  /traders — followed traders\n\
                  /leaderboard — top Polymarket traders\n\

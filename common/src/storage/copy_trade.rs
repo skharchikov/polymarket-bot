@@ -165,6 +165,55 @@ impl PgPortfolio {
         Ok((wins, losses, pnl))
     }
 
+    /// Build aggregate copy-trading stats for the /stats command.
+    pub async fn stats_summary_copy(&self) -> Result<String> {
+        let traders = self.get_active_traders().await?;
+        let open_bets = self.open_bets().await?;
+
+        let mut total_bankroll = 0.0_f64;
+        let mut total_starting = 0.0_f64;
+        let mut total_wins = 0_usize;
+        let mut total_losses = 0_usize;
+        let mut total_pnl = 0.0_f64;
+
+        for t in &traders {
+            let short = &t.proxy_wallet[..8.min(t.proxy_wallet.len())];
+            let strat = format!("copy:{short}");
+            total_bankroll += self.strategy_bankroll(&strat).await.unwrap_or(0.0);
+            total_starting += self.strategy_starting_bankroll(&strat).await.unwrap_or(0.0);
+            let (w, l, p) = self.copy_trader_record(&strat).await.unwrap_or((0, 0, 0.0));
+            total_wins += w;
+            total_losses += l;
+            total_pnl += p;
+        }
+
+        let open_count = open_bets
+            .iter()
+            .filter(|b| b.strategy.starts_with("copy:"))
+            .count();
+
+        let (unrealized, exposure) = if open_count > 0 {
+            let (_, copy) = self.live_unrealized().await;
+            copy
+        } else {
+            (0.0, 0.0)
+        };
+
+        let data = crate::format::CopyStatsData {
+            traders: traders.len(),
+            total_bankroll,
+            starting_bankroll: total_starting,
+            wins: total_wins,
+            losses: total_losses,
+            pnl: total_pnl,
+            open: open_count,
+            unrealized,
+            exposure,
+        };
+
+        Ok(crate::format::format_copy_stats(&data))
+    }
+
     /// Build a summary of followed traders for the /traders command.
     pub async fn traders_summary(&self) -> Result<String> {
         let traders = self.get_active_traders().await?;

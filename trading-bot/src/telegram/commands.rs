@@ -40,7 +40,7 @@ pub async fn handle_command(
                  /help — show commands"
             )
         }
-        "stats" => match portfolio.stats_summary().await {
+        "stats" => match portfolio.stats_summary_ml_only().await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(err = %e, "Failed to build stats");
