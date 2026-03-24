@@ -369,7 +369,7 @@ dependencies = [
 
 [[package]]
 name = "copy-trading-bot"
-version = "0.6.23"
+version = "0.6.24"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1300,7 +1300,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3367,7 +3367,7 @@ dependencies = [
 
 [[package]]
 name = "trading-bot"
-version = "0.6.23"
+version = "0.6.24"
 dependencies = [
  "anyhow",
  "chrono",
