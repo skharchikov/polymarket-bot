@@ -109,8 +109,13 @@ pub async fn housekeeping_cycle(
         tracing::warn!(err = %e, "Failed to reload calibration curve");
     }
 
-    // Check open positions for early exit and report unrealized P&L
-    let open_bets = portfolio.open_bets().await?;
+    // Check open ML positions for early exit and report unrealized P&L
+    let open_bets: Vec<_> = portfolio
+        .open_bets()
+        .await?
+        .into_iter()
+        .filter(|b| !b.strategy.starts_with("copy:"))
+        .collect();
     if !open_bets.is_empty() {
         let mut views = Vec::new();
 

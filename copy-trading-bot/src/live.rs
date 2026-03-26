@@ -124,6 +124,23 @@ pub async fn run_live(cfg: Arc<CopyTradingConfig>) -> Result<()> {
         }
     });
 
+    // Housekeeping loop — resolves copy bets independently
+    let hk_portfolio = Arc::clone(&portfolio);
+    let hk_notifier = Arc::clone(&notifier);
+    let hk_http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .expect("failed to build housekeeping HTTP client");
+    let housekeeping_loop = tokio::spawn(async move {
+        loop {
+            if let Err(e) = cycles::housekeeping_cycle(&hk_portfolio, &hk_notifier, &hk_http).await
+            {
+                tracing::error!(err = %e, "Copy housekeeping cycle failed");
+            }
+            tokio::time::sleep(Duration::from_secs(5 * 60)).await;
+        }
+    });
+
     tokio::select! {
         _ = shutdown_signal() => {
             tracing::info!("Shutdown signal received, stopping gracefully...");
@@ -133,6 +150,9 @@ pub async fn run_live(cfg: Arc<CopyTradingConfig>) -> Result<()> {
         }
         r = copy_trade_loop => {
             tracing::error!("Copy trade loop exited: {:?}", r);
+        }
+        r = housekeeping_loop => {
+            tracing::error!("Housekeeping loop exited: {:?}", r);
         }
     }
 

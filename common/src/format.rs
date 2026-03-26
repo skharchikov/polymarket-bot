@@ -436,6 +436,7 @@ pub fn format_copy_stats(data: &CopyStatsData) -> String {
 /// A single followed-trader row for `/traders`.
 pub struct TraderRow {
     pub name: String,
+    pub wallet: String,
     pub wallet_short: String,
     pub rank: Option<i32>,
     pub poly_pnl: Option<f64>,
@@ -463,13 +464,14 @@ pub fn format_traders(traders: &[TraderRow]) -> String {
             .map(|p| format!("${:.0}k", p / 1000.0))
             .unwrap_or_else(|| "—".into());
         lines.push(format!(
-            "👤 *{name}* (`{short}...`)\n\
+            "👤 *{name}*\n\
+             \u{00a0}\u{00a0}🔑 `{wallet}`\n\
              \u{00a0}\u{00a0}🏆 Rank: {rank} | Poly PnL: {poly_pnl}\n\
              \u{00a0}\u{00a0}💰 Bankroll: `€{bankroll:.2}`\n\
              \u{00a0}\u{00a0}📊 Record: {wins}W/{losses}L ({pnl:+.2}€)\n\
              \u{00a0}\u{00a0}🔓 Open: {open}",
             name = t.name,
-            short = t.wallet_short,
+            wallet = t.wallet,
             bankroll = t.bankroll,
             wins = t.wins,
             losses = t.losses,

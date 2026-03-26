@@ -235,6 +235,7 @@ impl PgPortfolio {
 
             rows.push(crate::format::TraderRow {
                 name,
+                wallet: t.proxy_wallet.clone(),
                 wallet_short: short.to_string(),
                 rank: t.rank,
                 poly_pnl: t.pnl,
