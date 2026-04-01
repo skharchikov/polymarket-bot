@@ -21,7 +21,7 @@ pub(super) async fn portfolio_correlation_check(
     portfolio: &PgPortfolio,
     candidates: &[(String, String, BetSide)],
 ) -> Vec<CorrelationDecision> {
-    let open_bets = portfolio.open_bets().await.unwrap_or_default();
+    let open_bets = portfolio.open_ml_bets().await.unwrap_or_default();
     let blocked = portfolio
         .recent_correlation_blocked()
         .await

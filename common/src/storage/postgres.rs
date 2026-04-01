@@ -1265,6 +1265,11 @@ impl PgPortfolio {
             .await
     }
 
+    pub async fn open_ml_bets(&self) -> Result<Vec<Bet>> {
+        self.fetch_bets("SELECT * FROM bets WHERE resolved = false AND strategy NOT LIKE 'copy:%' ORDER BY placed_at DESC")
+            .await
+    }
+
     pub async fn resolved_bets(&self) -> Result<Vec<Bet>> {
         self.fetch_bets("SELECT * FROM bets WHERE resolved = true ORDER BY placed_at DESC")
             .await
