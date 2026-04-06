@@ -178,6 +178,18 @@ impl GammaMarket {
         q.contains("up or down")
     }
 
+    /// Returns true for sports/esports competitive matchups where
+    /// prediction models have no edge over market price.
+    pub fn is_sports_or_esports(&self) -> bool {
+        let q = self.question.to_lowercase();
+        q.contains(" vs.")
+            || q.contains(" vs ")
+            || q.contains("spread:")
+            || q.contains("o/u ")
+            || q.contains("over/under")
+            || q.contains("win on 2")
+    }
+
     /// Extract the YES outcome price from `outcomePrices` / `outcome_prices`.
     pub fn yes_price(&self) -> Option<f64> {
         let s = self.outcome_prices.as_ref()?;

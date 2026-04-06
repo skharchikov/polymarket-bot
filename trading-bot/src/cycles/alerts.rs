@@ -225,6 +225,7 @@ pub async fn alert_loop(
                         event_slug: signal.event_slug.clone(),
                         features: signal.features.clone(),
                         copy_ref: None,
+                        category: None,
                     };
 
                     // Log prediction for Brier score tracking

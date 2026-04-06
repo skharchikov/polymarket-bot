@@ -106,9 +106,14 @@ impl StrategyProfile {
             return None;
         }
 
-        // Terminal risk scaling: reduce position size as market approaches expiry.
-        // sqrt(days_remaining / 14) — full size at 14d+, scaled down near expiry.
-        let terminal_scale = (signal.days_to_expiry / 14.0).clamp(0.1, 1.0).sqrt();
+        // Terminal risk scaling: reduce position size for long-dated bets.
+        // Data shows >7d bets have 19% WR (-€7.33/bet avg), 1-3d is the sweet spot.
+        // Full size at ≤3d, scaled down for longer-dated bets.
+        let terminal_scale = if signal.days_to_expiry <= 3.0 {
+            1.0
+        } else {
+            (3.0 / signal.days_to_expiry).sqrt().clamp(0.2, 1.0)
+        };
         let scaled_kelly = kelly * terminal_scale;
 
         Some(AcceptedSignal {

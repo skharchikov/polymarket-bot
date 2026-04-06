@@ -333,6 +333,7 @@ pub async fn copy_trade_cycle(
                 price: trade.price,
                 size_usd: trade.size_usd,
             }),
+            category: None,
         };
 
         // Log prediction for model learning (Brier score tracking)

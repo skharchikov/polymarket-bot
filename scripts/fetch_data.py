@@ -303,6 +303,7 @@ def _extract_snapshot(prices: np.ndarray, timestamps: np.ndarray,
         "days_since_created": days_since_created,
         "created_to_expiry_span": created_to_expiry_span,
         "category": combined,
+        "question": market.get("question", ""),
         # Gamma API price changes
         "price_change_1d": market.get("one_day_price_change", momentum_24h),
         "price_change_1w": market.get("one_week_price_change", 0.0),

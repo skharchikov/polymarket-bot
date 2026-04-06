@@ -160,6 +160,28 @@ pub struct AppConfig {
     #[config(env = "EXIT_DAYS_BEFORE_EXPIRY", default = 0)]
     pub exit_days_before_expiry: i64,
 
+    // --- Signal filters (ADR 009) ---
+    /// Block sports/esports markets from ML betting.
+    #[config(env = "BLOCK_SPORTS", default = true)]
+    pub block_sports: bool,
+
+    /// Block YES-side bets from XGBoost signals.
+    #[config(env = "BLOCK_YES_SIDE", default = true)]
+    pub block_yes_side: bool,
+
+    /// Bayesian LR damping multiplier (0.0-1.0). Lower = trust market more.
+    /// Applied as: lr^(confidence * lr_damping).
+    #[config(env = "LR_DAMPING", default = 0.5)]
+    pub lr_damping: f64,
+
+    /// Minimum Kelly fraction to emit a signal (scanner gate).
+    #[config(env = "MIN_KELLY_SIZE", default = 0.02)]
+    pub min_kelly_size: f64,
+
+    /// Minimum bet price (entry side) to consider.
+    #[config(env = "MIN_BET_PRICE", default = 0.15)]
+    pub min_bet_price: f64,
+
     /// ML model sidecar URL (Python ensemble server).
     /// When set, uses the full stacking ensemble instead of local XGBoost.
     #[config(env = "MODEL_SIDECAR_URL", default = "")]
@@ -221,6 +243,11 @@ impl AppConfig {
             conservative_min_bet: 15.0,
             stop_loss_pct: 999.0,
             exit_days_before_expiry: 0,
+            block_sports: true,
+            block_yes_side: true,
+            lr_damping: 0.5,
+            min_kelly_size: 0.02,
+            min_bet_price: 0.15,
             model_sidecar_url: String::new(),
             metrics_port: 9000,
         }

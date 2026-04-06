@@ -820,6 +820,14 @@ impl LiveScanner {
             })
             .collect();
         let n_event = m.len();
+        let m: Vec<_> = if self.cfg.block_sports {
+            m.into_iter()
+                .filter(|m| !m.is_sports_or_esports())
+                .collect()
+        } else {
+            m
+        };
+        let n_sports = m.len();
         let eligible: Vec<GammaMarket> = m
             .into_iter()
             .filter(|m| {
@@ -835,10 +843,12 @@ impl LiveScanner {
             expiry = n_expiry,
             skip_ids = n_skip,
             event_slug = n_event,
+            sports_filtered = n_sports,
             eligible = eligible.len(),
-            "Market filter breakdown (vol>${}, ≤{}d expiry)",
+            "Market filter breakdown (vol>${}, ≤{}d expiry, block_sports={})",
             self.cfg.min_volume,
             self.cfg.max_days_to_expiry,
+            self.cfg.block_sports,
         );
 
         let markets_scanned = eligible.len();
@@ -1152,8 +1162,9 @@ impl LiveScanner {
 
             // Bayesian update: anchor model prediction to market price.
             // Market price is the prior (encodes all public info),
-            // model's LR is dampened by its confidence before updating.
-            let dampened_lr = bayesian::dampen_lr(lr, ml_conf);
+            // model's LR is dampened by confidence × lr_damping before updating.
+            // lr_damping < 1.0 reduces model authority (trusts market price more).
+            let dampened_lr = bayesian::dampen_lr(lr, ml_conf * self.cfg.lr_damping);
             let prior_odds = bayesian::prob_to_odds(c.current_price);
             let posterior = bayesian::odds_to_prob(prior_odds * dampened_lr);
 
@@ -1208,12 +1219,29 @@ impl LiveScanner {
                 )));
                 continue;
             }
-            if kelly_size <= 0.003 {
-                rejections.push(reject(format!("kelly {:.3} < 0.003", kelly_size)));
+            if kelly_size <= self.cfg.min_kelly_size {
+                rejections.push(reject(format!(
+                    "kelly {:.3} < {:.3}",
+                    kelly_size, self.cfg.min_kelly_size
+                )));
                 continue;
             }
             if ml_conf < 0.25 {
                 rejections.push(reject(format!("conf {:.0}% < 25%", ml_conf * 100.0)));
+                continue;
+            }
+            // Block YES side for XGBoost (30% WR, -€745 in production)
+            if self.cfg.block_yes_side && side == BetSide::Yes {
+                rejections.push(reject("xgboost_yes_blocked".to_string()));
+                continue;
+            }
+            // Minimum bet price filter (longshots < 15c have <10% win rate)
+            if bet_price < self.cfg.min_bet_price {
+                rejections.push(reject(format!(
+                    "bet_price {:.0}c < {:.0}c",
+                    bet_price * 100.0,
+                    self.cfg.min_bet_price * 100.0
+                )));
                 continue;
             }
 

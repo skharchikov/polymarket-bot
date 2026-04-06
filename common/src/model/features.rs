@@ -24,6 +24,11 @@ pub struct OrderBookStats {
 /// the Python sidecar applies target encoding before model inference.
 ///
 /// v3: removed log_liquidity, is_politics, is_sports — zero SHAP importance.
+/// v4: re-added is_sports (ADR 009) — training data now contains sports markets,
+///     previously zero SHAP because training data had none. 77% of live bets are
+///     sports; model needs this signal to learn to discount them.
+/// v5: added 16 NLP features from question text (no price leakage).
+///     Inspired by NavnoorBawa (88-92% accuracy on high-confidence predictions).
 #[derive(Debug, Clone, Serialize)]
 pub struct MarketFeatures {
     pub yes_price: f64,
@@ -40,6 +45,25 @@ pub struct MarketFeatures {
     // Temporal features (v2)
     pub days_since_created: f64,
     pub created_to_expiry_span: f64,
+    // Category flag (v4, re-added) — sent as binary 0/1, target-encoded by sidecar
+    pub is_sports: f64,
+    // NLP features (v5) — extracted from question text
+    pub q_length: f64,
+    pub q_word_count: f64,
+    pub q_avg_word_len: f64,
+    pub q_word_diversity: f64,
+    pub q_has_number: f64,
+    pub q_has_year: f64,
+    pub q_has_percent: f64,
+    pub q_has_dollar: f64,
+    pub q_has_date: f64,
+    pub q_starts_will: f64,
+    pub q_has_by: f64,
+    pub q_has_before: f64,
+    pub q_has_above: f64,
+    pub q_sentiment_pos: f64,
+    pub q_sentiment_neg: f64,
+    pub q_certainty: f64,
 }
 
 impl MarketFeatures {
@@ -57,6 +81,23 @@ impl MarketFeatures {
         "price_change_1w",
         "days_since_created",
         "created_to_expiry_span",
+        "is_sports",
+        "q_length",
+        "q_word_count",
+        "q_avg_word_len",
+        "q_word_diversity",
+        "q_has_number",
+        "q_has_year",
+        "q_has_percent",
+        "q_has_dollar",
+        "q_has_date",
+        "q_starts_will",
+        "q_has_by",
+        "q_has_before",
+        "q_has_above",
+        "q_sentiment_pos",
+        "q_sentiment_neg",
+        "q_certainty",
     ];
 
     /// Convert to fixed-order f64 vector for model input.
@@ -74,6 +115,23 @@ impl MarketFeatures {
             self.price_change_1w,
             self.days_since_created,
             self.created_to_expiry_span,
+            self.is_sports,
+            self.q_length,
+            self.q_word_count,
+            self.q_avg_word_len,
+            self.q_word_diversity,
+            self.q_has_number,
+            self.q_has_year,
+            self.q_has_percent,
+            self.q_has_dollar,
+            self.q_has_date,
+            self.q_starts_will,
+            self.q_has_by,
+            self.q_has_before,
+            self.q_has_above,
+            self.q_sentiment_pos,
+            self.q_sentiment_neg,
+            self.q_certainty,
         ]
     }
 
@@ -142,12 +200,20 @@ impl MarketFeatures {
             _ => 30.0,
         };
 
-        // Category flag (sent as binary; sidecar applies target encoding)
+        // Category flags (sent as binary; sidecar applies target encoding)
         let is_crypto = if market.is_crypto_related() { 1.0 } else { 0.0 };
+        let is_sports = if market.is_sports_or_esports() {
+            1.0
+        } else {
+            0.0
+        };
 
         // Gamma API price changes (fallback to computed momentum)
         let price_change_1d = market.one_day_price_change.unwrap_or(momentum_24h);
         let price_change_1w = market.one_week_price_change.unwrap_or(0.0);
+
+        // NLP features from question text
+        let nlp = extract_nlp_features(&market.question);
 
         Self {
             yes_price: current_price,
@@ -162,7 +228,135 @@ impl MarketFeatures {
             price_change_1w,
             days_since_created,
             created_to_expiry_span,
+            is_sports,
+            q_length: nlp.q_length,
+            q_word_count: nlp.q_word_count,
+            q_avg_word_len: nlp.q_avg_word_len,
+            q_word_diversity: nlp.q_word_diversity,
+            q_has_number: nlp.q_has_number,
+            q_has_year: nlp.q_has_year,
+            q_has_percent: nlp.q_has_percent,
+            q_has_dollar: nlp.q_has_dollar,
+            q_has_date: nlp.q_has_date,
+            q_starts_will: nlp.q_starts_will,
+            q_has_by: nlp.q_has_by,
+            q_has_before: nlp.q_has_before,
+            q_has_above: nlp.q_has_above,
+            q_sentiment_pos: nlp.q_sentiment_pos,
+            q_sentiment_neg: nlp.q_sentiment_neg,
+            q_certainty: nlp.q_certainty,
         }
+    }
+}
+
+struct NlpFeatures {
+    q_length: f64,
+    q_word_count: f64,
+    q_avg_word_len: f64,
+    q_word_diversity: f64,
+    q_has_number: f64,
+    q_has_year: f64,
+    q_has_percent: f64,
+    q_has_dollar: f64,
+    q_has_date: f64,
+    q_starts_will: f64,
+    q_has_by: f64,
+    q_has_before: f64,
+    q_has_above: f64,
+    q_sentiment_pos: f64,
+    q_sentiment_neg: f64,
+    q_certainty: f64,
+}
+
+fn extract_nlp_features(question: &str) -> NlpFeatures {
+    let q = question.to_lowercase();
+    let words: Vec<&str> = q.split_whitespace().collect();
+    let n_words = words.len().max(1) as f64;
+    let unique: std::collections::HashSet<&str> = words.iter().copied().collect();
+
+    let q_length = question.len() as f64;
+    let q_word_count = n_words;
+    let q_avg_word_len = words.iter().map(|w| w.len() as f64).sum::<f64>() / n_words;
+    let q_word_diversity = unique.len() as f64 / n_words;
+
+    let q_has_number = if q.chars().any(|c| c.is_ascii_digit()) {
+        1.0
+    } else {
+        0.0
+    };
+    let q_has_year = if q.contains("202") { 1.0 } else { 0.0 };
+    let q_has_percent = if q.contains('%') { 1.0 } else { 0.0 };
+    let q_has_dollar = if q.contains('$') { 1.0 } else { 0.0 };
+
+    let months = [
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    ];
+    let q_has_date = if months.iter().any(|m| q.contains(m)) || q.contains('/') {
+        1.0
+    } else {
+        0.0
+    };
+
+    let q_starts_will = if q.starts_with("will ") { 1.0 } else { 0.0 };
+    let q_has_by = if q.contains(" by ") { 1.0 } else { 0.0 };
+    let q_has_before = if q.contains(" before ") { 1.0 } else { 0.0 };
+
+    let above_words = ["above", "over", "exceed", "hit", "reach", "break"];
+    let q_has_above = if above_words.iter().any(|w| q.contains(w)) {
+        1.0
+    } else {
+        0.0
+    };
+
+    let pos_words = [
+        "win", "pass", "above", "exceed", "achieve", "surge", "gain", "rise", "increase",
+        "approve", "success", "agree", "accept", "hit", "reach",
+    ];
+    let neg_words = [
+        "lose", "fail", "below", "crash", "reject", "decline", "fall", "drop", "decrease", "deny",
+        "miss", "ban", "block", "cancel", "collapse",
+    ];
+    let cert_words = [
+        "will",
+        "definitely",
+        "certainly",
+        "must",
+        "always",
+        "guaranteed",
+    ];
+
+    let q_sentiment_pos = words.iter().filter(|w| pos_words.contains(w)).count() as f64;
+    let q_sentiment_neg = words.iter().filter(|w| neg_words.contains(w)).count() as f64;
+    let q_certainty = words.iter().filter(|w| cert_words.contains(w)).count() as f64;
+
+    NlpFeatures {
+        q_length,
+        q_word_count,
+        q_avg_word_len,
+        q_word_diversity,
+        q_has_number,
+        q_has_year,
+        q_has_percent,
+        q_has_dollar,
+        q_has_date,
+        q_starts_will,
+        q_has_by,
+        q_has_before,
+        q_has_above,
+        q_sentiment_pos,
+        q_sentiment_neg,
+        q_certainty,
     }
 }
 
@@ -318,6 +512,23 @@ mod tests {
             price_change_1w: -0.05,
             days_since_created: 20.0,
             created_to_expiry_span: 30.0,
+            is_sports: 0.0,
+            q_length: 40.0,
+            q_word_count: 8.0,
+            q_avg_word_len: 5.0,
+            q_word_diversity: 1.0,
+            q_has_number: 1.0,
+            q_has_year: 1.0,
+            q_has_percent: 0.0,
+            q_has_dollar: 0.0,
+            q_has_date: 0.0,
+            q_starts_will: 1.0,
+            q_has_by: 0.0,
+            q_has_before: 0.0,
+            q_has_above: 0.0,
+            q_sentiment_pos: 0.0,
+            q_sentiment_neg: 0.0,
+            q_certainty: 1.0,
         };
         assert_eq!(features.to_vec().len(), MarketFeatures::NAMES.len());
     }

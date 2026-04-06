@@ -126,17 +126,24 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 WARMSTART_TRIGGER_N = int(os.environ.get("WARMSTART_TRIGGER_N", "10"))
 
 # Feature names — must stay in sync with MarketFeatures::NAMES in src/model/features.rs
-# v3: removed log_liquidity, is_politics, is_sports (zero SHAP importance).
+# v4: re-added is_sports — was zero SHAP because training data had no sports.
+#     Now 77% of live bets are sports; model needs this signal.
 FEATURE_NAMES = [
     "yes_price", "momentum_1h", "momentum_24h", "volatility_24h", "rsi",
     "log_volume", "days_to_expiry",
     "is_crypto",
     "price_change_1d", "price_change_1w",
     "days_since_created", "created_to_expiry_span",
+    "is_sports",
+    # NLP features (v5)
+    "q_length", "q_word_count", "q_avg_word_len", "q_word_diversity",
+    "q_has_number", "q_has_year", "q_has_percent", "q_has_dollar",
+    "q_has_date", "q_starts_will", "q_has_by", "q_has_before", "q_has_above",
+    "q_sentiment_pos", "q_sentiment_neg", "q_certainty",
 ]
 
 # Category columns subject to target encoding (binary → historical YES rate)
-CATEGORY_COLS = ["is_crypto"]
+CATEGORY_COLS = ["is_crypto", "is_sports"]
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
@@ -434,6 +441,24 @@ class FeatureMap(BaseModel):
     price_change_1w: float
     days_since_created: float
     created_to_expiry_span: float
+    is_sports: float = 0.0
+    # NLP features (v5) — defaults to 0.0 for backward compat
+    q_length: float = 0.0
+    q_word_count: float = 0.0
+    q_avg_word_len: float = 0.0
+    q_word_diversity: float = 0.0
+    q_has_number: float = 0.0
+    q_has_year: float = 0.0
+    q_has_percent: float = 0.0
+    q_has_dollar: float = 0.0
+    q_has_date: float = 0.0
+    q_starts_will: float = 0.0
+    q_has_by: float = 0.0
+    q_has_before: float = 0.0
+    q_has_above: float = 0.0
+    q_sentiment_pos: float = 0.0
+    q_sentiment_neg: float = 0.0
+    q_certainty: float = 0.0
 
     def to_row(self) -> dict[str, float]:
         return {k: getattr(self, k) for k in FEATURE_NAMES}

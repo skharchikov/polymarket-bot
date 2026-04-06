@@ -64,6 +64,8 @@ pub struct NewBet {
     pub features: Option<crate::model::features::MarketFeatures>,
     /// Original trader's trade details, set only for copy-trade bets.
     pub copy_ref: Option<CopyRef>,
+    /// Market category from Gamma API (for post-hoc analysis).
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -268,6 +268,7 @@ pub async fn bet_scan_cycle(
                     event_slug: signal.event_slug.clone(),
                     features: signal.features.clone(),
                     copy_ref: None,
+                    category: None,
                 };
 
                 // Log prediction for Brier score tracking

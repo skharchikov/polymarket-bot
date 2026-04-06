@@ -820,8 +820,8 @@ impl PgPortfolio {
 
         let row: (i32,) = sqlx::query_as(
             "INSERT INTO bets (market_id, question, side, entry_price, slipped_price, shares, cost, fee_paid, \
-             estimated_prob, confidence, edge, kelly_size, reasoning, end_date, context, strategy, source, url, event_slug, copy_ref) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING id",
+             estimated_prob, confidence, edge, kelly_size, reasoning, end_date, context, strategy, source, url, event_slug, copy_ref, category) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING id",
         )
         .bind(&bet.market_id)
         .bind(&bet.question)
@@ -843,6 +843,7 @@ impl PgPortfolio {
         .bind(&bet.url)
         .bind(bet.event_slug.as_deref())
         .bind(copy_ref_json)
+        .bind(bet.category.as_deref())
         .fetch_one(&mut *tx)
         .await?;
 
