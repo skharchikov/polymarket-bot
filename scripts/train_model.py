@@ -115,69 +115,68 @@ def load_data(path: str) -> pd.DataFrame:
     df = pd.DataFrame(snapshots)
 
     # Derived features
-    df["log_volume"] = np.log1p(df["volume"])
+    if "volume" in df.columns and "log_volume" not in df.columns:
+        df["log_volume"] = np.log1p(df["volume"])
 
-    # Category flag — keywords must match live Rust logic in features.rs exactly.
+    # Derive features only if not already present (train_from_dataset.py pre-computes them).
     # fetch_data.py stores combined "category + question" in the category field.
-    combined = df["category"].fillna("").str.lower()
-    df["is_crypto"] = combined.str.contains(
-        "crypto|bitcoin|btc|ethereum|eth|solana|sol|defi|nft|blockchain"
-        "|dogecoin|doge|xrp|ripple|cardano|polkadot|avalanche|chainlink|bnb|binance"
-        "|coinbase|stablecoin|memecoin|token"
-    ).astype(float)
+    text_col = df.get("question", df.get("category", pd.Series([""] * len(df)))).fillna("")
+    if "question" not in df.columns and "category" in df.columns:
+        text_col = df["category"].fillna("")
+    text_lower = text_col.str.lower()
 
-    # Sports/esports detection — must match live Rust logic in models.rs
-    question = df.get("question", df.get("category", pd.Series([""] * len(df)))).fillna("").str.lower()
-    if "question" not in df.columns:
-        question = combined
-    df["is_sports"] = (
-        question.str.contains(r" vs\. | vs ", regex=True)
-        | question.str.contains("spread:")
-        | question.str.contains(r"o/u |over/under", regex=True)
-        | question.str.contains("win on 2")
-    ).astype(float)
+    if "is_crypto" not in df.columns:
+        df["is_crypto"] = text_lower.str.contains(
+            "crypto|bitcoin|btc|ethereum|eth|solana|sol|defi|nft|blockchain"
+            "|dogecoin|doge|xrp|ripple|cardano|polkadot|avalanche|chainlink|bnb|binance"
+            "|coinbase|stablecoin|memecoin|token"
+        ).astype(float)
 
-    # NLP features from question text (v5)
-    # Use 'question' field if available, else fall back to 'category' field
-    text = df.get("question", df.get("category", pd.Series([""] * len(df)))).fillna("")
-    if "question" not in df.columns:
-        text = df["category"].fillna("")
+    if "is_sports" not in df.columns:
+        df["is_sports"] = (
+            text_lower.str.contains(r" vs\. | vs ", regex=True)
+            | text_lower.str.contains("spread:")
+            | text_lower.str.contains(r"o/u |over/under", regex=True)
+            | text_lower.str.contains("win on 2")
+        ).astype(float)
 
-    POSITIVE = {"win", "pass", "above", "exceed", "achieve", "surge", "gain", "rise",
-                "increase", "approve", "success", "agree", "accept", "hit", "reach"}
-    NEGATIVE = {"lose", "fail", "below", "crash", "reject", "decline", "fall", "drop",
-                "decrease", "deny", "miss", "ban", "block", "cancel", "collapse"}
-    CERTAINTY = {"will", "definitely", "certainly", "must", "always", "guaranteed"}
-    MONTHS_SET = {"january", "february", "march", "april", "may", "june",
-                  "july", "august", "september", "october", "november", "december"}
+    # NLP features from question text (v5) — only compute if missing
+    if "q_length" not in df.columns:
+        POSITIVE = {"win", "pass", "above", "exceed", "achieve", "surge", "gain", "rise",
+                    "increase", "approve", "success", "agree", "accept", "hit", "reach"}
+        NEGATIVE = {"lose", "fail", "below", "crash", "reject", "decline", "fall", "drop",
+                    "decrease", "deny", "miss", "ban", "block", "cancel", "collapse"}
+        CERTAINTY = {"will", "definitely", "certainly", "must", "always", "guaranteed"}
+        MONTHS_SET = {"january", "february", "march", "april", "may", "june",
+                      "july", "august", "september", "october", "november", "december"}
 
-    def _nlp_row(q):
-        ql = q.lower()
-        words = ql.split()
-        n = max(len(words), 1)
-        unique = set(words)
-        return {
-            "q_length": float(len(q)),
-            "q_word_count": float(n),
-            "q_avg_word_len": sum(len(w) for w in words) / n,
-            "q_word_diversity": len(unique) / n,
-            "q_has_number": float(bool(re.search(r"\d", q))),
-            "q_has_year": float("202" in q),
-            "q_has_percent": float("%" in q),
-            "q_has_dollar": float("$" in q),
-            "q_has_date": float(any(m in ql for m in MONTHS_SET) or "/" in q),
-            "q_starts_will": float(ql.startswith("will ")),
-            "q_has_by": float(" by " in ql),
-            "q_has_before": float(" before " in ql),
-            "q_has_above": float(bool(re.search(r"above|over|exceed|hit|reach|break", ql))),
-            "q_sentiment_pos": float(sum(1 for w in words if w in POSITIVE)),
-            "q_sentiment_neg": float(sum(1 for w in words if w in NEGATIVE)),
+        def _nlp_row(q):
+            ql = q.lower()
+            words = ql.split()
+            n = max(len(words), 1)
+            unique = set(words)
+            return {
+                "q_length": float(len(q)),
+                "q_word_count": float(n),
+                "q_avg_word_len": sum(len(w) for w in words) / n,
+                "q_word_diversity": len(unique) / n,
+                "q_has_number": float(bool(re.search(r"\d", q))),
+                "q_has_year": float("202" in q),
+                "q_has_percent": float("%" in q),
+                "q_has_dollar": float("$" in q),
+                "q_has_date": float(any(m in ql for m in MONTHS_SET) or "/" in q),
+                "q_starts_will": float(ql.startswith("will ")),
+                "q_has_by": float(" by " in ql),
+                "q_has_before": float(" before " in ql),
+                "q_has_above": float(bool(re.search(r"above|over|exceed|hit|reach|break", ql))),
+                "q_sentiment_pos": float(sum(1 for w in words if w in POSITIVE)),
+                "q_sentiment_neg": float(sum(1 for w in words if w in NEGATIVE)),
             "q_certainty": float(sum(1 for w in words if w in CERTAINTY)),
         }
 
-    nlp_df = pd.DataFrame([_nlp_row(q) for q in text])
-    for col in nlp_df.columns:
-        df[col] = nlp_df[col].values
+        nlp_df = pd.DataFrame([_nlp_row(q) for q in text_col])
+        for col in nlp_df.columns:
+            df[col] = nlp_df[col].values
 
     # Fill NaN momentum with 0 (no price reference available)
     for col in ["momentum_1h", "momentum_24h", "price_1h_ago", "price_6h_ago", "price_24h_ago"]:
