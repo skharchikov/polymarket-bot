@@ -21,7 +21,7 @@ jobs:
     outputs:
       tag: ${{ steps.version.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # ── Version bump ────────────────────────────────────────────
       - name: Compute new version
         id: version
@@ -73,7 +73,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.release.outputs.tag }}
 
@@ -90,17 +90,17 @@ jobs:
         run: cargo build --workspace --release --target x86_64-unknown-linux-musl
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build and push trading-bot
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: trading-bot/Dockerfile
@@ -110,7 +110,7 @@ jobs:
             ghcr.io/${{ github.repository }}:${{ needs.release.outputs.tag }}
 
       - name: Build and push copy-trading-bot
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: copy-trading-bot/Dockerfile
