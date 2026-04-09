@@ -496,23 +496,14 @@ def print_feature_importance(model, feature_names):
 
 def main():
     parser = argparse.ArgumentParser(description="Train prediction model")
-    parser.add_argument("--input", nargs="+", default=["model/training_data.json"],
-                        help="One or more training data JSON files to merge")
+    parser.add_argument("--input", default="model/training_data.json")
     parser.add_argument("--output", default="model/xgb_model.json")
     parser.add_argument("--no-calibration", action="store_true",
                         help="Skip probability calibration")
     args = parser.parse_args()
 
-    # Load data — merge multiple input files if provided
-    dfs = []
-    for inp in args.input:
-        print(f"\nLoading {inp}...")
-        dfs.append(load_data(inp))
-    df = pd.concat(dfs, ignore_index=True)
-    if len(dfs) > 1:
-        # Re-sort merged data by snapshot time
-        df = df.sort_values("snapshot_ts").reset_index(drop=True)
-        print(f"\nMerged {len(dfs)} files → {len(df)} total samples")
+    # Load data
+    df = load_data(args.input)
     if len(df) < 50:
         print(f"Error: Need at least 50 samples, got {len(df)}", file=sys.stderr)
         sys.exit(1)

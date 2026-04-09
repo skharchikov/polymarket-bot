@@ -255,16 +255,12 @@ def _run_retrain():
 
         _retrain.step = "train"
         log.info("retrain.train_start")
-        train_inputs = [f"{MODEL_DIR}/training_data.json"]
-        # Merge with large dataset if available (Jon-Becker 50K samples)
-        extra_data = Path(MODEL_DIR) / "training_data_extra.json"
-        if extra_data.exists():
-            train_inputs.append(str(extra_data))
-            log.info("retrain.merge_extra: %s", extra_data)
-        train_args = [sys.executable, "train_model.py", "--output", f"{MODEL_DIR}/xgb_model.json"]
-        for inp in train_inputs:
-            train_args.extend(["--input", inp])
-        subprocess.run(train_args, check=True, capture_output=True, text=True)
+        subprocess.run(
+            [sys.executable, "train_model.py",
+             "--input", f"{MODEL_DIR}/training_data.json",
+             "--output", f"{MODEL_DIR}/xgb_model.json"],
+            check=True, capture_output=True, text=True,
+        )
 
         _retrain.step = "load"
         load_model()

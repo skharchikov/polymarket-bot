@@ -107,6 +107,17 @@ Analysis of open-source Polymarket bots (NavnoorBawa, ReMax paper, oracle3) reve
 - Added to `MarketFeatures`, `FEATURE_COLS`, `CATEGORY_COLS`, `FeatureMap`
 - Target-encoded by sidecar (binary → historical YES rate)
 
+#### 2d. Added 16 NLP features (v5, 13 → 29 features)
+- Inspired by NavnoorBawa (88-92% accuracy on high-confidence predictions using 54 non-price features)
+- Extracts question text features with no price leakage:
+  - `q_length`, `q_word_count`, `q_avg_word_len`, `q_word_diversity`
+  - `q_has_number`, `q_has_year`, `q_has_percent`, `q_has_dollar`, `q_has_date`
+  - `q_starts_will`, `q_has_by`, `q_has_before`, `q_has_above`
+  - `q_sentiment_pos`, `q_sentiment_neg`, `q_certainty`
+- Added `NlpFeatures` struct + `extract_nlp_features()` in `common/src/model/features.rs`
+- Computed at training time in `train_model.py` from question text
+- Computed at inference time in Rust and sent to sidecar
+
 ### Phase 3: Data & Infrastructure
 
 #### 3a. Category column on bets
