@@ -465,6 +465,8 @@ def fetch_bet_snapshots(database_url: str, scraper: PolymarketScraper,
         bet_idx = int(np.searchsorted(timestamps, bet_ts))
         bet_idx = min(bet_idx, len(ticks) - 2)
         bet_idx = max(bet_idx, 20)
+        if bet_idx >= len(ticks):
+            continue
 
         volume = ctx.get("volume", 0) if ctx and isinstance(ctx, dict) else 0
         liquidity = ctx.get("liquidity", 0) if ctx and isinstance(ctx, dict) else 0
