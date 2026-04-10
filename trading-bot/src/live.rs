@@ -249,7 +249,12 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     let hk_interval = cfg.scan_interval_mins;
     let hk_stop_loss = cfg.stop_loss_pct;
     let hk_exit_days = cfg.exit_days_before_expiry;
+    // Alert if model age exceeds retrain interval + 60 min buffer for the retrain itself
+    let hk_retrain_max_secs = (cfg.retrain_interval_hours * 3600 + 60 * 60) as f64;
     let housekeeping = tokio::spawn(async move {
+        let mut last_model_age: f64 = 0.0;
+        let mut overdue_alerted = false;
+
         loop {
             let hk_start = std::time::Instant::now();
             if let Err(e) = cycles::housekeeping_cycle(
@@ -263,6 +268,27 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             {
                 tracing::error!(err = %e, "Housekeeping cycle failed");
             }
+
+            // Check model retrain status every housekeeping cycle
+            if let Some(age) = hk_scanner.model_age_secs().await {
+                if last_model_age > 0.0 && age < last_model_age {
+                    let h = (age / 3600.0) as u64;
+                    let m = ((age % 3600.0) / 60.0) as u64;
+                    let _ = hk_notifier
+                        .send(&format!("🧠 *Model retrained* (age: {h}h {m}m)"))
+                        .await;
+                    tracing::info!(age_secs = age, "Model retrain detected");
+                    overdue_alerted = false;
+                } else if age > hk_retrain_max_secs && !overdue_alerted {
+                    let _ = hk_notifier
+                        .send("⚠️ *Model retrain overdue* — sidecar may have failed")
+                        .await;
+                    tracing::warn!(age_secs = age, "Model retrain overdue");
+                    overdue_alerted = true;
+                }
+                last_model_age = age;
+            }
+
             metrics::record_duration("bot_housekeeping_duration_seconds", hk_start.elapsed());
             tokio::time::sleep(Duration::from_secs(hk_interval * 60)).await;
         }
@@ -433,44 +459,6 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         }
     });
 
-    // Spawn model retrain monitor — checks sidecar after expected retrain window
-    let mr_scanner = Arc::clone(&scanner);
-    let mr_notifier = Arc::clone(&notifier);
-    let retrain_interval = Duration::from_secs(cfg.retrain_interval_hours * 3600);
-    let model_monitor = tokio::spawn(async move {
-        // Get initial model age to know when next retrain is due
-        tokio::time::sleep(Duration::from_secs(60)).await;
-        let mut last_age = mr_scanner.model_age_secs().await.unwrap_or(0.0);
-
-        loop {
-            // Sleep until the model should have been retrained
-            let time_until_retrain =
-                retrain_interval.saturating_sub(Duration::from_secs_f64(last_age));
-            // Check 20 min after expected retrain
-            tokio::time::sleep(time_until_retrain + Duration::from_secs(20 * 60)).await;
-
-            if let Some(age) = mr_scanner.model_age_secs().await {
-                if age < last_age {
-                    let h = (age / 3600.0) as u64;
-                    let m = ((age % 3600.0) / 60.0) as u64;
-                    let _ = mr_notifier
-                        .send(&format!("🧠 *Model retrained* (age: {h}h {m}m)"))
-                        .await;
-                    tracing::info!(age_secs = age, "Model retrain detected");
-                } else {
-                    let _ = mr_notifier
-                        .send("⚠️ *Model retrain overdue* — sidecar may have failed")
-                        .await;
-                    tracing::warn!(age_secs = age, "Model retrain overdue");
-                }
-                last_age = age;
-            } else {
-                let _ = mr_notifier.send("⚠️ *Model sidecar unreachable*").await;
-                last_age = 0.0;
-            }
-        }
-    });
-
     // Spawn alert processing loop — runs XGBoost on markets triggered by WS
     let alert_loop = tokio::spawn(cycles::alert_loop(
         alert_rx,
@@ -506,9 +494,6 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         }
         r = alert_loop => {
             tracing::error!("Alert processing loop exited: {:?}", r);
-        }
-        r = model_monitor => {
-            tracing::error!("Model monitor loop exited: {:?}", r);
         }
     }
 
