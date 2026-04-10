@@ -467,7 +467,28 @@ impl LiveScanner {
             let url = format!(
                 "{GAMMA_API}/markets?closed=false&active=true&limit={page_size}&offset={offset}&order=volumeNum&ascending=false"
             );
-            let resp = self.http.get(&url).send().await?;
+
+            let resp = self.http.get(&url).send().await.map_err(|e| {
+                tracing::warn!(
+                    err = %e,
+                    offset,
+                    is_timeout = e.is_timeout(),
+                    is_connect = e.is_connect(),
+                    "Gamma API request failed"
+                );
+                e
+            })?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                tracing::warn!(
+                    status = %status,
+                    offset,
+                    body = &body[..body.len().min(200)],
+                    "Gamma API error response"
+                );
+                anyhow::bail!("Gamma API returned {status} at offset {offset}");
+            }
             let text = resp.text().await?;
             let page: Vec<GammaMarket> = serde_json::from_str(&text).with_context(|| {
                 format!(
