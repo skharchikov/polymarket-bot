@@ -349,7 +349,7 @@ pub async fn copy_trade_cycle(
             )
             .await;
 
-        match portfolio.place_bet(&new_bet).await {
+        match portfolio.place_copy_bet(&new_bet).await {
             Ok(_bet_id) => {
                 let new_bankroll = portfolio.strategy_bankroll(&strategy_name).await?;
                 let open_count = portfolio.open_bets().await?.len();

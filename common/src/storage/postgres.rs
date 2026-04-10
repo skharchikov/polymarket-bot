@@ -882,6 +882,73 @@ impl PgPortfolio {
         Ok(row.0)
     }
 
+    /// Place a copy-trade bet. Same row insert but only touches per-strategy
+    /// bankroll/signal counters — the global counters stay untouched so the
+    /// main bot's heartbeat and daily limits are not polluted.
+    #[tracing::instrument(skip(self, bet), fields(market_id = %bet.market_id, strategy = %bet.strategy))]
+    pub async fn place_copy_bet(&self, bet: &NewBet) -> Result<i32> {
+        let side_str = match bet.side {
+            BetSide::Yes => "Yes",
+            BetSide::No => "No",
+        };
+        let copy_ref_json = bet
+            .copy_ref
+            .as_ref()
+            .map(|c| serde_json::to_value(c).unwrap_or_default());
+
+        let mut tx = self.pool.begin().await?;
+
+        let row: (i32,) = sqlx::query_as(
+            "INSERT INTO bets (market_id, question, side, entry_price, slipped_price, shares, cost, fee_paid, \
+             estimated_prob, confidence, edge, kelly_size, reasoning, end_date, context, strategy, source, url, event_slug, copy_ref, category) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING id",
+        )
+        .bind(&bet.market_id)
+        .bind(&bet.question)
+        .bind(side_str)
+        .bind(bet.entry_price)
+        .bind(bet.slipped_price)
+        .bind(bet.shares)
+        .bind(bet.cost)
+        .bind(bet.fee)
+        .bind(bet.estimated_prob)
+        .bind(bet.confidence)
+        .bind(bet.edge)
+        .bind(bet.kelly_size)
+        .bind(&bet.reasoning)
+        .bind(bet.end_date.as_deref())
+        .bind::<Option<serde_json::Value>>(None)
+        .bind(&bet.strategy)
+        .bind(&bet.source)
+        .bind(&bet.url)
+        .bind(bet.event_slug.as_deref())
+        .bind(copy_ref_json)
+        .bind(bet.category.as_deref())
+        .fetch_one(&mut *tx)
+        .await?;
+
+        // Only per-strategy bankroll and signal counter — no global counters
+        let strat_bankroll_key = format!("bankroll:{}", bet.strategy);
+        let strat_signals_key = format!("signals_sent_today:{}", bet.strategy);
+        let total_deduction = bet.cost + bet.fee;
+        sqlx::query(
+            "UPDATE portfolio SET \
+               value_f64 = CASE \
+                 WHEN key = $1 THEN value_f64 - $2 \
+                 WHEN key = $3 THEN value_f64 + 1 \
+               END \
+             WHERE key IN ($1, $3)",
+        )
+        .bind(&strat_bankroll_key)
+        .bind(total_deduction)
+        .bind(&strat_signals_key)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(row.0)
+    }
+
     #[tracing::instrument(skip(self))]
     pub async fn resolve_bet(&self, market_id: &str, yes_won: bool) -> Result<Option<ResolvedBet>> {
         // Find unresolved bet for this market
