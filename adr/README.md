@@ -25,4 +25,6 @@ Sections:
 | [005](005-feature-improvements.md) | Temporal features, target encoding, SHAP analysis | active | 2026-03-15 |
 | [006](006-remove-dead-features.md) | Remove dead features: log_liquidity, is_politics, is_sports | active | 2026-03-16 |
 | [007](007-portfolio-correlation-check.md) | Portfolio correlation check via LLM batch call | draft | 2026-03-17 |
-
+| [008](008-workspace-split.md) | Cargo workspace split (3 crates) | accepted | 2026-03-23 |
+| [009](009-profitability-overhaul.md) | Profitability overhaul: signal filters + recalibration | active | 2026-04-06 |
+| [010](010-remove-dataset-scripts.md) | Remove Jon-Becker dataset scripts | active | 2026-04-09 |
