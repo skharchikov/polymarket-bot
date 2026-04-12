@@ -24,9 +24,9 @@ confique = "0.4"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", features = ["http-listener"] }
 metrics-process = "2.3"
-tokio-metrics = { version = "0.4", features = ["rt"] }
+tokio-metrics = { version = "0.5", features = ["rt"] }
 futures-util = "0.3"
 mimalloc = "0.1"
-rig-core = { version = "0.32", features = ["all"] }
-tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+rig-core = { version = "0.34", features = ["all"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 rustls = { version = "0.23", features = ["ring"] }
