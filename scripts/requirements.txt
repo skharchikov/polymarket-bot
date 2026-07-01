@@ -1,15 +1,15 @@
-xgboost>=3.2.0
+xgboost>=3.3.0
 lightgbm>=4.6.0
 # Pinned: model artifact (ensemble.joblib) is pickled with sklearn 1.8.0.
 # 1.9.0 moved the internal `_loss` module -> unpickle fails (ModuleNotFoundError: No module named '_loss').
 # Bump only together with a model retrain on the new version.
-scikit-learn==1.8.0
+scikit-learn==1.9.0
 pandas>=3.0.3
-numpy>=2.4.6
+numpy>=2.5.0
 requests>=2.34.2
 psycopg2-binary>=2.9.12
-fastapi>=0.136.3
-uvicorn>=0.48.0
+fastapi>=0.139.0
+uvicorn>=0.49.0
 joblib>=1.5.3
 shap>=0.52.0
-structlog>=25.5.0
+structlog>=26.1.0
