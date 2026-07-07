@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use confique::{Config, Layer};
 use reqwest::Client;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -9,25 +10,26 @@ const GAMMA_API: &str = "https://gamma-api.polymarket.com";
 const CLOB_API: &str = "https://clob.polymarket.com";
 const PAGE_SIZE: usize = 100;
 
+#[derive(Config)]
 pub struct CrawlerConfig {
+    #[config(default = 100)]
     pub rate_limit_ms: u64,
+    #[config(default = 2000)]
     pub market_limit: usize,
+    #[config(default = true)]
     pub crypto_only: bool,
+    #[config(default = 1000.0)]
     pub min_volume: f64,
+    #[config(default = 20)]
     pub min_ticks: usize,
+    #[config(default = 4.0)]
     pub min_duration_hours: f64,
 }
 
 impl Default for CrawlerConfig {
     fn default() -> Self {
-        Self {
-            rate_limit_ms: 100,
-            market_limit: 2000,
-            crypto_only: true,
-            min_volume: 1000.0,
-            min_ticks: 20,
-            min_duration_hours: 4.0,
-        }
+        Self::from_layer(<Self as Config>::Layer::default_values())
+            .expect("all fields have confique defaults")
     }
 }
 
