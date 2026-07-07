@@ -1348,7 +1348,7 @@ impl PgPortfolio {
             .await
     }
 
-    async fn fetch_bets(&self, query: &str) -> Result<Vec<Bet>> {
+    async fn fetch_bets(&self, query: &'static str) -> Result<Vec<Bet>> {
         let rows: Vec<BetRow> = sqlx::query_as(query).fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(|r| r.into_bet()).collect())
     }

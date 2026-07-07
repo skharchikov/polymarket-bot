@@ -291,7 +291,7 @@ impl LiveScanner {
         Ok(Self {
             news: NewsAggregator::new(http.clone()),
             http,
-            openai_client: openai::Client::from_env(),
+            openai_client: openai::Client::from_env()?,
             pool,
             calibration: RwLock::new(calibration),
             cfg: Arc::clone(cfg),
@@ -694,7 +694,7 @@ impl LiveScanner {
 
             let agent = self.build_agent(role);
             let result = agent
-                .chat(prompt.as_str(), vec![])
+                .chat(prompt.as_str(), Vec::<rig::completion::Message>::new())
                 .await
                 .map_err(|e| anyhow::anyhow!("LLM call ({}) failed: {e}", role.label()))
                 .and_then(|resp| parse_llm_response(&resp));
@@ -1790,7 +1790,7 @@ async fn run_correlation_check(
         .build();
 
     let response = agent
-        .chat(&prompt, vec![])
+        .chat(&prompt, Vec::<rig::completion::Message>::new())
         .await
         .map_err(|e| anyhow::anyhow!("Correlation check LLM call failed: {e}"))?;
 
@@ -2313,7 +2313,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires OPENAI_API_KEY"]
     async fn test_correlation_check_real_llm() {
-        let client = openai::Client::from_env();
+        let client = openai::Client::from_env().expect("OPENAI_API_KEY not set");
 
         // Scenario: two partition buckets (should be rejected) + one independent (should be kept)
         let candidates = vec![
