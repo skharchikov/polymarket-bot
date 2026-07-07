@@ -1,35 +1,38 @@
 use std::collections::HashMap;
 
+use confique::{Config, Layer};
+
 use super::metrics::BacktestMetrics;
 use super::portfolio::{Portfolio, Side};
 use crate::data::models::{HistoricalMarket, PriceTick};
 
+#[derive(Config)]
 pub struct BacktestConfig {
+    #[config(env = "BACKTEST_STARTING_CASH", default = 10_000.0)]
     pub starting_cash: f64,
+    #[config(env = "BACKTEST_EDGE_THRESHOLD", default = 0.03)]
     pub edge_threshold: f64,
+    #[config(env = "BACKTEST_POSITION_SIZE_PCT", default = 0.05)]
     pub position_size_pct: f64,
     /// Slippage as a fraction of price (e.g., 0.01 = 1%)
+    #[config(env = "BACKTEST_SLIPPAGE_PCT", default = 0.01)]
     pub slippage_pct: f64,
     /// Trading fee as a fraction of notional (e.g., 0.02 = 2%)
+    #[config(env = "BACKTEST_FEE_PCT", default = 0.02)]
     pub fee_pct: f64,
     /// How far into the history to enter (fraction 0.0-1.0).
     /// 0.2 means enter after observing the first 20% of ticks.
+    #[config(env = "BACKTEST_ENTRY_POINT", default = 0.2)]
     pub entry_point: f64,
     /// Minimum observed ticks before entry (overrides entry_point if too few).
+    #[config(env = "BACKTEST_MIN_LOOKBACK", default = 10)]
     pub min_lookback: usize,
 }
 
 impl Default for BacktestConfig {
     fn default() -> Self {
-        Self {
-            starting_cash: 10_000.0,
-            edge_threshold: 0.03,
-            position_size_pct: 0.05,
-            slippage_pct: 0.01,
-            fee_pct: 0.02,
-            entry_point: 0.2,
-            min_lookback: 10,
-        }
+        Self::from_layer(<Self as Config>::Layer::default_values())
+            .expect("all fields have confique defaults")
     }
 }
 
