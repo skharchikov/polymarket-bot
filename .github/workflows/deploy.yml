@@ -6,8 +6,8 @@ on:
 
 env:
   DEPLOY_DIR: /opt/polymarket-bot
-  IMAGE: ghcr.io/skharchikov/polymarket-bot:latest
-  IMAGE_COPY: ghcr.io/skharchikov/polymarket-bot-copy:latest
+  IMAGE: ghcr.io/skharchikov/polymarket-trading-bot:latest
+  IMAGE_COPY: ghcr.io/skharchikov/polymarket-copy-trading-bot:latest
 
 jobs:
   deploy:

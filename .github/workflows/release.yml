@@ -106,8 +106,8 @@ jobs:
           file: trading-bot/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ needs.release.outputs.tag }}
+            ghcr.io/${{ github.repository_owner }}/polymarket-trading-bot:latest
+            ghcr.io/${{ github.repository_owner }}/polymarket-trading-bot:${{ needs.release.outputs.tag }}
 
       - name: Build and push copy-trading-bot
         uses: docker/build-push-action@v7
@@ -116,13 +116,13 @@ jobs:
           file: copy-trading-bot/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}-copy:latest
-            ghcr.io/${{ github.repository }}-copy:${{ needs.release.outputs.tag }}
+            ghcr.io/${{ github.repository_owner }}/polymarket-copy-trading-bot:latest
+            ghcr.io/${{ github.repository_owner }}/polymarket-copy-trading-bot:${{ needs.release.outputs.tag }}
 
       - name: Prune old images (keep last 3)
         uses: actions/delete-package-versions@v5
         with:
-          package-name: polymarket-bot
+          package-name: polymarket-trading-bot
           package-type: container
           min-versions-to-keep: 3
           delete-untagged-versions: true
@@ -130,7 +130,7 @@ jobs:
       - name: Prune old copy-trading-bot images (keep last 3)
         uses: actions/delete-package-versions@v5
         with:
-          package-name: polymarket-bot-copy
+          package-name: polymarket-copy-trading-bot
           package-type: container
           min-versions-to-keep: 3
           delete-untagged-versions: true

@@ -38,7 +38,7 @@ services:
     restart: unless-stopped
 
   bot:
-    image: ghcr.io/skharchikov/polymarket-bot:latest
+    image: ghcr.io/skharchikov/polymarket-trading-bot:latest
     depends_on:
       postgres:
         condition: service_healthy
@@ -57,7 +57,7 @@ services:
     restart: unless-stopped
 
   copy-trading-bot:
-    image: ghcr.io/skharchikov/polymarket-bot-copy:latest
+    image: ghcr.io/skharchikov/polymarket-copy-trading-bot:latest
     depends_on:
       postgres:
         condition: service_healthy
