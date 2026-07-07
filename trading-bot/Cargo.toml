@@ -1,6 +1,6 @@
 [package]
 name = "trading-bot"
-version = "0.6.35"
+version = "0.6.36"
 edition = "2024"
 
 [[bin]]
