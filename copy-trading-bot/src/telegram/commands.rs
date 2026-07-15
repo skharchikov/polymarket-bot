@@ -3,7 +3,8 @@
 use crate::config::CopyTradingConfig;
 use crate::cycles::copy_trade::COPY_TRADER_STARTING_BANKROLL;
 use crate::scanner::copy_trader::{
-    CopyTraderMonitor, fetch_leaderboard, fetch_trader_username, format_multi_leaderboard,
+    CopyTraderMonitor, fetch_leaderboard, fetch_trader_stats, fetch_trader_username,
+    format_multi_leaderboard, refresh_followed_trader_stats,
 };
 use crate::storage::postgres::PgPortfolio;
 use crate::telegram::notifier::TelegramNotifier;
@@ -50,13 +51,17 @@ pub async fn handle_command(
                 "⚠️ Failed to load copy positions".to_string()
             }
         },
-        "traders" => match portfolio.traders_summary().await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(err = %e, "Failed to build traders summary");
-                "⚠️ Failed to load traders".to_string()
+        "traders" => {
+            // Pull fresh leaderboard stats (rank / Poly PnL) before rendering.
+            refresh_followed_trader_stats(http, portfolio).await;
+            match portfolio.traders_summary().await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(err = %e, "Failed to build traders summary");
+                    "⚠️ Failed to load traders".to_string()
+                }
             }
-        },
+        }
         "leaderboard" => {
             let (day_res, month_res, all_res) = tokio::join!(
                 fetch_leaderboard(http, "DAY"),
@@ -112,16 +117,24 @@ pub async fn handle_command(
                     {
                         tracing::warn!(err = %e, "Failed to init copy trader starting bankroll");
                     }
-                    let username = fetch_trader_username(http, &wallet).await;
+                    let stats = fetch_trader_stats(http, &wallet).await.ok().flatten();
+                    let mut username = stats.as_ref().and_then(|s| s.username.clone());
+                    if username.is_none() {
+                        username = fetch_trader_username(http, &wallet).await;
+                    }
                     let display = username.as_deref().unwrap_or(short);
+                    let (rank, pnl, volume) = stats
+                        .as_ref()
+                        .map(|s| (s.rank, Some(s.pnl), Some(s.volume)))
+                        .unwrap_or((None, None, None));
                     match portfolio
                         .add_followed_trader(
                             &wallet,
                             username.as_deref(),
                             "manual",
-                            None,
-                            None,
-                            None,
+                            rank,
+                            pnl,
+                            volume,
                         )
                         .await
                     {

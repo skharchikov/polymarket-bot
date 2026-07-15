@@ -35,6 +35,8 @@ struct LeaderboardEntry {
     #[serde(rename = "userName")]
     name: Option<String>,
     #[serde(default)]
+    rank: Option<serde_json::Value>,
+    #[serde(default)]
     pnl: Option<serde_json::Value>,
     #[serde(default, rename = "vol")]
     volume: Option<serde_json::Value>,
@@ -47,6 +49,15 @@ impl LeaderboardEntry {
 
     fn volume_f64(&self) -> f64 {
         self.volume_like(&self.volume)
+    }
+
+    /// Rank arrives as a string (e.g. `"80"`) — parse to i32, `None` if absent.
+    fn rank_i32(&self) -> Option<i32> {
+        self.rank.as_ref().and_then(|v| match v {
+            serde_json::Value::Number(n) => n.as_i64().map(|n| n as i32),
+            serde_json::Value::String(s) => s.parse().ok(),
+            _ => None,
+        })
     }
 
     fn volume_like(&self, v: &Option<serde_json::Value>) -> f64 {
@@ -119,6 +130,92 @@ pub struct LeaderboardDisplay {
 // ---------------------------------------------------------------------------
 // Standalone leaderboard helpers (no monitor instance required)
 // ---------------------------------------------------------------------------
+
+/// Per-wallet stats from the Polymarket leaderboard endpoint.
+#[derive(Debug, Clone)]
+pub struct TraderStats {
+    pub rank: Option<i32>,
+    pub pnl: f64,
+    pub volume: f64,
+    pub username: Option<String>,
+}
+
+/// Extract [`TraderStats`] from a per-wallet leaderboard response.
+/// Returns `None` when the wallet has no leaderboard entry.
+fn parse_trader_stats(entries: Vec<LeaderboardEntry>) -> Option<TraderStats> {
+    let e = entries.into_iter().next()?;
+    Some(TraderStats {
+        rank: e.rank_i32(),
+        pnl: e.pnl_f64(),
+        volume: e.volume_f64(),
+        username: e.name.filter(|n| !n.is_empty()),
+    })
+}
+
+/// Fetch all-time stats (rank, PnL, volume, username) for a single wallet via
+/// `GET /v1/leaderboard?timePeriod=ALL&limit=1&user=<wallet>`.
+///
+/// Returns `Ok(None)` when the wallet has no leaderboard entry.
+pub async fn fetch_trader_stats(http: &Client, wallet: &str) -> Result<Option<TraderStats>> {
+    let url = format!("{DATA_API}/v1/leaderboard?timePeriod=ALL&limit=1&user={wallet}");
+    let entries: Vec<LeaderboardEntry> = http
+        .get(&url)
+        .timeout(REQUEST_TIMEOUT)
+        .send()
+        .await
+        .context("trader stats request failed")?
+        .error_for_status()
+        .context("trader stats returned non-2xx")?
+        .json()
+        .await
+        .context("trader stats JSON parse failed")?;
+    Ok(parse_trader_stats(entries))
+}
+
+/// Refresh leaderboard stats for all active followed traders (best-effort).
+///
+/// Fetches per-wallet stats concurrently and writes them back to
+/// `followed_traders`. Failures are logged and skipped so a partial refresh
+/// never blocks the caller.
+pub async fn refresh_followed_trader_stats(http: &Client, portfolio: &PgPortfolio) {
+    let traders = match portfolio.get_active_traders().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(err = %e, "Failed to load traders for stats refresh");
+            return;
+        }
+    };
+
+    let fetches = traders.iter().map(|t| async move {
+        let res = fetch_trader_stats(http, &t.proxy_wallet).await;
+        (t, res)
+    });
+
+    for (trader, res) in join_all(fetches).await {
+        match res {
+            Ok(Some(stats)) => {
+                if let Err(e) = portfolio
+                    .update_trader_stats(
+                        &trader.proxy_wallet,
+                        stats.rank,
+                        Some(stats.pnl),
+                        Some(stats.volume),
+                        stats.username.as_deref(),
+                    )
+                    .await
+                {
+                    tracing::warn!(wallet = %trader.proxy_wallet, err = %e, "Failed to save trader stats");
+                }
+            }
+            Ok(None) => {
+                tracing::debug!(wallet = %trader.proxy_wallet, "No leaderboard entry for trader");
+            }
+            Err(e) => {
+                tracing::warn!(wallet = %trader.proxy_wallet, err = %e, "Failed to fetch trader stats");
+            }
+        }
+    }
+}
 
 /// Fetch a trader's display name via the activity endpoint.
 /// Returns `None` if the request fails or the trader has no activity.
@@ -618,6 +715,51 @@ mod tests {
         assert_eq!(trades[0].size_usd, 0.0);
     }
 
+    // Real API response shape captured 2026-07-15 from
+    // GET /v1/leaderboard?timePeriod=ALL&limit=1&user=<wallet>
+    const TRADER_STATS_JSON: &str = r#"[
+        {
+            "rank": "80",
+            "proxyWallet": "0x37c1874a60d348903594a96703e0507c518fc53a",
+            "userName": "CemeterySun",
+            "xUsername": "",
+            "verifiedBadge": false,
+            "vol": 148559637.69049004,
+            "pnl": 1927132.677116769,
+            "profileImage": ""
+        }
+    ]"#;
+
+    #[test]
+    fn test_parse_trader_stats_real_shape() {
+        let entries: Vec<LeaderboardEntry> = serde_json::from_str(TRADER_STATS_JSON).unwrap();
+        let stats = parse_trader_stats(entries).expect("stats should parse");
+        // rank arrives as a string — must be parsed to i32
+        assert_eq!(stats.rank, Some(80));
+        assert!((stats.pnl - 1_927_132.677_116_769).abs() < 1e-6);
+        assert!((stats.volume - 148_559_637.690_490_04).abs() < 1e-6);
+        assert_eq!(stats.username.as_deref(), Some("CemeterySun"));
+    }
+
+    #[test]
+    fn test_parse_trader_stats_empty_response() {
+        // Wallet with no leaderboard entry → empty array → None
+        let entries: Vec<LeaderboardEntry> = serde_json::from_str("[]").unwrap();
+        assert!(parse_trader_stats(entries).is_none());
+    }
+
+    #[test]
+    fn test_parse_trader_stats_missing_optional_fields() {
+        // rank absent, empty username → still returns pnl/vol, rank None, username None
+        let json = r#"[{"proxyWallet": "0xabc", "userName": "", "pnl": 100.5, "vol": 200.0}]"#;
+        let entries: Vec<LeaderboardEntry> = serde_json::from_str(json).unwrap();
+        let stats = parse_trader_stats(entries).expect("stats should parse");
+        assert_eq!(stats.rank, None);
+        assert_eq!(stats.pnl, 100.5);
+        assert_eq!(stats.volume, 200.0);
+        assert_eq!(stats.username, None);
+    }
+
     #[tokio::test]
     #[ignore] // hits real API
     async fn test_fetch_leaderboard_live() {
@@ -632,6 +774,21 @@ mod tests {
             "{}",
             format_multi_leaderboard(&[("All Time", entries.as_slice())])
         );
+    }
+
+    #[tokio::test]
+    #[ignore] // hits real API
+    async fn test_fetch_trader_stats_live() {
+        let http = Client::new();
+        let wallet = "0x37c1874a60d348903594a96703e0507c518fc53a";
+        let stats = fetch_trader_stats(&http, wallet)
+            .await
+            .unwrap()
+            .expect("known trader should have stats");
+        assert!(stats.pnl != 0.0, "pnl should be non-zero");
+        assert!(stats.volume > 0.0, "volume should be positive");
+        assert!(stats.rank.is_some(), "rank should be present");
+        println!("{stats:?}");
     }
 
     #[tokio::test]
