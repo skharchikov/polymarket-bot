@@ -1721,7 +1721,7 @@ impl LiveScanner {
     ) -> Result<Vec<CorrelationDecision>> {
         let mut open: Vec<(String, BetSide)> = open_bets
             .iter()
-            .map(|b| (b.question.clone(), b.side.clone()))
+            .map(|b| (b.question.clone(), b.side))
             .collect();
         open.extend(blocked.iter().cloned());
         run_correlation_check(&self.openai_client, &self.cfg.llm_model, candidates, &open).await

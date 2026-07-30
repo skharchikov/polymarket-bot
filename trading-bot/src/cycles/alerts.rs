@@ -137,7 +137,7 @@ pub async fn alert_loop(
                 let corr_candidates = vec![(
                     signal.market_id.clone(),
                     signal.question.clone(),
-                    signal.side.clone(),
+                    signal.side,
                 )];
                 let corr_decisions =
                     super::portfolio_correlation_check(&scanner, &portfolio, &corr_candidates)
@@ -206,7 +206,7 @@ pub async fn alert_loop(
                     let new_bet = NewBet {
                         market_id: signal.market_id.clone(),
                         question: signal.question.clone(),
-                        side: signal.side.clone(),
+                        side: signal.side,
                         entry_price: signal.current_price,
                         slipped_price,
                         shares,
