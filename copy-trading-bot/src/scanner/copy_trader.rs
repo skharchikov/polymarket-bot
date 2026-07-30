@@ -80,6 +80,9 @@ struct ActivityEvent {
     condition_id: Option<String>,
     /// "BUY" | "SELL"
     side: Option<String>,
+    /// Which market outcome token was traded: 0 = YES (first token), 1 = NO.
+    #[serde(rename = "outcomeIndex")]
+    outcome_index: Option<i64>,
     price: Option<f64>,
     /// Actual USD value of the trade (not shares).
     #[serde(rename = "usdcSize")]
@@ -103,6 +106,9 @@ pub struct TraderTrade {
     pub condition_id: String,
     /// "BUY" or "SELL"
     pub side: String,
+    /// Which market outcome the trade is on: 0 = YES token, 1 = NO token.
+    /// Defaults to 0 when the API omits it.
+    pub outcome_index: i64,
     pub price: f64,
     /// Size in USD (usdcSize from API).
     pub size_usd: f64,
@@ -392,6 +398,7 @@ fn parse_activity_events(events: Vec<ActivityEvent>) -> Vec<TraderTrade> {
             let condition_id = e.condition_id?;
             let side = e.side?;
             let price = e.price?;
+            let outcome_index = e.outcome_index.unwrap_or(0);
             let size_usd = e.usdc_size.unwrap_or(0.0);
             let ts_secs = e.timestamp?;
             let timestamp = DateTime::from_timestamp(ts_secs, 0).unwrap_or_else(Utc::now);
@@ -399,6 +406,7 @@ fn parse_activity_events(events: Vec<ActivityEvent>) -> Vec<TraderTrade> {
                 slug,
                 condition_id,
                 side,
+                outcome_index,
                 price,
                 size_usd,
                 tx_hash: e.tx_hash,
@@ -662,11 +670,47 @@ mod tests {
             "0xfab8520004b4d201119f0362dc8678e8cf7f11b514efc48bc5a48aebf7974b50"
         );
         assert_eq!(t.side, "BUY");
+        assert_eq!(t.outcome_index, 0);
         assert_eq!(t.price, 0.49);
         // usdcSize, not size (shares)
         assert_eq!(t.size_usd, 9.604);
         assert_eq!(t.tx_hash.as_deref(), Some("0x36b6c841eb1"));
         assert_eq!(t.timestamp.timestamp(), 1773601939);
+    }
+
+    /// A trader buying the NO token (outcomeIndex 1) must be carried through so
+    /// the copy-bot mirrors the correct side instead of always betting YES.
+    #[test]
+    fn test_parse_activity_events_carries_no_outcome() {
+        let json = r#"[{
+            "slug": "some-market",
+            "conditionId": "0xabc",
+            "side": "BUY",
+            "price": 0.30,
+            "usdcSize": 15.0,
+            "outcomeIndex": 1,
+            "timestamp": 1000
+        }]"#;
+        let events: Vec<ActivityEvent> = serde_json::from_str(json).unwrap();
+        let trades = parse_activity_events(events);
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].outcome_index, 1, "NO trade must be preserved");
+    }
+
+    /// When the API omits outcomeIndex, default to 0 (YES).
+    #[test]
+    fn test_parse_activity_events_defaults_outcome_index() {
+        let json = r#"[{
+            "slug": "some-market",
+            "conditionId": "0xabc",
+            "side": "BUY",
+            "price": 0.5,
+            "timestamp": 1000
+        }]"#;
+        let events: Vec<ActivityEvent> = serde_json::from_str(json).unwrap();
+        let trades = parse_activity_events(events);
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].outcome_index, 0);
     }
 
     #[test]

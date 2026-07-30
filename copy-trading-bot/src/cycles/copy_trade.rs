@@ -172,6 +172,20 @@ pub async fn copy_trade_cycle(
             continue;
         }
 
+        // Mirror the trader's actual side. `trade.price` is quoted for whichever
+        // token they bought, so it is the correct entry price for our side.
+        // Multi-outcome markets (index > 1) are unsupported — skip them rather
+        // than betting the wrong side.
+        let Some(bet_side) = BetSide::from_outcome_index(trade.outcome_index) else {
+            tracing::warn!(
+                trader = wallet_short,
+                slug = %trade.slug,
+                outcome_index = trade.outcome_index,
+                "Copy-trade skip: unsupported multi-outcome market"
+            );
+            continue;
+        };
+
         // Fetch market data (resolves slug → Gamma numeric ID + events)
         let market = match fetch_market_by_slug(&http, &trade.slug).await {
             Ok(m) => m,
@@ -208,13 +222,17 @@ pub async fn copy_trade_cycle(
                 .next()
                 .flatten()
         };
-        if let Some(current) = current_yes_price {
-            let drift = (current - trade.price).abs();
+        if let Some(current_yes) = current_yes_price {
+            // Compare the trader's entry against the current price of the same
+            // side they bought.
+            let current_side_price = bet_side.price_from_yes(current_yes);
+            let drift = (current_side_price - trade.price).abs();
             if drift > MAX_PRICE_DRIFT {
                 tracing::info!(
                     market = %market.market_id,
+                    side = %bet_side,
                     trader_price = trade.price,
-                    current_price = current,
+                    current_price = current_side_price,
                     drift = drift,
                     "Copy-trade skip: price drifted too far"
                 );
@@ -301,15 +319,14 @@ pub async fn copy_trade_cycle(
 
         let edge = estimated_prob - entry_price;
         let reasoning = format!(
-            "Copy-trade: {} bought at {:.1}%",
-            trader_display,
+            "Copy-trade: {trader_display} bought {bet_side} at {:.1}%",
             entry_price * 100.0,
         );
 
         let new_bet = NewBet {
             market_id: market.market_id.clone(),
             question: market.question.clone(),
-            side: BetSide::Yes,
+            side: bet_side,
             entry_price,
             slipped_price,
             shares,

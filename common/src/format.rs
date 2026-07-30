@@ -70,10 +70,8 @@ pub struct OpenBetView<'a> {
 impl<'a> OpenBetView<'a> {
     /// Current price on the bet's side.
     fn current_price(&self) -> Option<f64> {
-        self.current_yes_price.map(|p| match self.bet.side {
-            BetSide::Yes => p,
-            BetSide::No => 1.0 - p,
-        })
+        self.current_yes_price
+            .map(|p| self.bet.side.price_from_yes(p))
     }
 
     /// Unrealized PnL in EUR.

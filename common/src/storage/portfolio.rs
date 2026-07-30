@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum BetSide {
     Yes,
     No,
@@ -13,6 +13,54 @@ impl std::fmt::Display for BetSide {
             BetSide::Yes => write!(f, "YES"),
             BetSide::No => write!(f, "NO"),
         }
+    }
+}
+
+impl BetSide {
+    /// Map a Polymarket market outcome index to a bet side.
+    ///
+    /// Markets are binary: index 0 = YES token, index 1 = NO token. Any other
+    /// value comes from a multi-outcome market this bot does not support, so we
+    /// return `None` and let the caller skip it rather than silently coercing.
+    pub fn from_outcome_index(outcome_index: i64) -> Option<BetSide> {
+        match outcome_index {
+            0 => Some(BetSide::Yes),
+            1 => Some(BetSide::No),
+            _ => None,
+        }
+    }
+
+    /// Price of this side given the market's YES price.
+    ///
+    /// YES tokens trade at the YES price; NO tokens at its complement.
+    pub fn price_from_yes(&self, yes_price: f64) -> f64 {
+        match self {
+            BetSide::Yes => yes_price,
+            BetSide::No => 1.0 - yes_price,
+        }
+    }
+}
+
+#[cfg(test)]
+mod bet_side_tests {
+    use super::BetSide;
+
+    #[test]
+    fn from_outcome_index_maps_binary_outcomes() {
+        assert_eq!(BetSide::from_outcome_index(0), Some(BetSide::Yes));
+        assert_eq!(BetSide::from_outcome_index(1), Some(BetSide::No));
+    }
+
+    #[test]
+    fn from_outcome_index_rejects_multi_outcome() {
+        assert_eq!(BetSide::from_outcome_index(2), None);
+        assert_eq!(BetSide::from_outcome_index(-1), None);
+    }
+
+    #[test]
+    fn price_from_yes_uses_complement_for_no() {
+        assert_eq!(BetSide::Yes.price_from_yes(0.30), 0.30);
+        assert!((BetSide::No.price_from_yes(0.30) - 0.70).abs() < f64::EPSILON);
     }
 }
 

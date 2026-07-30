@@ -472,7 +472,6 @@ impl PgPortfolio {
     /// Fetch live unrealized PnL and exposure, split into (ml, copy) tuples of (unrealized, exposure).
     pub(super) async fn live_unrealized(&self) -> ((f64, f64), (f64, f64)) {
         use crate::data::models::fetch_yes_prices;
-        use crate::storage::portfolio::BetSide;
 
         let open = match self.open_bets().await {
             Ok(b) => b,
@@ -506,10 +505,7 @@ impl PgPortfolio {
                 ml_exposure += bet.cost;
             }
             if let Some(yp) = yes_price {
-                let cur = match bet.side {
-                    BetSide::Yes => yp,
-                    BetSide::No => 1.0 - yp,
-                };
+                let cur = bet.side.price_from_yes(yp);
                 let pnl = bet.shares * cur - bet.cost;
                 if is_copy {
                     copy_unrealized += pnl;
@@ -1143,10 +1139,7 @@ impl PgPortfolio {
         };
 
         // Selling shares at current market price
-        let sell_price = match side {
-            BetSide::Yes => current_yes_price,
-            BetSide::No => 1.0 - current_yes_price,
-        };
+        let sell_price = side.price_from_yes(current_yes_price);
         let fee_pct = 0.02;
         let gross_payout = r.shares * sell_price;
         let exit_fee = gross_payout * fee_pct;

@@ -194,7 +194,7 @@ pub async fn bet_scan_cycle(
                     (
                         pb.signal.market_id.clone(),
                         pb.signal.question.clone(),
-                        pb.signal.side.clone(),
+                        pb.signal.side,
                     )
                 })
                 .collect();
@@ -249,7 +249,7 @@ pub async fn bet_scan_cycle(
                 let new_bet = NewBet {
                     market_id: signal.market_id.clone(),
                     question: signal.question.clone(),
-                    side: signal.side.clone(),
+                    side: signal.side,
                     entry_price: signal.current_price,
                     slipped_price: pb.slipped_price,
                     shares: pb.shares,
