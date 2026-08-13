@@ -17,12 +17,9 @@ pub fn escape_markdown(s: &str) -> String {
 
 /// Render a trader's display name as a Markdown link to their Polymarket profile.
 ///
-/// Legacy Markdown cannot represent escaped entities inside link text (Telegram
-/// disallows escaping inside entities), so every Markdown-significant char is
-/// removed rather than escaped — the same strip approach used for bet-question
-/// links. If the name is empty after stripping, fall back to a wallet prefix so
-/// the link text is never empty (empty link text is rejected by Telegram and
-/// would 400 the whole message). Wallet addresses are hex and URL-safe as-is.
+/// Strips Markdown-significant chars from the link text (legacy Markdown can't
+/// escape inside entities) and falls back to a wallet prefix when the name is
+/// empty, so the link text is never empty.
 pub fn profile_link(name: &str, wallet: &str) -> String {
     let cleaned: String = name
         .chars()
@@ -1000,14 +997,14 @@ mod tests {
 
     #[test]
     fn test_profile_link_strips_markdown_chars() {
-        // All Markdown-significant chars are removed (not escaped) from link text.
+        // Markdown-significant chars removed, not escaped.
         let link = profile_link("a[b](c)_d*e`f", "0xw");
         assert_eq!(link, "[abcdef](https://polymarket.com/profile/0xw)");
     }
 
     #[test]
     fn test_profile_link_empty_name_falls_back_to_wallet() {
-        // Empty API username must never yield empty link text ([](url) → 400).
+        // Empty username must not yield empty link text.
         let link = profile_link("", "0xabcdef1234567890");
         assert_eq!(
             link,
@@ -1017,7 +1014,7 @@ mod tests {
 
     #[test]
     fn test_profile_link_name_all_special_falls_back() {
-        // Name that is entirely strippable chars also falls back to the wallet.
+        // All-strippable name also falls back.
         let link = profile_link("*_`*", "0xdeadbeef");
         assert_eq!(
             link,
