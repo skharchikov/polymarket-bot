@@ -15,6 +15,31 @@ pub fn escape_markdown(s: &str) -> String {
         .replace('`', "\\`")
 }
 
+/// Render a trader's display name as a Markdown link to their Polymarket profile.
+///
+/// Legacy Markdown cannot represent escaped entities inside link text (Telegram
+/// disallows escaping inside entities), so every Markdown-significant char is
+/// removed rather than escaped — the same strip approach used for bet-question
+/// links. If the name is empty after stripping, fall back to a wallet prefix so
+/// the link text is never empty (empty link text is rejected by Telegram and
+/// would 400 the whole message). Wallet addresses are hex and URL-safe as-is.
+pub fn profile_link(name: &str, wallet: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .filter(|c| !matches!(c, '[' | ']' | '(' | ')' | '_' | '*' | '`' | '\\'))
+        .collect();
+    let cleaned = cleaned.trim();
+    let short = &wallet[..8.min(wallet.len())];
+    let text = if !cleaned.is_empty() {
+        cleaned
+    } else if !short.is_empty() {
+        short
+    } else {
+        "trader"
+    };
+    format!("[{text}](https://polymarket.com/profile/{wallet})")
+}
+
 /// Get emoji label for a strategy name.
 pub fn strategy_label(name: &str) -> &'static str {
     match name {
@@ -457,10 +482,10 @@ pub fn format_copy_stats(data: &CopyStatsData) -> String {
             } else {
                 String::new()
             };
-            let safe_name = escape_markdown(&t.name);
+            let name_link = profile_link(&t.name, &t.wallet);
             msg.push_str(&format!(
-                "\n👤 *{name}*   `€{bankroll:.2}`   {wins}W/{losses}L   `€{pnl:+.2}` ({roi}){open}",
-                name = safe_name,
+                "\n👤 {name}   `€{bankroll:.2}`   {wins}W/{losses}L   `€{pnl:+.2}` ({roi}){open}",
+                name = name_link,
                 bankroll = t.bankroll,
                 wins = t.wins,
                 losses = t.losses,
@@ -506,13 +531,13 @@ pub fn format_traders(traders: &[TraderRow]) -> String {
             .map(|p| format!("${:.0}k", p / 1000.0))
             .unwrap_or_else(|| "—".into());
         lines.push(format!(
-            "👤 *{name}*\n\
+            "👤 {name}\n\
              \u{00a0}\u{00a0}🔑 `{wallet}`\n\
              \u{00a0}\u{00a0}🏆 Rank: {rank} | Poly PnL: {poly_pnl}\n\
              \u{00a0}\u{00a0}💰 Bankroll: `€{bankroll:.2}`\n\
              \u{00a0}\u{00a0}📊 Record: {wins}W/{losses}L ({pnl:+.2}€)\n\
              \u{00a0}\u{00a0}🔓 Open: {open}",
-            name = escape_markdown(&t.name),
+            name = profile_link(&t.name, &t.wallet),
             wallet = t.wallet,
             bankroll = t.bankroll,
             wins = t.wins,
@@ -964,6 +989,64 @@ mod tests {
         assert!(
             output.contains("—"),
             "ROI must be '—' when starting_bankroll is 0"
+        );
+    }
+
+    #[test]
+    fn test_profile_link_basic() {
+        let link = profile_link("alice", "0xabc123");
+        assert_eq!(link, "[alice](https://polymarket.com/profile/0xabc123)");
+    }
+
+    #[test]
+    fn test_profile_link_strips_markdown_chars() {
+        // All Markdown-significant chars are removed (not escaped) from link text.
+        let link = profile_link("a[b](c)_d*e`f", "0xw");
+        assert_eq!(link, "[abcdef](https://polymarket.com/profile/0xw)");
+    }
+
+    #[test]
+    fn test_profile_link_empty_name_falls_back_to_wallet() {
+        // Empty API username must never yield empty link text ([](url) → 400).
+        let link = profile_link("", "0xabcdef1234567890");
+        assert_eq!(
+            link,
+            "[0xabcdef](https://polymarket.com/profile/0xabcdef1234567890)"
+        );
+    }
+
+    #[test]
+    fn test_profile_link_name_all_special_falls_back() {
+        // Name that is entirely strippable chars also falls back to the wallet.
+        let link = profile_link("*_`*", "0xdeadbeef");
+        assert_eq!(
+            link,
+            "[0xdeadbe](https://polymarket.com/profile/0xdeadbeef)"
+        );
+    }
+
+    #[test]
+    fn test_format_traders_name_is_profile_link() {
+        let rows = vec![make_trader_row("alice", 520.0, 400.0, 9, 3, 85.2, 2)];
+        let output = format_traders(&rows);
+        assert!(
+            output.contains("[alice](https://polymarket.com/profile/0xalicewallet)"),
+            "trader name must be a profile link:\n{output}"
+        );
+        assert!(
+            !output.contains("👤 *alice*"),
+            "name must no longer be rendered as bold plain text"
+        );
+    }
+
+    #[test]
+    fn test_format_copy_stats_name_is_profile_link() {
+        let rows = vec![make_trader_row("bob", 430.0, 350.0, 6, 2, 95.1, 1)];
+        let data = make_copy_stats_data(rows);
+        let output = format_copy_stats(&data);
+        assert!(
+            output.contains("[bob](https://polymarket.com/profile/0xbobwallet)"),
+            "trader name must be a profile link:\n{output}"
         );
     }
 }
