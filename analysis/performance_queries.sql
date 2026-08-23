@@ -19,7 +19,7 @@ SELECT
   ROUND(SUM(fee_paid)::numeric, 2)                  AS total_fees,
   ROUND(AVG(pnl) FILTER (WHERE resolved)::numeric, 3) AS avg_pnl_per_bet,
   ROUND((SUM(pnl) FILTER (WHERE resolved)
-    / NULLIF(SUM(cost) FILTER (WHERE resolved), 0) * 100)::numeric, 2) AS roi_pct
+    / NULLIF(SUM(cost + fee_paid) FILTER (WHERE resolved), 0) * 100)::numeric, 2) AS roi_pct
 FROM bets;
 
 -- ============================================================
@@ -327,7 +327,7 @@ SELECT
   ROUND(SUM(b.pnl) FILTER (WHERE b.resolved)::numeric, 2) AS pnl
 FROM bets b
 JOIN followed_traders ft
-  ON b.copy_ref->>'proxy_wallet' = ft.proxy_wallet
+  ON b.copy_ref->>'wallet' = ft.proxy_wallet
 WHERE b.source = 'copy_trade'
 GROUP BY ft.username
 ORDER BY pnl DESC;
