@@ -51,8 +51,10 @@ services:
       METRICS_PORT: "9000"
     volumes:
       - model:/app/model
+    # Metrics port bound to localhost only — Prometheus scrapes it over the
+    # internal Docker network (bot:9000), so it must not be exposed publicly.
     ports:
-      - "9000:9000"
+      - "127.0.0.1:9000:9000"
     stop_grace_period: 15s
     restart: unless-stopped
 
@@ -67,8 +69,10 @@ services:
       TELEGRAM_BOT_TOKEN: ${COPY_TELEGRAM_BOT_TOKEN}
       TELEGRAM_CHAT_ID: ${COPY_TELEGRAM_CHAT_ID}
       METRICS_PORT: "9001"
+    # Localhost-only; not scraped externally (Prometheus reaches it internally
+    # if added as a target). Must not be exposed to the public internet.
     ports:
-      - "9001:9001"
+      - "127.0.0.1:9001:9001"
     stop_grace_period: 15s
     restart: unless-stopped
 

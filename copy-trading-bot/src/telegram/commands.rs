@@ -34,6 +34,7 @@ pub async fn handle_command(
                  /leaderboard — top traders\n\
                  /follow — follow a trader (owner)\n\
                  /unfollow — unfollow a trader (owner)\n\
+                 /subscribers — list subscribers (owner)\n\
                  /help — show commands"
             )
         }
@@ -88,6 +89,19 @@ pub async fn handle_command(
                 }
             }
         }
+        "subscribers" => {
+            if !notifier.is_owner(chat_id) {
+                "🔒 Only the bot owner can view subscribers.".to_string()
+            } else {
+                match portfolio.list_subscribers(notifier.bot_kind()).await {
+                    Ok(subs) => crate::format::format_subscribers(&subs),
+                    Err(e) => {
+                        tracing::warn!(err = %e, "Failed to load subscribers");
+                        "⚠️ Failed to load subscribers".to_string()
+                    }
+                }
+            }
+        }
         "follow" => {
             if !notifier.is_owner(chat_id) {
                 "🔒 Only the bot owner can follow traders.".to_string()
@@ -117,7 +131,10 @@ pub async fn handle_command(
                     {
                         tracing::warn!(err = %e, "Failed to init copy trader starting bankroll");
                     }
-                    let stats = fetch_trader_stats(http, &wallet).await.ok().flatten();
+                    let stats = fetch_trader_stats(http, &wallet, "ALL")
+                        .await
+                        .ok()
+                        .flatten();
                     let mut username = stats.as_ref().and_then(|s| s.username.clone());
                     if username.is_none() {
                         username = fetch_trader_username(http, &wallet).await;
@@ -172,6 +189,7 @@ pub async fn handle_command(
                  /leaderboard — top Polymarket traders\n\
                  /follow — follow a trader (owner)\n\
                  /unfollow — unfollow a trader (owner)\n\
+                 /subscribers — list subscribers (owner)\n\
                  /help — this message"
             .to_string(),
         _ => format!("❓ Unknown command: /{cmd}\nTry /help"),

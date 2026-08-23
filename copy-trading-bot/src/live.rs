@@ -11,10 +11,21 @@ use crate::scanner::copy_trader::CopyTraderMonitor;
 use crate::storage::postgres::PgPortfolio;
 use crate::telegram::notifier::TelegramNotifier;
 
-/// Broadcast a message to the owner and all subscribers.
+/// Broadcast a message to the owner and all active subscribers, pruning any that are gone.
 pub async fn broadcast(notifier: &TelegramNotifier, portfolio: &PgPortfolio, message: &str) {
-    let subs = portfolio.telegram_subscribers().await.unwrap_or_default();
-    notifier.broadcast(&subs, message).await;
+    let bot = notifier.bot_kind();
+    let subs = portfolio
+        .telegram_subscribers(bot)
+        .await
+        .unwrap_or_default();
+    let pruned = notifier.broadcast(&subs, message).await;
+    if !pruned.is_empty() {
+        if let Err(e) = portfolio.deactivate_telegram_users(bot, &pruned).await {
+            tracing::warn!(err = %e, count = pruned.len(), "Failed to deactivate pruned subscribers");
+        } else {
+            tracing::info!(count = pruned.len(), "Deactivated unreachable subscribers");
+        }
+    }
 }
 
 pub async fn run_live(cfg: Arc<CopyTradingConfig>) -> Result<()> {
@@ -49,6 +60,7 @@ pub async fn run_live(cfg: Arc<CopyTradingConfig>) -> Result<()> {
     let notifier = Arc::new(TelegramNotifier::new(
         &cfg.telegram_bot_token,
         &cfg.telegram_chat_id,
+        "copy",
     ));
 
     let monitor = Arc::new(CopyTraderMonitor::new(
@@ -79,11 +91,28 @@ pub async fn run_live(cfg: Arc<CopyTradingConfig>) -> Result<()> {
         loop {
             let commands = cmd_notifier.poll_commands().await;
             for (chat_id, cmd, username, first_name, full_text) in &commands {
-                if let Err(e) = cmd_portfolio
-                    .upsert_telegram_user(chat_id, username.as_deref(), first_name.as_deref())
+                match cmd_portfolio
+                    .upsert_telegram_user(
+                        cmd_notifier.bot_kind(),
+                        chat_id,
+                        username.as_deref(),
+                        first_name.as_deref(),
+                    )
                     .await
                 {
-                    tracing::warn!(err = %e, "Failed to upsert telegram user");
+                    Ok(true) => {
+                        let uname = username.as_deref().unwrap_or("—");
+                        let fname = first_name.as_deref().unwrap_or("—");
+                        let _ = cmd_notifier
+                            .send(&format!(
+                                "🆕 *New user joined*\n\n\
+                                 👤 {fname} (@{uname})\n\
+                                 🆔 `{chat_id}`"
+                            ))
+                            .await;
+                    }
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!(err = %e, "Failed to upsert telegram user"),
                 }
 
                 tracing::info!(cmd = cmd.as_str(), chat_id, "Handling Telegram command");
@@ -127,6 +156,7 @@ pub async fn run_live(cfg: Arc<CopyTradingConfig>) -> Result<()> {
     // Housekeeping loop — resolves copy bets independently
     let hk_portfolio = Arc::clone(&portfolio);
     let hk_notifier = Arc::clone(&notifier);
+    let hk_cfg = Arc::clone(&cfg);
     let hk_http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
@@ -136,6 +166,16 @@ pub async fn run_live(cfg: Arc<CopyTradingConfig>) -> Result<()> {
             if let Err(e) = cycles::housekeeping_cycle(&hk_portfolio, &hk_notifier, &hk_http).await
             {
                 tracing::error!(err = %e, "Copy housekeeping cycle failed");
+            }
+            if let Err(e) = cycles::digest::maybe_send_daily_digest(
+                &hk_http,
+                &hk_portfolio,
+                &hk_notifier,
+                &hk_cfg,
+            )
+            .await
+            {
+                tracing::warn!(err = %e, "Daily digest check failed");
             }
             tokio::time::sleep(Duration::from_secs(5 * 60)).await;
         }

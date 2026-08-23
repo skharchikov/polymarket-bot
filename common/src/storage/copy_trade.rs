@@ -52,7 +52,7 @@ impl PgPortfolio {
     /// Return all traders with `active = true`.
     pub async fn get_active_traders(&self) -> Result<Vec<FollowedTrader>> {
         let rows: Vec<FollowedTraderRow> = sqlx::query_as(
-            "SELECT id, proxy_wallet, username, source, rank, pnl, volume, win_rate, \
+            "SELECT id, proxy_wallet, username, source, rank, pnl, pnl_month, volume, win_rate, \
                     added_at, last_checked_at, active \
              FROM followed_traders \
              WHERE active = TRUE \
@@ -93,19 +93,22 @@ impl PgPortfolio {
         wallet: &str,
         rank: Option<i32>,
         pnl: Option<f64>,
+        pnl_month: Option<f64>,
         volume: Option<f64>,
         username: Option<&str>,
     ) -> Result<()> {
         sqlx::query(
             "UPDATE followed_traders SET \
-               rank     = $1, \
-               pnl      = $2, \
-               volume   = $3, \
-               username = COALESCE($4, username) \
-             WHERE proxy_wallet = $5",
+               rank      = $1, \
+               pnl       = $2, \
+               pnl_month = $3, \
+               volume    = $4, \
+               username  = COALESCE($5, username) \
+             WHERE proxy_wallet = $6",
         )
         .bind(rank)
         .bind(pnl)
+        .bind(pnl_month)
         .bind(volume)
         .bind(username)
         .bind(wallet)
@@ -173,7 +176,7 @@ impl PgPortfolio {
     /// Look up a single followed trader by wallet address.
     pub async fn get_trader_by_wallet(&self, wallet: &str) -> Result<Option<FollowedTrader>> {
         let row: Option<FollowedTraderRow> = sqlx::query_as(
-            "SELECT id, proxy_wallet, username, source, rank, pnl, volume, win_rate, \
+            "SELECT id, proxy_wallet, username, source, rank, pnl, pnl_month, volume, win_rate, \
                     added_at, last_checked_at, active \
              FROM followed_traders WHERE proxy_wallet = $1",
         )
@@ -229,6 +232,7 @@ impl PgPortfolio {
                 wallet_short: short.to_string(),
                 rank: t.rank,
                 poly_pnl: t.pnl,
+                poly_pnl_month: t.pnl_month,
                 bankroll,
                 starting_bankroll,
                 wins,
