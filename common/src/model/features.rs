@@ -274,7 +274,8 @@ fn extract_nlp_features(question: &str) -> NlpFeatures {
     let n_words = words.len().max(1) as f64;
     let unique: std::collections::HashSet<&str> = words.iter().copied().collect();
 
-    let q_length = question.len() as f64;
+    // char count (not bytes) to match Python len() in training on non-ASCII text.
+    let q_length = question.chars().count() as f64;
     let q_word_count = n_words;
     let q_avg_word_len = words.iter().map(|w| w.len() as f64).sum::<f64>() / n_words;
     let q_word_diversity = unique.len() as f64 / n_words;
@@ -405,26 +406,24 @@ fn compute_rsi(history: &[PriceTick], period: usize) -> f64 {
         return 0.5;
     }
     let recent = &history[history.len() - period - 1..];
+    // Unweighted mean of gains/losses over the last `period` deltas — must match
+    // training (scripts/fetch_data.py::_compute_rsi). A time-weighted variant here
+    // would diverge from what the model trained on (train/serve skew).
+    let n = (recent.len() - 1) as f64;
     let mut gains = 0.0;
     let mut losses = 0.0;
-    let mut total_time = 0.0;
 
     for w in recent.windows(2) {
         let delta = w[1].p - w[0].p;
-        let dt = (w[1].t - w[0].t).max(1) as f64;
-        total_time += dt;
         if delta > 0.0 {
-            gains += delta * dt;
+            gains += delta;
         } else {
-            losses -= delta * dt;
+            losses -= delta;
         }
     }
 
-    if total_time == 0.0 {
-        return 0.5;
-    }
-    let avg_gain = gains / total_time;
-    let avg_loss = losses / total_time;
+    let avg_gain = gains / n;
+    let avg_loss = losses / n;
 
     if avg_loss == 0.0 {
         return 1.0;

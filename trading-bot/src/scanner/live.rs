@@ -510,7 +510,9 @@ impl LiveScanner {
     }
 
     pub async fn fetch_price_history(&self, token_id: &str) -> Result<Vec<PriceTick>> {
-        let url = format!("{CLOB_API}/prices-history?market={token_id}&interval=max");
+        // fidelity=60 (60-min ticks) matches training (scripts/fetch_data.py) so
+        // volatility/momentum see the same tick spacing at train and serve.
+        let url = format!("{CLOB_API}/prices-history?market={token_id}&interval=max&fidelity=60");
         #[derive(serde::Deserialize)]
         struct Resp {
             history: Vec<PriceTick>,
