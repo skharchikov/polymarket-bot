@@ -650,6 +650,82 @@ def run_honest_backtest(df, n_splits=5, strategy="balanced",
     return _evaluate_folds(cached, strategy, block_yes, edge_floor, lr_damping)
 
 
+def run_recalibration_backtest(df, n_splits=5, strategy="balanced", edge_floor=EDGE_FLOOR):
+    """No-ML strategy: bet where a per-(category,horizon) recalibration of the
+    MARKET PRICE diverges from the price. θ fit on train folds only (leak-free
+    via the market-grouped split). Fast — no ensemble training."""
+    from backtest.fees import net_pnl
+    from backtest.fills import fill_price, max_fillable
+    from backtest.metrics import summarize
+    from backtest.recalibration import (category_bucket, fit_theta,
+                                        horizon_bucket, recalibrate)
+    from backtest.walkforward import market_grouped_splits
+
+    s = STRATEGIES[strategy]
+    price = df["yes_price"].astype(float).values
+    outcome = df["label"].astype(int).values
+    dte = df["days_to_expiry"].astype(float).values
+    catcol = df["category"] if "category" in df else df["question"]
+    cats = [category_bucket(str(c)) for c in catcol.values]
+    bucket = np.array([f"{c}|{horizon_bucket(d)}" for c, d in zip(cats, dte)])
+    vol = df["volume"].astype(float)
+    liq = vol.fillna(vol.median()).clip(lower=0.0).values
+    mid = df["market_id"].values
+    ts = df["snapshot_ts"].values if "snapshot_ts" in df else np.arange(len(df))
+
+    bets = []
+    funnel = {"priced": 0, "no_edge": 0, "edge_floor": 0, "min_price": 0,
+              "min_kelly": 0, "stake_too_small": 0, "placed": 0}
+    theta_log = {}
+
+    for train_mask, test_mask in market_grouped_splits(mid, ts, n_splits):
+        thetas = {}
+        for b in np.unique(bucket[train_mask]):
+            m = train_mask & (bucket == b)
+            thetas[b] = fit_theta(price[m], outcome[m])
+            theta_log.setdefault(b, []).append(thetas[b])
+        for i in np.nonzero(test_mask)[0]:
+            p = float(price[i])
+            if p <= 0.01 or p >= 0.99:
+                continue
+            funnel["priced"] += 1
+            post = float(recalibrate(p, thetas.get(bucket[i], 1.0)))
+            yes_edge = post - p
+            no_edge = (1.0 - post) - (1.0 - p)
+            if yes_edge >= no_edge and yes_edge > 0:
+                side, edge, bet_price, bet_prob, won = "YES", yes_edge, p, post, outcome[i] == 1
+            elif no_edge > 0:
+                side, edge, bet_price, bet_prob, won = "NO", no_edge, 1.0 - p, 1.0 - post, outcome[i] == 0
+            else:
+                funnel["no_edge"] += 1
+                continue
+            if edge < edge_floor:
+                funnel["edge_floor"] += 1
+                continue
+            if bet_price < MIN_BET_PRICE:
+                funnel["min_price"] += 1
+                continue
+            k = fractional_kelly(bet_prob, bet_price, s["kelly_frac"])
+            if k < MIN_KELLY:
+                funnel["min_kelly"] += 1
+                continue
+            stake = min(FLAT_BANKROLL * k, max_fillable(liq[i]))
+            if stake < 0.50:
+                funnel["stake_too_small"] += 1
+                continue
+            funnel["placed"] += 1
+            filled = fill_price(bet_price, stake, liq[i])
+            pnl = net_pnl(stake, filled, won)
+            bets.append({"stake": stake, "entry_fee": stake * 0.02, "pnl": pnl,
+                         "won": won, "model_prob": post, "market_price": p,
+                         "outcome": int(outcome[i])})
+
+    out = summarize(bets)
+    out["funnel"] = funnel
+    out["theta_by_bucket"] = {b: round(float(np.mean(v)), 2) for b, v in sorted(theta_log.items())}
+    return out
+
+
 def _materialize_folds(df, n_splits=5):
     """Train the (expensive) per-fold models ONCE and cache each fold's
     predictions + test arrays, so many gate configs evaluate cheaply."""
@@ -749,6 +825,8 @@ def main():
                         help="Old OLD-vs-NEW comparison (LEAKY scaler — exploratory only)")
     parser.add_argument("--landscape", action="store_true",
                         help="Train folds once, sweep gate configs (block_yes / edge_floor / lr_damping)")
+    parser.add_argument("--recal", action="store_true",
+                        help="No-ML market-price recalibration strategy (per category x horizon)")
     args = parser.parse_args()
 
     df = load_data(args.input)
@@ -767,6 +845,20 @@ def main():
     elif args.legacy:
         print("WARNING: legacy path fits the scaler on ALL rows (look-ahead leakage) — exploratory only.\n")
         run_backtest(df, n_splits=args.folds)
+    elif args.recal:
+        print(f"Recalibration backtest on {len(df)} samples, {args.folds} folds "
+              f"(no ML; θ per category×horizon, fit on train only)")
+        for strategy in ("aggressive", "balanced", "conservative"):
+            r = run_recalibration_backtest(df, n_splits=args.folds, strategy=strategy)
+            print(f"\n[{strategy.upper()}]")
+            print(f"  bets={r['n']}  net_pnl=€{r.get('net_pnl', 0):+.2f}  "
+                  f"net_roi={r.get('net_roi_pct', 0):+.1f}%  "
+                  f"win_rate={r.get('win_rate', 0):.0%}  "
+                  f"brier_skill_vs_market={r.get('brier_skill_vs_market', 0):+.2f}  "
+                  f"max_dd=€{r.get('max_drawdown', 0):.2f}")
+            if strategy == "balanced":
+                print(f"  funnel: {r.get('funnel', {})}")
+                print(f"  θ by bucket: {r.get('theta_by_bucket', {})}")
     elif args.landscape:
         print(f"Landscape sweep on {len(df)} samples, {args.folds} folds "
               f"(training once, replaying gate configs)")

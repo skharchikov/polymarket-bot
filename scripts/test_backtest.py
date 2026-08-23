@@ -6,6 +6,7 @@ import pandas as pd
 from backtest.fees import net_pnl
 from backtest.fills import fill_price, max_fillable
 from backtest.metrics import brier, brier_skill_vs_market, max_drawdown, summarize
+from backtest.recalibration import fit_theta, recalibrate
 from backtest.walkforward import fit_scaler_on_train, market_grouped_splits
 
 
@@ -90,6 +91,24 @@ def test_summarize_net_roi_and_baseline():
 
 def test_summarize_empty():
     assert summarize([])["n"] == 0
+
+
+def test_recalibrate_fixed_point_and_direction():
+    assert abs(recalibrate(0.5, 2.0) - 0.5) < 1e-9   # 0.5 is a fixed point
+    assert recalibrate(0.7, 1.5) > 0.7               # theta>1 extremizes
+    assert recalibrate(0.7, 0.5) < 0.7               # theta<1 shrinks to 0.5
+
+
+def test_fit_theta_detects_underconfidence():
+    # market prints 0.70 but YES actually resolves ~90% → underconfident → theta>1
+    rng = np.random.RandomState(0)
+    prices = np.full(400, 0.70)
+    outcomes = (rng.random(400) < 0.90).astype(int)
+    assert fit_theta(prices, outcomes) > 1.0
+
+
+def test_fit_theta_too_few_samples_is_noop():
+    assert fit_theta([0.6] * 10, [1] * 10) == 1.0
 
 
 def test_market_grouped_split_no_market_spans_sides():
