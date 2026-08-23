@@ -233,36 +233,64 @@ impl PgPortfolio {
         Ok(())
     }
 
-    /// Upsert a Telegram user (tracks who interacts with the bot).
+    /// Upsert a Telegram user for a specific bot. Returns `true` if a new row
+    /// was inserted (first time this user joined this bot).
     pub async fn upsert_telegram_user(
         &self,
+        bot: &str,
         chat_id: &str,
         username: Option<&str>,
         first_name: Option<&str>,
-    ) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO telegram_users (chat_id, username, first_name, last_seen) \
-             VALUES ($1, $2, $3, NOW()) \
-             ON CONFLICT (chat_id) DO UPDATE SET \
+    ) -> Result<bool> {
+        // `xmax = 0` is true only for a freshly INSERTed row (no prior version),
+        // false when the ON CONFLICT UPDATE branch ran.
+        // `active = TRUE` in the UPDATE branch auto-reactivates a returning user
+        // who had previously been pruned.
+        let row: (bool,) = sqlx::query_as(
+            "INSERT INTO telegram_users (bot, chat_id, username, first_name, last_seen) \
+             VALUES ($1, $2, $3, $4, NOW()) \
+             ON CONFLICT (bot, chat_id) DO UPDATE SET \
                username = COALESCE(EXCLUDED.username, telegram_users.username), \
                first_name = COALESCE(EXCLUDED.first_name, telegram_users.first_name), \
-               last_seen = NOW()",
+               active = TRUE, \
+               last_seen = NOW() \
+             RETURNING (xmax = 0) AS inserted",
         )
+        .bind(bot)
         .bind(chat_id)
         .bind(username)
         .bind(first_name)
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await?;
-        Ok(())
+        Ok(row.0)
     }
 
-    /// Get subscriber chat IDs with their usernames for logging.
-    pub async fn telegram_subscribers(&self) -> Result<Vec<(String, Option<String>)>> {
-        let rows: Vec<(String, Option<String>)> =
-            sqlx::query_as("SELECT chat_id, username FROM telegram_users")
-                .fetch_all(&self.pool)
-                .await?;
+    /// Active subscriber chat IDs (with usernames for logging) for a specific bot.
+    pub async fn telegram_subscribers(&self, bot: &str) -> Result<Vec<(String, Option<String>)>> {
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT chat_id, username FROM telegram_users WHERE bot = $1 AND active",
+        )
+        .bind(bot)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows)
+    }
+
+    /// Soft-deactivate subscribers of `bot` that permanently failed to receive
+    /// messages (blocked the bot / chat not found). Returns rows affected.
+    pub async fn deactivate_telegram_users(&self, bot: &str, chat_ids: &[String]) -> Result<u64> {
+        if chat_ids.is_empty() {
+            return Ok(0);
+        }
+        let res = sqlx::query(
+            "UPDATE telegram_users SET active = FALSE, blocked_at = NOW() \
+             WHERE bot = $1 AND chat_id = ANY($2)",
+        )
+        .bind(bot)
+        .bind(chat_ids)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
     }
 
     /// Build a stats summary string for /stats command.
