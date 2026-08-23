@@ -5,6 +5,7 @@ import pandas as pd
 
 from backtest.fees import net_pnl
 from backtest.fills import fill_price, max_fillable
+from backtest.metrics import brier, brier_skill_vs_market, max_drawdown, summarize
 from backtest.walkforward import fit_scaler_on_train
 
 
@@ -57,3 +58,35 @@ def test_scaler_fit_on_train_only():
     scaler2 = fit_scaler_on_train(train)
     assert np.allclose(scaler.center_, scaler2.center_)
     assert np.allclose(scaler.scale_, scaler2.scale_)
+
+
+def test_brier_perfect_is_zero():
+    assert brier([1.0, 0.0], [1, 0]) == 0.0
+
+
+def test_brier_skill_negative_when_worse_than_market():
+    # model always 0.5; market is nearly right → skill < 0
+    assert brier_skill_vs_market([0.5, 0.5], [0.9, 0.1], [1, 0]) < 0
+
+
+def test_max_drawdown_basic():
+    assert abs(max_drawdown([10, 5, 8, 2, 6]) - 8.0) < 1e-9
+
+
+def test_summarize_net_roi_and_baseline():
+    bets = [
+        {"stake": 100.0, "entry_fee": 2.0, "pnl": 94.0, "won": True,
+         "model_prob": 0.7, "market_price": 0.5, "outcome": 1},
+        {"stake": 100.0, "entry_fee": 2.0, "pnl": -102.0, "won": False,
+         "model_prob": 0.7, "market_price": 0.5, "outcome": 0},
+    ]
+    s = summarize(bets)
+    assert s["n"] == 2
+    assert abs(s["net_pnl"] - (-8.0)) < 1e-9
+    # net ROI on capital-at-risk (2 * 102) = -8 / 204 * 100
+    assert abs(s["net_roi_pct"] - (-8.0 / 204.0 * 100.0)) < 1e-6
+    assert s["baseline_no_bet_pnl"] == 0.0
+
+
+def test_summarize_empty():
+    assert summarize([])["n"] == 0
