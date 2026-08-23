@@ -828,6 +828,8 @@ def main():
                         help="Train folds once, sweep gate configs (block_yes / edge_floor / lr_damping)")
     parser.add_argument("--recal", action="store_true",
                         help="No-ML market-price recalibration strategy (per category x horizon)")
+    parser.add_argument("--diagnose", action="store_true",
+                        help="Learning-curve + permutation (data vs signal) and FLB robustness")
     args = parser.parse_args()
 
     df = load_data(args.input)
@@ -846,6 +848,27 @@ def main():
     elif args.legacy:
         print("WARNING: legacy path fits the scaler on ALL rows (look-ahead leakage) — exploratory only.\n")
         run_backtest(df, n_splits=args.folds)
+    elif args.diagnose:
+        from backtest.diagnostics import flb_robustness, learning_and_permutation
+        print(f"Signal diagnostics on {len(df)} samples\n")
+        print("A) Learning curve + permutation (Brier skill vs market; >0 = real signal)")
+        curve, real, perm = learning_and_permutation(df, FEATURE_COLS)
+        print(f"   learning curve (train frac -> skill): {curve}")
+        pmean = sum(perm) / len(perm)
+        pmax = max(perm)
+        print(f"   real skill (full train): {real:+.4f}")
+        print(f"   permutation null: mean={pmean:+.4f} max={pmax:+.4f}  (n={len(perm)})")
+        verdict = ("SIGNAL: real skill clears the shuffled-label null"
+                   if real > pmax and real > 0 else
+                   "NO SIGNAL beyond price: real skill within/under the null")
+        print(f"   => {verdict}")
+        print("\nB) FLB (recalibration) robustness")
+        r = run_recalibration_backtest(df, n_splits=args.folds, strategy="balanced")
+        rob = flb_robustness(r.get("pnls", []))
+        print(f"   total=€{rob['total']}  ex_top5=€{rob['ex_top5']}  ex_top20=€{rob['ex_top20']}")
+        print(f"   bootstrap 95% CI on total PnL: {rob['boot_ci95']}")
+        ci_lo = rob["boot_ci95"][0]
+        print(f"   => {'ROBUST: CI lower bound > 0' if ci_lo > 0 else 'FRAGILE: CI includes 0/negative — not a reliable edge'}")
     elif args.recal:
         print(f"Recalibration backtest on {len(df)} samples, {args.folds} folds "
               f"(no ML; θ per category×horizon, fit on train only)")
