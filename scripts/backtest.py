@@ -638,39 +638,60 @@ def _batch_confidence(model, x_test):
     return np.clip(0.75 / (1.0 + spread * 4.0), 0.25, 0.75)
 
 
-def run_honest_backtest(df, n_splits=5, strategy="balanced"):
+def run_honest_backtest(df, n_splits=5, strategy="balanced",
+                        block_yes=BLOCK_YES_SIDE, edge_floor=EDGE_FLOOR,
+                        lr_damping=LR_DAMPING):
     """Leak-free, fee- and fill-aware simulation of the DEPLOYED decision.
 
     Reproduces live behaviour (LR dampening, gates incl. block_yes_side, the
-    agreement-based confidence) so a profit here would be real. See
-    backtest/ modules for the honest primitives.
+    agreement-based confidence) so a profit here would be real.
     """
+    cached = _materialize_folds(df, n_splits=n_splits)
+    return _evaluate_folds(cached, strategy, block_yes, edge_floor, lr_damping)
+
+
+def _materialize_folds(df, n_splits=5):
+    """Train the (expensive) per-fold models ONCE and cache each fold's
+    predictions + test arrays, so many gate configs evaluate cheaply."""
+    from backtest.walkforward import walk_forward
+    cached = []
+    for fold in walk_forward(df, FEATURE_COLS, n_splits=n_splits):
+        cached.append({
+            "probs": fold.model.predict_proba(fold.x_test_scaled)[:, 1],
+            "confs": _batch_confidence(fold.model, fold.x_test_scaled),
+            "prices": fold.prices_test,
+            "outcomes": fold.y_test,
+            "liq": fold.liquidity_test,
+        })
+    return cached
+
+
+def _evaluate_folds(cached, strategy="balanced", block_yes=BLOCK_YES_SIDE,
+                    edge_floor=EDGE_FLOOR, lr_damping=LR_DAMPING):
+    """Replay the deployed decision over cached folds under one gate config."""
     from backtest.fees import net_pnl
     from backtest.fills import fill_price, max_fillable
     from backtest.metrics import summarize
-    from backtest.walkforward import walk_forward
 
     s = STRATEGIES[strategy]
     bets = []
-    # Rejection funnel — so a 0-bet result is explained, never silent.
     funnel = {"priced": 0, "no_edge": 0, "block_yes": 0, "edge_floor": 0,
               "min_price": 0, "min_kelly": 0, "stake_too_small": 0, "placed": 0}
 
-    for fold in walk_forward(df, FEATURE_COLS, n_splits=n_splits):
-        probs = fold.model.predict_proba(fold.x_test_scaled)[:, 1]
-        confs = _batch_confidence(fold.model, fold.x_test_scaled)
+    for fold in cached:
+        probs, confs = fold["probs"], fold["confs"]
         for i in range(len(probs)):
             prob = float(probs[i])
-            price = float(fold.prices_test[i])
-            outcome = int(fold.y_test[i])
-            liq = float(fold.liquidity_test[i])
+            price = float(fold["prices"][i])
+            outcome = int(fold["outcomes"][i])
+            liq = float(fold["liq"][i])
             if price <= 0.01 or price >= 0.99:
                 continue
             funnel["priced"] += 1
 
             conf = float(confs[i])
             lr = compute_lr(prob, price)
-            post = bayesian_posterior(price, lr, conf * LR_DAMPING)
+            post = bayesian_posterior(price, lr, conf * lr_damping)
 
             yes_edge = post - price
             no_edge = (1.0 - post) - (1.0 - price)
@@ -682,10 +703,10 @@ def run_honest_backtest(df, n_splits=5, strategy="balanced"):
                 funnel["no_edge"] += 1
                 continue
 
-            if BLOCK_YES_SIDE and side == "YES":
+            if block_yes and side == "YES":
                 funnel["block_yes"] += 1
                 continue
-            if edge * conf < EDGE_FLOOR:
+            if edge * conf < edge_floor:
                 funnel["edge_floor"] += 1
                 continue
             if bet_price < MIN_BET_PRICE:
@@ -726,6 +747,8 @@ def main():
     parser.add_argument("--stop-loss", action="store_true", help="Compare stop-loss levels (LEAKY — exploratory only)")
     parser.add_argument("--legacy", action="store_true",
                         help="Old OLD-vs-NEW comparison (LEAKY scaler — exploratory only)")
+    parser.add_argument("--landscape", action="store_true",
+                        help="Train folds once, sweep gate configs (block_yes / edge_floor / lr_damping)")
     args = parser.parse_args()
 
     df = load_data(args.input)
@@ -744,6 +767,25 @@ def main():
     elif args.legacy:
         print("WARNING: legacy path fits the scaler on ALL rows (look-ahead leakage) — exploratory only.\n")
         run_backtest(df, n_splits=args.folds)
+    elif args.landscape:
+        print(f"Landscape sweep on {len(df)} samples, {args.folds} folds "
+              f"(training once, replaying gate configs)")
+        cached = _materialize_folds(df, n_splits=args.folds)
+        configs = [
+            ("base: block_yes, floor .02, damp .5", dict(block_yes=True, edge_floor=0.02, lr_damping=0.5)),
+            ("allow_yes", dict(block_yes=False, edge_floor=0.02, lr_damping=0.5)),
+            ("trust model (damp 1.0)", dict(block_yes=True, edge_floor=0.02, lr_damping=1.0)),
+            ("trust market (damp 0.2)", dict(block_yes=True, edge_floor=0.02, lr_damping=0.2)),
+            ("higher floor .05", dict(block_yes=True, edge_floor=0.05, lr_damping=0.5)),
+            ("allow_yes + damp 1.0", dict(block_yes=False, edge_floor=0.02, lr_damping=1.0)),
+            ("allow_yes + floor .05 + damp 1.0", dict(block_yes=False, edge_floor=0.05, lr_damping=1.0)),
+        ]
+        print(f"\n{'config':<40s} {'bets':>6s} {'net_pnl':>10s} {'roi%':>7s} {'win%':>5s} {'skill':>6s}")
+        for label, cfg in configs:
+            r = _evaluate_folds(cached, strategy="balanced", **cfg)
+            print(f"{label:<40s} {r['n']:>6d} {r.get('net_pnl', 0):>+10.0f} "
+                  f"{r.get('net_roi_pct', 0):>+6.1f}% {r.get('win_rate', 0)*100:>4.0f}% "
+                  f"{r.get('brier_skill_vs_market', 0):>+6.2f}")
     else:
         print(f"Honest backtest on {len(df)} samples across {args.folds} folds")
         for strategy in ("aggressive", "balanced", "conservative"):
