@@ -124,6 +124,9 @@ RETRAIN_MARKETS = int(os.environ.get("RETRAIN_MARKETS", "3000"))
 DATABASE_URL = os.environ.get("DATABASE_URL")
 # Trigger warm-start retrain after this many new resolved bets accumulate
 WARMSTART_TRIGGER_N = int(os.environ.get("WARMSTART_TRIGGER_N", "10"))
+# Warm-start fetches fewer markets than a full retrain (faster), then trains the
+# same calibrated ensemble on that + recent resolved bets.
+WARMSTART_MARKETS = int(os.environ.get("WARMSTART_MARKETS", "500"))
 
 # Feature names — must stay in sync with MarketFeatures::NAMES in src/model/features.rs
 # v4: re-added is_sports — was zero SHAP because training data had no sports.
@@ -234,8 +237,13 @@ def model_age_hours() -> float | None:
     return (time.time() - MODEL_PATH.stat().st_mtime) / 3600
 
 
-def _run_retrain():
-    """Full cold retrain: fetch N markets + train from scratch, then reload."""
+def _run_training(markets: int, kind: str):
+    """Fetch `markets` markets + merge our own resolved bets (via --db), train the
+    full calibrated ensemble, dump ensemble.joblib (THE served model), then reload.
+
+    Shared by the full retrain and warm-start — both must produce the calibrated
+    ensemble.joblib that the sidecar serves (an earlier warm-start wrote only
+    xgb_model.json, which is never loaded, and skipped calibration entirely)."""
     _retrain.status = RetrainStatus.running
     _retrain.started_at = datetime.now(timezone.utc).isoformat()
     _retrain.finished_at = None
@@ -243,10 +251,10 @@ def _run_retrain():
     _retrain.step = "fetch"
 
     try:
-        log.info("retrain.fetch_start: markets=%d", RETRAIN_MARKETS)
+        log.info("%s.fetch_start: markets=%d", kind, markets)
         fetch_args = [
             sys.executable, "fetch_data.py",
-            "--markets", str(RETRAIN_MARKETS),
+            "--markets", str(markets),
             "--output", f"{MODEL_DIR}/training_data.json",
         ]
         if DATABASE_URL:
@@ -254,7 +262,7 @@ def _run_retrain():
         subprocess.run(fetch_args, check=True, capture_output=True, text=True)
 
         _retrain.step = "train"
-        log.info("retrain.train_start")
+        log.info("%s.train_start", kind)
         subprocess.run(
             [sys.executable, "train_model.py",
              "--input", f"{MODEL_DIR}/training_data.json",
@@ -266,122 +274,34 @@ def _run_retrain():
         load_model()
         _retrain.status = RetrainStatus.success
         _retrain.step = None
-        log.info("retrain.complete")
+        log.info("%s.complete", kind)
     except subprocess.CalledProcessError as e:
         _retrain.status = RetrainStatus.failed
         _retrain.error = e.stderr[-500:] if e.stderr else str(e)
-        log.error("retrain.failed: %s", _retrain.error)
+        log.error("%s.failed: %s", kind, _retrain.error)
     except Exception as e:
         _retrain.status = RetrainStatus.failed
         _retrain.error = str(e)
-        log.error("retrain.failed: %s", e)
+        log.error("%s.failed: %s", kind, e)
     finally:
         _retrain.finished_at = datetime.now(timezone.utc).isoformat()
 
 
+def _run_retrain():
+    """Full cold retrain: fetch RETRAIN_MARKETS markets + train from scratch."""
+    _run_training(RETRAIN_MARKETS, "retrain")
+
+
 def _run_warmstart():
-    """Warm-start retrain: add XGBoost trees on top of existing model using stored bet_features.
+    """Warm-start: a lighter, faster retrain — fetch WARMSTART_MARKETS markets
+    (fewer than a full retrain) + merge recent resolved bets, then train the full
+    CALIBRATED ensemble and dump ensemble.joblib (the served model).
 
-    No API calls — reads exact feature vectors from DB. Takes seconds.
-    Triggered automatically every WARMSTART_TRIGGER_N resolved bets.
-    """
-    if not DATABASE_URL:
-        log.warning("warmstart.skip", reason="DATABASE_URL not set")
-        return
-
-    try:
-        import psycopg2
-    except ImportError:
-        log.warning("warmstart.skip", reason="psycopg2 not installed")
-        return
-
-    try:
-        import xgboost as xgb
-        from sklearn.calibration import CalibratedClassifierCV
-        from sklearn.preprocessing import RobustScaler
-    except ImportError as e:
-        log.warning("warmstart.skip", reason=str(e))
-        return
-
-    log.info("warmstart.start", trigger_n=WARMSTART_TRIGGER_N)
-
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT bf.features, b.won, b.side
-            FROM bet_features bf
-            JOIN bets b ON b.id = bf.bet_id
-            WHERE b.resolved = TRUE AND b.won IS NOT NULL
-            ORDER BY b.resolved_at DESC
-        """)
-        rows = cur.fetchall()
-        conn.close()
-    except Exception as e:
-        log.error("warmstart.db_error", error=str(e))
-        return
-
-    if len(rows) < 10:
-        log.info("warmstart.skip", reason="not enough resolved bets", n=len(rows))
-        return
-
-    # Build feature matrix from stored JSONB
-    records = []
-    labels = []
-    for features_json, won, side in rows:
-        if features_json is None or won is None:
-            continue
-        row = {k: float(v) if v is not None else 0.0 for k, v in features_json.items()}
-        outcome_yes = won if side == "Yes" else not won
-        records.append(row)
-        labels.append(int(outcome_yes))
-
-    if len(records) < 10:
-        log.info("warmstart.skip", reason="not enough clean records", n=len(records))
-        return
-
-    df = pd.DataFrame(records)
-    for col in FEATURE_NAMES:
-        if col not in df.columns:
-            df[col] = 0.0
-    X = df[FEATURE_NAMES].astype(np.float64).fillna(0.0)
-    y = np.array(labels)
-
-    # Scale using existing scaler
-    if scaler is not None:
-        X_scaled = pd.DataFrame(scaler.transform(X), columns=FEATURE_NAMES)
-    else:
-        X_scaled = X
-
-    # Warm-start XGBoost: continue from existing model, add 50 trees
-    xgb_path = Path(MODEL_DIR) / "xgb_model.json"
-    if not xgb_path.exists():
-        log.warning("warmstart.skip", reason="no existing xgb_model.json")
-        return
-
-    try:
-        booster = xgb.XGBClassifier(
-            n_estimators=50,
-            learning_rate=0.03,
-            max_depth=4,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            objective="binary:logistic",
-            eval_metric="logloss",
-            random_state=42,
-            n_jobs=-1,
-            verbosity=0,
-        )
-        booster.fit(X_scaled, y, xgb_model=str(xgb_path))
-        booster.save_model(str(xgb_path))
-        log.info("warmstart.xgb_updated", n_samples=len(records), trees_added=50)
-    except Exception as e:
-        log.error("warmstart.xgb_failed", error=str(e))
-        return
-
-    # Hot-reload so next predictions use the updated model
-    load_model()
-    log.info("warmstart.complete", n_samples=len(records))
+    Shares the training path with the full retrain via _run_training, so it can
+    never again diverge into writing a file the sidecar doesn't serve or skipping
+    calibration (the previous "add 50 trees to xgb_model.json" implementation did
+    both — it was a no-op on live predictions)."""
+    _run_training(WARMSTART_MARKETS, "warmstart")
 
 
 def _force_retrain():
