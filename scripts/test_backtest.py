@@ -6,7 +6,7 @@ import pandas as pd
 from backtest.fees import net_pnl
 from backtest.fills import fill_price, max_fillable
 from backtest.metrics import brier, brier_skill_vs_market, max_drawdown, summarize
-from backtest.walkforward import fit_scaler_on_train
+from backtest.walkforward import fit_scaler_on_train, market_grouped_splits
 
 
 def test_net_pnl_win_matches_live_formula():
@@ -90,3 +90,16 @@ def test_summarize_net_roi_and_baseline():
 
 def test_summarize_empty():
     assert summarize([])["n"] == 0
+
+
+def test_market_grouped_split_no_market_spans_sides():
+    # 6 markets, 2 snapshots each — no market may appear on both sides
+    mids = [m for m in ["a", "b", "c", "d", "e", "f"] for _ in range(2)]
+    ts = list(range(12))
+    folds = list(market_grouped_splits(mids, ts, n_splits=2))
+    assert len(folds) >= 1
+    for train_mask, test_mask in folds:
+        train_markets = {m for m, keep in zip(mids, train_mask) if keep}
+        test_markets = {m for m, keep in zip(mids, test_mask) if keep}
+        assert train_markets.isdisjoint(test_markets)
+        assert test_markets  # non-empty test side

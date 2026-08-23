@@ -72,6 +72,9 @@ def compute_lr(model_prob: float, market_price: float) -> float:
     """Likelihood ratio from model vs market."""
     if market_price <= 0.01 or market_price >= 0.99:
         return 1.0
+    # Clamp the model prob away from 0/1 to avoid div-by-zero when the
+    # calibrated model outputs an extreme probability.
+    model_prob = max(0.001, min(0.999, model_prob))
     return (model_prob / market_price) / ((1.0 - model_prob) / (1.0 - market_price))
 
 
@@ -615,6 +618,26 @@ BLOCK_YES_SIDE = True     # config.rs block_yes_side ("30% WR, -€745 in prod")
 FLAT_BANKROLL = 300.0
 
 
+def _batch_confidence(model, x_test):
+    """Vectorized agreement-based confidence for a whole test matrix at once
+    (same formula as serve_model._estimate_confidence, but one predict_proba
+    per base estimator instead of per row)."""
+    est = model
+    if hasattr(est, "calibrated_classifiers_"):
+        est = est.calibrated_classifiers_[0].estimator
+    base = []
+    if hasattr(est, "estimators_"):
+        for e in est.estimators_:
+            members = e if isinstance(e, list) else [e]
+            for member in members:
+                base.append(member.predict_proba(x_test)[:, 1])
+    if len(base) < 2:
+        return np.full(len(x_test), 0.50)
+    base = np.asarray(base)
+    spread = base.max(axis=0) - base.min(axis=0)
+    return np.clip(0.75 / (1.0 + spread * 4.0), 0.25, 0.75)
+
+
 def run_honest_backtest(df, n_splits=5, strategy="balanced"):
     """Leak-free, fee- and fill-aware simulation of the DEPLOYED decision.
 
@@ -629,9 +652,13 @@ def run_honest_backtest(df, n_splits=5, strategy="balanced"):
 
     s = STRATEGIES[strategy]
     bets = []
+    # Rejection funnel — so a 0-bet result is explained, never silent.
+    funnel = {"priced": 0, "no_edge": 0, "block_yes": 0, "edge_floor": 0,
+              "min_price": 0, "min_kelly": 0, "stake_too_small": 0, "placed": 0}
 
     for fold in walk_forward(df, FEATURE_COLS, n_splits=n_splits):
         probs = fold.model.predict_proba(fold.x_test_scaled)[:, 1]
+        confs = _batch_confidence(fold.model, fold.x_test_scaled)
         for i in range(len(probs)):
             prob = float(probs[i])
             price = float(fold.prices_test[i])
@@ -639,8 +666,9 @@ def run_honest_backtest(df, n_splits=5, strategy="balanced"):
             liq = float(fold.liquidity_test[i])
             if price <= 0.01 or price >= 0.99:
                 continue
+            funnel["priced"] += 1
 
-            conf = estimate_confidence(fold.model, fold.x_test_scaled.iloc[i:i + 1])
+            conf = float(confs[i])
             lr = compute_lr(prob, price)
             post = bayesian_posterior(price, lr, conf * LR_DAMPING)
 
@@ -651,23 +679,30 @@ def run_honest_backtest(df, n_splits=5, strategy="balanced"):
             elif no_edge > 0:
                 side, edge, bet_price, bet_prob, won = "NO", no_edge, 1.0 - price, 1.0 - post, outcome == 0
             else:
+                funnel["no_edge"] += 1
                 continue
 
             if BLOCK_YES_SIDE and side == "YES":
+                funnel["block_yes"] += 1
                 continue
             if edge * conf < EDGE_FLOOR:
+                funnel["edge_floor"] += 1
                 continue
             if bet_price < MIN_BET_PRICE:
+                funnel["min_price"] += 1
                 continue
 
             k = fractional_kelly(bet_prob, bet_price, s["kelly_frac"])
             if k < MIN_KELLY:
+                funnel["min_kelly"] += 1
                 continue
 
             stake = min(FLAT_BANKROLL * k, max_fillable(liq))
             if stake < 0.50:
+                funnel["stake_too_small"] += 1
                 continue
 
+            funnel["placed"] += 1
             filled = fill_price(bet_price, stake, liq)
             entry_fee = stake * 0.02
             pnl = net_pnl(stake, filled, won)
@@ -676,7 +711,9 @@ def run_honest_backtest(df, n_splits=5, strategy="balanced"):
                 "model_prob": prob, "market_price": price, "outcome": outcome,
             })
 
-    return summarize(bets)
+    out = summarize(bets)
+    out["funnel"] = funnel
+    return out
 
 
 def main():
@@ -717,6 +754,7 @@ def main():
                   f"win_rate={r.get('win_rate', 0):.0%}  "
                   f"brier_skill_vs_market={r.get('brier_skill_vs_market', 0):+.2f}  "
                   f"max_dd=€{r.get('max_drawdown', 0):.2f}")
+            print(f"  funnel: {r.get('funnel', {})}")
 
 
 if __name__ == "__main__":
