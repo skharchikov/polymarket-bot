@@ -297,7 +297,9 @@ def _extract_snapshot(prices: np.ndarray, timestamps: np.ndarray,
         "momentum_24h": momentum_24h,
         "volatility_24h": volatility,
         "rsi": rsi,
-        "volume": market.get("volume_24h", volume),  # prefer 24h volume over total
+        # Use TOTAL volume (not 24h) so log_volume matches the live feature
+        # (features.rs uses market.volume_num, the total) — train/serve alignment.
+        "volume": volume,
         "liquidity": liquidity,
         "days_to_expiry": days_to_expiry,
         "days_since_created": days_since_created,
@@ -305,8 +307,13 @@ def _extract_snapshot(prices: np.ndarray, timestamps: np.ndarray,
         "category": combined,
         "question": market.get("question", ""),
         # Gamma API price changes
-        "price_change_1d": market.get("one_day_price_change", momentum_24h),
-        "price_change_1w": market.get("one_week_price_change", 0.0),
+        # Settled-delta leak: for CLOSED markets these Gamma fields are
+        # near-resolution deltas that encode the outcome (inflated historical
+        # metrics). Neutralized to 0 at train AND serve so the model learns no
+        # weight on them. See ADR 011 / the honest backtest. (Feature slot kept
+        # to avoid a schema change; a future cleanup can drop it entirely.)
+        "price_change_1d": 0.0,
+        "price_change_1w": 0.0,
         # Label
         "outcome_yes": market["outcome_yes"],
         # Metadata

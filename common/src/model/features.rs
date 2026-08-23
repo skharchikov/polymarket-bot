@@ -209,8 +209,11 @@ impl MarketFeatures {
         };
 
         // Gamma API price changes (fallback to computed momentum)
-        let price_change_1d = market.one_day_price_change.unwrap_or(momentum_24h);
-        let price_change_1w = market.one_week_price_change.unwrap_or(0.0);
+        // Neutralized (0): in training these came from CLOSED markets' settled
+        // Gamma deltas and encoded the outcome (a leak). Zeroed at train + serve
+        // so the model can't rely on them. See ADR 011.
+        let price_change_1d = 0.0;
+        let price_change_1w = 0.0;
 
         // NLP features from question text
         let nlp = extract_nlp_features(&market.question);
@@ -274,7 +277,8 @@ fn extract_nlp_features(question: &str) -> NlpFeatures {
     let n_words = words.len().max(1) as f64;
     let unique: std::collections::HashSet<&str> = words.iter().copied().collect();
 
-    let q_length = question.len() as f64;
+    // char count (not bytes) to match Python len() in training on non-ASCII text.
+    let q_length = question.chars().count() as f64;
     let q_word_count = n_words;
     let q_avg_word_len = words.iter().map(|w| w.len() as f64).sum::<f64>() / n_words;
     let q_word_diversity = unique.len() as f64 / n_words;
@@ -399,32 +403,31 @@ fn compute_volatility(history: &[PriceTick], hours: usize) -> f64 {
     variance.sqrt()
 }
 
-/// Compute RSI on 0-1 scale, time-weighted by the duration each price persisted.
+/// Compute RSI on a 0-1 scale as an unweighted mean of gains/losses over the last
+/// `period` deltas (matches training — scripts/fetch_data.py::_compute_rsi).
 fn compute_rsi(history: &[PriceTick], period: usize) -> f64 {
     if history.len() < period + 1 {
         return 0.5;
     }
     let recent = &history[history.len() - period - 1..];
+    // Unweighted mean of gains/losses over the last `period` deltas — must match
+    // training (scripts/fetch_data.py::_compute_rsi). A time-weighted variant here
+    // would diverge from what the model trained on (train/serve skew).
+    let n = (recent.len() - 1) as f64;
     let mut gains = 0.0;
     let mut losses = 0.0;
-    let mut total_time = 0.0;
 
     for w in recent.windows(2) {
         let delta = w[1].p - w[0].p;
-        let dt = (w[1].t - w[0].t).max(1) as f64;
-        total_time += dt;
         if delta > 0.0 {
-            gains += delta * dt;
+            gains += delta;
         } else {
-            losses -= delta * dt;
+            losses -= delta;
         }
     }
 
-    if total_time == 0.0 {
-        return 0.5;
-    }
-    let avg_gain = gains / total_time;
-    let avg_loss = losses / total_time;
+    let avg_gain = gains / n;
+    let avg_loss = losses / n;
 
     if avg_loss == 0.0 {
         return 1.0;
