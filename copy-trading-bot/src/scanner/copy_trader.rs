@@ -248,7 +248,7 @@ pub async fn fetch_trader_username(http: &Client, wallet: &str) -> Option<String
 /// the top entries formatted for display.  This is **read-only** — nothing is
 /// written to the database.
 ///
-/// `time_period` must be one of `"DAY"`, `"WEEK"`, `"MONTH"`, or `"ALL"`.
+/// `time_period` must be one of `"DAY"`, `"MONTH"`, or `"ALL"`.
 ///
 /// # Errors
 ///
