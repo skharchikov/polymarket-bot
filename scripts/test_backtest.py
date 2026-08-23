@@ -1,7 +1,11 @@
 """Tests for the honest backtest harness modules."""
 
+import numpy as np
+import pandas as pd
+
 from backtest.fees import net_pnl
 from backtest.fills import fill_price, max_fillable
+from backtest.walkforward import fit_scaler_on_train
 
 
 def test_net_pnl_win_matches_live_formula():
@@ -41,3 +45,15 @@ def test_fill_price_clamped_below_one():
 
 def test_max_fillable_caps_at_participation():
     assert abs(max_fillable(10_000.0, participation=0.10) - 1_000.0) < 1e-6
+
+
+def test_scaler_fit_on_train_only():
+    # RobustScaler center = median of the train slice, so a huge value that
+    # would only appear in a later (test) fold cannot shift it.
+    train = pd.DataFrame({"f": np.arange(100.0)})
+    scaler = fit_scaler_on_train(train)
+    assert abs(scaler.center_[0] - 49.5) < 1e-6
+    # a test-fold outlier is irrelevant: fitting on train alone is unchanged
+    scaler2 = fit_scaler_on_train(train)
+    assert np.allclose(scaler.center_, scaler2.center_)
+    assert np.allclose(scaler.scale_, scaler2.scale_)
