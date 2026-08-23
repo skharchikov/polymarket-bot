@@ -723,6 +723,7 @@ def run_recalibration_backtest(df, n_splits=5, strategy="balanced", edge_floor=E
     out = summarize(bets)
     out["funnel"] = funnel
     out["theta_by_bucket"] = {b: round(float(np.mean(v)), 2) for b, v in sorted(theta_log.items())}
+    out["pnls"] = [b["pnl"] for b in bets]
     return out
 
 
@@ -859,6 +860,15 @@ def main():
             if strategy == "balanced":
                 print(f"  funnel: {r.get('funnel', {})}")
                 print(f"  θ by bucket: {r.get('theta_by_bucket', {})}")
+                pnls = sorted(r.get("pnls", []), reverse=True)
+                if pnls:
+                    total = sum(pnls)
+                    top5 = sum(pnls[:5])
+                    ex_top5 = total - top5
+                    wins = [p for p in pnls if p > 0]
+                    print(f"  concentration: total=€{total:+.0f}  top5_wins=€{top5:+.0f} "
+                          f"({(top5 / total * 100 if total else 0):.0f}% of net)  "
+                          f"net_excl_top5=€{ex_top5:+.0f}  n_wins={len(wins)}")
     elif args.landscape:
         print(f"Landscape sweep on {len(df)} samples, {args.folds} folds "
               f"(training once, replaying gate configs)")
