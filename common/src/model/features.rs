@@ -209,8 +209,11 @@ impl MarketFeatures {
         };
 
         // Gamma API price changes (fallback to computed momentum)
-        let price_change_1d = market.one_day_price_change.unwrap_or(momentum_24h);
-        let price_change_1w = market.one_week_price_change.unwrap_or(0.0);
+        // Neutralized (0): in training these came from CLOSED markets' settled
+        // Gamma deltas and encoded the outcome (a leak). Zeroed at train + serve
+        // so the model can't rely on them. See ADR 011.
+        let price_change_1d = 0.0;
+        let price_change_1w = 0.0;
 
         // NLP features from question text
         let nlp = extract_nlp_features(&market.question);
