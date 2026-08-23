@@ -498,7 +498,7 @@ impl CopyTraderMonitor {
         let raw_count = events.len();
         let trades: Vec<TraderTrade> = parse_activity_events(events);
 
-        tracing::info!(
+        tracing::debug!(
             wallet = %wallet,
             since = %since.format("%Y-%m-%d %H:%M"),
             raw_events = raw_count,
@@ -533,7 +533,7 @@ impl CopyTraderMonitor {
                 .as_deref()
                 .unwrap_or(&trader.proxy_wallet[..8.min(trader.proxy_wallet.len())])
                 .to_string();
-            tracing::info!(
+            tracing::debug!(
                 trader = %name,
                 wallet = %trader.proxy_wallet,
                 since = %since.format("%Y-%m-%d %H:%M"),

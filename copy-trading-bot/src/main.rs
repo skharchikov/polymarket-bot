@@ -31,7 +31,10 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("copy_trading_bot=info".parse()?),
+                .add_directive("copy_trading_bot=info".parse()?)
+                // Silence benign malformed-request WARNs on the metrics port
+                // (non-HTTP/HTTP2 probes hitting :9001).
+                .add_directive("metrics_exporter_prometheus=error".parse()?),
         )
         .with_ansi(true)
         .with_target(true)
