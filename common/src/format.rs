@@ -512,6 +512,41 @@ pub struct TraderRow {
     pub open: usize,
 }
 
+/// A single subscriber row for the owner-only `/subscribers` view.
+pub struct SubscriberRow {
+    pub chat_id: String,
+    pub username: Option<String>,
+    pub first_name: Option<String>,
+    pub active: bool,
+    pub last_seen: chrono::DateTime<chrono::Utc>,
+}
+
+/// Render the owner-only `/subscribers` list (active first).
+pub fn format_subscribers(rows: &[SubscriberRow]) -> String {
+    if rows.is_empty() {
+        return "👥 *Subscribers*\n\nNo subscribers yet.".to_string();
+    }
+    let active = rows.iter().filter(|r| r.active).count();
+    let mut lines = vec![format!(
+        "👥 *Subscribers* ({active} active / {} total)\n",
+        rows.len()
+    )];
+    for r in rows {
+        let name = r
+            .username
+            .as_deref()
+            .or(r.first_name.as_deref())
+            .unwrap_or("—");
+        let status = if r.active { "" } else { " · inactive" };
+        lines.push(format!(
+            "• {name} — `{}` · seen {}{status}",
+            r.chat_id,
+            r.last_seen.format("%Y-%m-%d")
+        ));
+    }
+    lines.join("\n")
+}
+
 /// Render the `/traders` message from a slice of rows.
 pub fn format_traders(traders: &[TraderRow]) -> String {
     if traders.is_empty() {
@@ -604,6 +639,31 @@ pub fn format_copy_bet(n: &CopyBetNotif) -> String {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[test]
+    fn test_format_subscribers_empty_and_counts() {
+        assert!(format_subscribers(&[]).contains("No subscribers"));
+        let rows = vec![
+            SubscriberRow {
+                chat_id: "111".into(),
+                username: Some("alice".into()),
+                first_name: Some("Alice".into()),
+                active: true,
+                last_seen: Utc::now(),
+            },
+            SubscriberRow {
+                chat_id: "222".into(),
+                username: None,
+                first_name: Some("Bob".into()),
+                active: false,
+                last_seen: Utc::now(),
+            },
+        ];
+        let out = format_subscribers(&rows);
+        assert!(out.contains("1 active / 2 total"));
+        assert!(out.contains("alice") && out.contains("`111`"));
+        assert!(out.contains("Bob") && out.contains("inactive"));
+    }
 
     #[test]
     fn test_trader_row_has_starting_bankroll() {

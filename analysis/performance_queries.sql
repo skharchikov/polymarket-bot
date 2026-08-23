@@ -19,7 +19,7 @@ SELECT
   ROUND(SUM(fee_paid)::numeric, 2)                  AS total_fees,
   ROUND(AVG(pnl) FILTER (WHERE resolved)::numeric, 3) AS avg_pnl_per_bet,
   ROUND((SUM(pnl) FILTER (WHERE resolved)
-    / NULLIF(SUM(cost + fee_paid) FILTER (WHERE resolved), 0) * 100)::numeric, 2) AS roi_pct
+    / NULLIF(SUM(cost + COALESCE(fee_paid, 0)) FILTER (WHERE resolved), 0) * 100)::numeric, 2) AS roi_pct
 FROM bets;
 
 -- ============================================================

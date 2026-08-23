@@ -34,6 +34,7 @@ pub async fn handle_command(
                  /leaderboard — top traders\n\
                  /follow — follow a trader (owner)\n\
                  /unfollow — unfollow a trader (owner)\n\
+                 /subscribers — list subscribers (owner)\n\
                  /help — show commands"
             )
         }
@@ -85,6 +86,19 @@ pub async fn handle_command(
                         tracing::warn!(err = %e, "Failed to fetch ALL leaderboard");
                     }
                     "⚠️ Could not fetch leaderboard — try again shortly.".to_string()
+                }
+            }
+        }
+        "subscribers" => {
+            if !notifier.is_owner(chat_id) {
+                "🔒 Only the bot owner can view subscribers.".to_string()
+            } else {
+                match portfolio.list_subscribers(notifier.bot_kind()).await {
+                    Ok(subs) => crate::format::format_subscribers(&subs),
+                    Err(e) => {
+                        tracing::warn!(err = %e, "Failed to load subscribers");
+                        "⚠️ Failed to load subscribers".to_string()
+                    }
                 }
             }
         }
@@ -175,6 +189,7 @@ pub async fn handle_command(
                  /leaderboard — top Polymarket traders\n\
                  /follow — follow a trader (owner)\n\
                  /unfollow — unfollow a trader (owner)\n\
+                 /subscribers — list subscribers (owner)\n\
                  /help — this message"
             .to_string(),
         _ => format!("❓ Unknown command: /{cmd}\nTry /help"),

@@ -265,6 +265,37 @@ impl PgPortfolio {
         Ok(row.0)
     }
 
+    /// Full subscriber detail for the owner's `/subscribers` view (this bot only),
+    /// active first then most-recently-seen.
+    pub async fn list_subscribers(&self, bot: &str) -> Result<Vec<crate::format::SubscriberRow>> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            chat_id: String,
+            username: Option<String>,
+            first_name: Option<String>,
+            active: bool,
+            last_seen: DateTime<Utc>,
+        }
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT chat_id, username, first_name, active, last_seen \
+             FROM telegram_users WHERE bot = $1 \
+             ORDER BY active DESC, last_seen DESC",
+        )
+        .bind(bot)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::format::SubscriberRow {
+                chat_id: r.chat_id,
+                username: r.username,
+                first_name: r.first_name,
+                active: r.active,
+                last_seen: r.last_seen,
+            })
+            .collect())
+    }
+
     /// Active subscriber chat IDs (with usernames for logging) for a specific bot.
     pub async fn telegram_subscribers(&self, bot: &str) -> Result<Vec<(String, Option<String>)>> {
         let rows: Vec<(String, Option<String>)> = sqlx::query_as(
