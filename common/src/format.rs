@@ -503,6 +503,7 @@ pub struct TraderRow {
     pub wallet_short: String,
     pub rank: Option<i32>,
     pub poly_pnl: Option<f64>,
+    pub poly_pnl_month: Option<f64>,
     pub bankroll: f64,
     pub starting_bankroll: f64,
     pub wins: usize,
@@ -527,10 +528,14 @@ pub fn format_traders(traders: &[TraderRow]) -> String {
             .poly_pnl
             .map(|p| format!("${:.0}k", p / 1000.0))
             .unwrap_or_else(|| "—".into());
+        let poly_pnl_month = t
+            .poly_pnl_month
+            .map(|p| format!("${:.0}k", p / 1000.0))
+            .unwrap_or_else(|| "—".into());
         lines.push(format!(
             "👤 {name}\n\
              \u{00a0}\u{00a0}🔑 `{wallet}`\n\
-             \u{00a0}\u{00a0}🏆 Rank: {rank} | Poly PnL: {poly_pnl}\n\
+             \u{00a0}\u{00a0}🏆 Rank: {rank} | Poly PnL: {poly_pnl} (1M: {poly_pnl_month})\n\
              \u{00a0}\u{00a0}💰 Bankroll: `€{bankroll:.2}`\n\
              \u{00a0}\u{00a0}📊 Record: {wins}W/{losses}L ({pnl:+.2}€)\n\
              \u{00a0}\u{00a0}🔓 Open: {open}",
@@ -608,6 +613,7 @@ mod tests {
             wallet_short: "0xabc123".to_string(),
             rank: None,
             poly_pnl: None,
+            poly_pnl_month: None,
             bankroll: 500.0,
             starting_bankroll: 400.0,
             wins: 3,
@@ -912,6 +918,7 @@ mod tests {
             wallet_short: format!("0x{name}"),
             rank: None,
             poly_pnl: None,
+            poly_pnl_month: None,
             bankroll,
             starting_bankroll: starting,
             wins,

@@ -117,7 +117,10 @@ pub async fn handle_command(
                     {
                         tracing::warn!(err = %e, "Failed to init copy trader starting bankroll");
                     }
-                    let stats = fetch_trader_stats(http, &wallet).await.ok().flatten();
+                    let stats = fetch_trader_stats(http, &wallet, "ALL")
+                        .await
+                        .ok()
+                        .flatten();
                     let mut username = stats.as_ref().and_then(|s| s.username.clone());
                     if username.is_none() {
                         username = fetch_trader_username(http, &wallet).await;

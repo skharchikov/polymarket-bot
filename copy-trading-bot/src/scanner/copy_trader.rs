@@ -158,12 +158,17 @@ fn parse_trader_stats(entries: Vec<LeaderboardEntry>) -> Option<TraderStats> {
     })
 }
 
-/// Fetch all-time stats (rank, PnL, volume, username) for a single wallet via
-/// `GET /v1/leaderboard?timePeriod=ALL&limit=1&user=<wallet>`.
+/// Fetch stats (rank, PnL, volume, username) for a single wallet and time
+/// period via `GET /v1/leaderboard?timePeriod=<period>&limit=1&user=<wallet>`.
+/// `period` is one of `"ALL"`, `"MONTH"`, `"DAY"`.
 ///
 /// Returns `Ok(None)` when the wallet has no leaderboard entry.
-pub async fn fetch_trader_stats(http: &Client, wallet: &str) -> Result<Option<TraderStats>> {
-    let url = format!("{DATA_API}/v1/leaderboard?timePeriod=ALL&limit=1&user={wallet}");
+pub async fn fetch_trader_stats(
+    http: &Client,
+    wallet: &str,
+    period: &str,
+) -> Result<Option<TraderStats>> {
+    let url = format!("{DATA_API}/v1/leaderboard?timePeriod={period}&limit=1&user={wallet}");
     let entries: Vec<LeaderboardEntry> = http
         .get(&url)
         .timeout(REQUEST_TIMEOUT)
@@ -193,18 +198,22 @@ pub async fn refresh_followed_trader_stats(http: &Client, portfolio: &PgPortfoli
     };
 
     let fetches = traders.iter().map(|t| async move {
-        let res = fetch_trader_stats(http, &t.proxy_wallet).await;
-        (t, res)
+        // All-time drives rank/pnl/volume; MONTH supplies the last-month pnl.
+        let all = fetch_trader_stats(http, &t.proxy_wallet, "ALL").await;
+        let month = fetch_trader_stats(http, &t.proxy_wallet, "MONTH").await;
+        (t, all, month)
     });
 
-    for (trader, res) in join_all(fetches).await {
+    for (trader, res, month_res) in join_all(fetches).await {
         match res {
             Ok(Some(stats)) => {
+                let pnl_month = month_res.ok().flatten().map(|m| m.pnl);
                 if let Err(e) = portfolio
                     .update_trader_stats(
                         &trader.proxy_wallet,
                         stats.rank,
                         Some(stats.pnl),
+                        pnl_month,
                         Some(stats.volume),
                         stats.username.as_deref(),
                     )
@@ -893,7 +902,7 @@ mod tests {
     async fn test_fetch_trader_stats_live() {
         let http = Client::new();
         let wallet = "0x37c1874a60d348903594a96703e0507c518fc53a";
-        let stats = fetch_trader_stats(&http, wallet)
+        let stats = fetch_trader_stats(&http, wallet, "ALL")
             .await
             .unwrap()
             .expect("known trader should have stats");
