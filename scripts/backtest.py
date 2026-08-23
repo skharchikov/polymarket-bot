@@ -603,12 +603,92 @@ def sweep_stop_loss(df, n_splits=5):
                   f"{delta:>+10.2f}")
 
 
+# --- Honest end-to-end backtest (leak-free, real fills + fees) ---
+
+# Live decision constants (mirror trading-bot): LR is dampened by
+# confidence * LR_DAMPING before the edge floor; YES bets are blocked.
+LR_DAMPING = 0.5
+EDGE_FLOOR = 0.02          # live.rs:1236 effective_edge (edge * conf) floor
+MIN_KELLY = 0.02          # config.rs min_kelly_size
+MIN_BET_PRICE = 0.15      # config.rs min_bet_price
+BLOCK_YES_SIDE = True     # config.rs block_yes_side ("30% WR, -€745 in prod")
+FLAT_BANKROLL = 300.0
+
+
+def run_honest_backtest(df, n_splits=5, strategy="balanced"):
+    """Leak-free, fee- and fill-aware simulation of the DEPLOYED decision.
+
+    Reproduces live behaviour (LR dampening, gates incl. block_yes_side, the
+    agreement-based confidence) so a profit here would be real. See
+    backtest/ modules for the honest primitives.
+    """
+    from backtest.fees import net_pnl
+    from backtest.fills import fill_price, max_fillable
+    from backtest.metrics import summarize
+    from backtest.walkforward import walk_forward
+
+    s = STRATEGIES[strategy]
+    bets = []
+
+    for fold in walk_forward(df, FEATURE_COLS, n_splits=n_splits):
+        probs = fold.model.predict_proba(fold.x_test_scaled)[:, 1]
+        for i in range(len(probs)):
+            prob = float(probs[i])
+            price = float(fold.prices_test[i])
+            outcome = int(fold.y_test[i])
+            liq = float(fold.liquidity_test[i])
+            if price <= 0.01 or price >= 0.99:
+                continue
+
+            conf = estimate_confidence(fold.model, fold.x_test_scaled.iloc[i:i + 1])
+            lr = compute_lr(prob, price)
+            post = bayesian_posterior(price, lr, conf * LR_DAMPING)
+
+            yes_edge = post - price
+            no_edge = (1.0 - post) - (1.0 - price)
+            if yes_edge >= no_edge and yes_edge > 0:
+                side, edge, bet_price, bet_prob, won = "YES", yes_edge, price, post, outcome == 1
+            elif no_edge > 0:
+                side, edge, bet_price, bet_prob, won = "NO", no_edge, 1.0 - price, 1.0 - post, outcome == 0
+            else:
+                continue
+
+            if BLOCK_YES_SIDE and side == "YES":
+                continue
+            if edge * conf < EDGE_FLOOR:
+                continue
+            if bet_price < MIN_BET_PRICE:
+                continue
+
+            k = fractional_kelly(bet_prob, bet_price, s["kelly_frac"])
+            if k < MIN_KELLY:
+                continue
+
+            stake = min(FLAT_BANKROLL * k, max_fillable(liq))
+            if stake < 0.50:
+                continue
+
+            filled = fill_price(bet_price, stake, liq)
+            entry_fee = stake * 0.02
+            pnl = net_pnl(stake, filled, won)
+            bets.append({
+                "stake": stake, "entry_fee": entry_fee, "pnl": pnl, "won": won,
+                "model_prob": prob, "market_price": price, "outcome": outcome,
+            })
+
+    return summarize(bets)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Backtest with Bayesian anchoring")
     parser.add_argument("--input", default="model/training_data.json")
     parser.add_argument("--folds", type=int, default=5)
-    parser.add_argument("--sweep", action="store_true", help="Sweep conservative params")
-    parser.add_argument("--stop-loss", action="store_true", help="Compare stop-loss levels")
+    parser.add_argument("--honest", action="store_true",
+                        help="Leak-free, fee/fill-aware honest backtest (default)")
+    parser.add_argument("--sweep", action="store_true", help="Sweep conservative params (LEAKY — exploratory only)")
+    parser.add_argument("--stop-loss", action="store_true", help="Compare stop-loss levels (LEAKY — exploratory only)")
+    parser.add_argument("--legacy", action="store_true",
+                        help="Old OLD-vs-NEW comparison (LEAKY scaler — exploratory only)")
     args = parser.parse_args()
 
     df = load_data(args.input)
@@ -617,15 +697,26 @@ def main():
         sys.exit(1)
 
     if args.sweep:
+        print("WARNING: sweep uses pre-split scaling (look-ahead leakage) — exploratory only.\n")
         print(f"Sweeping conservative params on {len(df)} samples, {args.folds} folds")
         sweep_conservative(df, n_splits=args.folds)
     elif args.stop_loss:
+        print("WARNING: stop-loss sweep uses pre-split scaling (look-ahead leakage) — exploratory only.\n")
         print(f"Comparing stop-loss levels on {len(df)} samples, {args.folds} folds")
         sweep_stop_loss(df, n_splits=args.folds)
-    else:
-        print(f"Running backtest on {len(df)} samples across {args.folds} folds")
-        print(f"Comparing: OLD (raw model prob) vs NEW (Bayesian-anchored)")
+    elif args.legacy:
+        print("WARNING: legacy path fits the scaler on ALL rows (look-ahead leakage) — exploratory only.\n")
         run_backtest(df, n_splits=args.folds)
+    else:
+        print(f"Honest backtest on {len(df)} samples across {args.folds} folds")
+        for strategy in ("aggressive", "balanced", "conservative"):
+            r = run_honest_backtest(df, n_splits=args.folds, strategy=strategy)
+            print(f"\n[{strategy.upper()}]")
+            print(f"  bets={r['n']}  net_pnl=€{r.get('net_pnl', 0):+.2f}  "
+                  f"net_roi={r.get('net_roi_pct', 0):+.1f}%  "
+                  f"win_rate={r.get('win_rate', 0):.0%}  "
+                  f"brier_skill_vs_market={r.get('brier_skill_vs_market', 0):+.2f}  "
+                  f"max_dd=€{r.get('max_drawdown', 0):.2f}")
 
 
 if __name__ == "__main__":
