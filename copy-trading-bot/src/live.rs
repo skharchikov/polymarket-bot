@@ -156,6 +156,7 @@ pub async fn run_live(cfg: Arc<CopyTradingConfig>) -> Result<()> {
     // Housekeeping loop — resolves copy bets independently
     let hk_portfolio = Arc::clone(&portfolio);
     let hk_notifier = Arc::clone(&notifier);
+    let hk_cfg = Arc::clone(&cfg);
     let hk_http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
@@ -165,6 +166,16 @@ pub async fn run_live(cfg: Arc<CopyTradingConfig>) -> Result<()> {
             if let Err(e) = cycles::housekeeping_cycle(&hk_portfolio, &hk_notifier, &hk_http).await
             {
                 tracing::error!(err = %e, "Copy housekeeping cycle failed");
+            }
+            if let Err(e) = cycles::digest::maybe_send_daily_digest(
+                &hk_http,
+                &hk_portfolio,
+                &hk_notifier,
+                &hk_cfg,
+            )
+            .await
+            {
+                tracing::warn!(err = %e, "Daily digest check failed");
             }
             tokio::time::sleep(Duration::from_secs(5 * 60)).await;
         }

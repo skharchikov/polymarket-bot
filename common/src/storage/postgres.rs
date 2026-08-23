@@ -671,6 +671,16 @@ impl PgPortfolio {
         self.upsert_f64(key, val).await
     }
 
+    /// Read a text metadata value from the `portfolio` kv table (empty string if absent).
+    pub async fn get_text_pub(&self, key: &str) -> Result<String> {
+        self.get_text(key).await
+    }
+
+    /// Insert-or-update a text metadata value in the `portfolio` kv table.
+    pub async fn upsert_text_pub(&self, key: &str, val: &str) -> Result<()> {
+        self.upsert_text(key, val).await
+    }
+
     async fn upsert_f64(&self, key: &str, val: f64) -> Result<()> {
         sqlx::query(
             "INSERT INTO portfolio (key, value_f64) VALUES ($1, $2) \
