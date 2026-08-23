@@ -316,18 +316,16 @@ fn format_leaderboard_section(entries: &[LeaderboardDisplay], show_wallets: bool
     for entry in entries {
         let pnl_str = crate::format::format_dollars(entry.pnl);
         let vol_str = crate::format::format_dollars(entry.volume);
+        let link = crate::format::profile_link(&entry.name, &entry.wallet);
 
         let line = match entry.rank {
-            1 => format!("🥇 *{}* — PnL: {} | Vol: {}", entry.name, pnl_str, vol_str),
-            2 => format!("🥈 *{}* — PnL: {} | Vol: {}", entry.name, pnl_str, vol_str),
-            3 => format!("🥉 *{}* — PnL: {} | Vol: {}", entry.name, pnl_str, vol_str),
+            1 => format!("🥇 {link} — PnL: {pnl_str} | Vol: {vol_str}"),
+            2 => format!("🥈 {link} — PnL: {pnl_str} | Vol: {vol_str}"),
+            3 => format!("🥉 {link} — PnL: {pnl_str} | Vol: {vol_str}"),
             n => format!(
-                "{} {}. {} — PnL: {} | Vol: {}",
+                "{} {}. {link} — PnL: {pnl_str} | Vol: {vol_str}",
                 return_rank_str(n),
                 n,
-                entry.name,
-                pnl_str,
-                vol_str,
             ),
         };
 
@@ -382,6 +380,35 @@ pub fn format_multi_leaderboard(periods: &[(&str, &[LeaderboardDisplay])]) -> St
 #[inline]
 fn return_rank_str(_rank: usize) -> &'static str {
     " "
+}
+
+/// Format the top `n` leaderboard entries as a standalone "consider following"
+/// digest message (MONTH window). Advisory only — the reader chooses who to
+/// `/follow`; the bot never auto-follows.
+pub fn format_top_traders_digest(entries: &[LeaderboardDisplay], n: usize) -> String {
+    let top = &entries[..n.min(entries.len())];
+    if top.is_empty() {
+        return "📈 *Top Traders — This Month*\n\n_No leaderboard data available right now._"
+            .to_string();
+    }
+
+    let mut parts = vec![
+        "📈 *Top Traders — This Month*".to_string(),
+        "Consider copying — tap a name for their profile:".to_string(),
+        String::new(),
+    ];
+    for e in top {
+        let link = crate::format::profile_link(&e.name, &e.wallet);
+        let pnl = crate::format::format_dollars(e.pnl);
+        let vol = crate::format::format_dollars(e.volume);
+        parts.push(format!(
+            "{}. {link} — PnL: {pnl} | Vol: {vol}\n   `/follow {}`",
+            e.rank, e.wallet
+        ));
+    }
+    parts.push(String::new());
+    parts.push("_Advisory only — you choose who to /follow._".to_string());
+    parts.join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -603,6 +630,47 @@ impl CopyTraderMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lb(rank: usize, name: &str, pnl: f64, wallet: &str) -> LeaderboardDisplay {
+        LeaderboardDisplay {
+            rank,
+            name: name.to_string(),
+            pnl,
+            volume: pnl * 5.0,
+            wallet: wallet.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_format_top_traders_digest_basic() {
+        let entries = vec![
+            lb(1, "Alice", 120_000.0, "0xabc12345def"),
+            lb(2, "Bob", 50_000.0, "0xdef67890abc"),
+            lb(3, "Carol", 10_000.0, "0x11122233"),
+        ];
+        let out = format_top_traders_digest(&entries, 2);
+        assert!(out.contains("Top Traders"));
+        assert!(out.contains("Alice"));
+        // profile link + follow hint present for the top entry
+        assert!(out.contains("polymarket.com/profile/0xabc12345def"));
+        assert!(out.contains("/follow 0xabc12345def"));
+        // truncated to n = 2
+        assert!(!out.contains("Carol"));
+    }
+
+    #[test]
+    fn test_format_top_traders_digest_empty() {
+        let out = format_top_traders_digest(&[], 5);
+        assert!(out.contains("No leaderboard data"));
+    }
+
+    #[test]
+    fn test_leaderboard_section_has_profile_link_and_follow() {
+        let entries = vec![lb(1, "Alice", 120_000.0, "0xabc12345def")];
+        let out = format_leaderboard_section(&entries, true);
+        assert!(out.contains("polymarket.com/profile/0xabc12345def"));
+        assert!(out.contains("/follow 0xabc12345def"));
+    }
 
     // Real API response shape captured 2026-03-15
     const ACTIVITY_JSON: &str = r#"[
