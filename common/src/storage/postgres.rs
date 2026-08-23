@@ -1077,11 +1077,15 @@ impl PgPortfolio {
             .execute(&mut *tx)
             .await?;
 
-        // Atomically credit global bankroll
-        sqlx::query("UPDATE portfolio SET value_f64 = value_f64 + $1 WHERE key = 'bankroll'")
-            .bind(net_payout)
-            .execute(&mut *tx)
-            .await?;
+        // Credit the global bankroll ONLY for ML strategies. Copy-trade bets are
+        // fully separate from the ML bot: place_copy_bet never debits global, so
+        // crediting it here would inflate it (this was the source of the drift).
+        if !strategy.starts_with("copy:") {
+            sqlx::query("UPDATE portfolio SET value_f64 = value_f64 + $1 WHERE key = 'bankroll'")
+                .bind(net_payout)
+                .execute(&mut *tx)
+                .await?;
+        }
 
         // Read the updated strategy bankroll within the transaction for the return value
         let updated_strat_bankroll: Option<(Option<f64>,)> =
@@ -1210,11 +1214,14 @@ impl PgPortfolio {
             .execute(&mut *tx)
             .await?;
 
-        // Atomically credit global bankroll
-        sqlx::query("UPDATE portfolio SET value_f64 = value_f64 + $1 WHERE key = 'bankroll'")
-            .bind(net_payout)
-            .execute(&mut *tx)
-            .await?;
+        // Credit the global bankroll ONLY for ML strategies (copy is fully
+        // separate — place_copy_bet never debits global). See resolve_bet.
+        if !r.strategy.starts_with("copy:") {
+            sqlx::query("UPDATE portfolio SET value_f64 = value_f64 + $1 WHERE key = 'bankroll'")
+                .bind(net_payout)
+                .execute(&mut *tx)
+                .await?;
+        }
 
         // Read the updated strategy bankroll within the transaction for the return value
         let updated_strat_bankroll: Option<(Option<f64>,)> =
