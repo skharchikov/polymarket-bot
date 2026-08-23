@@ -532,11 +532,12 @@ pub fn format_subscribers(rows: &[SubscriberRow]) -> String {
         rows.len()
     )];
     for r in rows {
-        let name = r
-            .username
-            .as_deref()
-            .or(r.first_name.as_deref())
-            .unwrap_or("—");
+        let name = escape_markdown(
+            r.username
+                .as_deref()
+                .or(r.first_name.as_deref())
+                .unwrap_or("—"),
+        );
         let status = if r.active { "" } else { " · inactive" };
         lines.push(format!(
             "• {name} — `{}` · seen {}{status}",

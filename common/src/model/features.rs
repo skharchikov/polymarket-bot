@@ -403,7 +403,8 @@ fn compute_volatility(history: &[PriceTick], hours: usize) -> f64 {
     variance.sqrt()
 }
 
-/// Compute RSI on 0-1 scale, time-weighted by the duration each price persisted.
+/// Compute RSI on a 0-1 scale as an unweighted mean of gains/losses over the last
+/// `period` deltas (matches training — scripts/fetch_data.py::_compute_rsi).
 fn compute_rsi(history: &[PriceTick], period: usize) -> f64 {
     if history.len() < period + 1 {
         return 0.5;

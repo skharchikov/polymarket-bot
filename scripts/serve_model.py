@@ -301,6 +301,11 @@ def _run_warmstart():
     never again diverge into writing a file the sidecar doesn't serve or skipping
     calibration (the previous "add 50 trees to xgb_model.json" implementation did
     both — it was a no-op on live predictions)."""
+    if not DATABASE_URL:
+        # Warm-start's point is to fold in our own resolved bets; without a DB
+        # it would just refetch markets for nothing. Skip.
+        log.info("warmstart.skip", reason="no DATABASE_URL; no resolved-bet feedback to add")
+        return
     _run_training(WARMSTART_MARKETS, "warmstart")
 
 
@@ -571,10 +576,20 @@ def retrain(req: RetrainRequest = RetrainRequest()):
 
 @app.post("/retrain/warmstart")
 def retrain_warmstart():
-    """Warm-start retrain on stored bet_features — no API calls, takes seconds."""
-    if _retrain.status == RetrainStatus.running:
+    """Warm-start: a lighter retrain (WARMSTART_MARKETS markets + recent resolved
+    bets) that trains the full calibrated ensemble. Takes minutes and hits the
+    API — not the old 'seconds, no API' behavior. Serialized via _retrain.lock so
+    it can't run concurrently with a full retrain (both write the same files)."""
+    if not _retrain.lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="Retrain already in progress")
-    threading.Thread(target=_run_warmstart, daemon=True).start()
+
+    def run():
+        try:
+            _run_warmstart()
+        finally:
+            _retrain.lock.release()
+
+    threading.Thread(target=run, daemon=True).start()
     return {"status": "started", "kind": "warmstart"}
 
 
