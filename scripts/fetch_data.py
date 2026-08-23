@@ -297,7 +297,9 @@ def _extract_snapshot(prices: np.ndarray, timestamps: np.ndarray,
         "momentum_24h": momentum_24h,
         "volatility_24h": volatility,
         "rsi": rsi,
-        "volume": market.get("volume_24h", volume),  # prefer 24h volume over total
+        # Use TOTAL volume (not 24h) so log_volume matches the live feature
+        # (features.rs uses market.volume_num, the total) — train/serve alignment.
+        "volume": volume,
         "liquidity": liquidity,
         "days_to_expiry": days_to_expiry,
         "days_since_created": days_since_created,
