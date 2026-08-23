@@ -72,6 +72,9 @@ def compute_lr(model_prob: float, market_price: float) -> float:
     """Likelihood ratio from model vs market."""
     if market_price <= 0.01 or market_price >= 0.99:
         return 1.0
+    # Clamp the model prob away from 0/1 to avoid div-by-zero when the
+    # calibrated model outputs an extreme probability.
+    model_prob = max(0.001, min(0.999, model_prob))
     return (model_prob / market_price) / ((1.0 - model_prob) / (1.0 - market_price))
 
 
@@ -603,12 +606,230 @@ def sweep_stop_loss(df, n_splits=5):
                   f"{delta:>+10.2f}")
 
 
+# --- Honest end-to-end backtest (leak-free, real fills + fees) ---
+
+# Live decision constants (mirror trading-bot): LR is dampened by
+# confidence * LR_DAMPING before the edge floor; YES bets are blocked.
+LR_DAMPING = 0.5
+EDGE_FLOOR = 0.02          # live.rs:1236 effective_edge (edge * conf) floor
+MIN_KELLY = 0.02          # config.rs min_kelly_size
+MIN_BET_PRICE = 0.15      # config.rs min_bet_price
+BLOCK_YES_SIDE = True     # config.rs block_yes_side ("30% WR, -€745 in prod")
+FLAT_BANKROLL = 300.0
+
+
+def _batch_confidence(model, x_test):
+    """Vectorized agreement-based confidence for a whole test matrix at once
+    (same formula as serve_model._estimate_confidence, but one predict_proba
+    per base estimator instead of per row)."""
+    est = model
+    if hasattr(est, "calibrated_classifiers_"):
+        est = est.calibrated_classifiers_[0].estimator
+    base = []
+    if hasattr(est, "estimators_"):
+        for e in est.estimators_:
+            members = e if isinstance(e, list) else [e]
+            for member in members:
+                base.append(member.predict_proba(x_test)[:, 1])
+    if len(base) < 2:
+        return np.full(len(x_test), 0.50)
+    base = np.asarray(base)
+    spread = base.max(axis=0) - base.min(axis=0)
+    return np.clip(0.75 / (1.0 + spread * 4.0), 0.25, 0.75)
+
+
+def run_honest_backtest(df, n_splits=5, strategy="balanced",
+                        block_yes=BLOCK_YES_SIDE, edge_floor=EDGE_FLOOR,
+                        lr_damping=LR_DAMPING):
+    """Leak-free, fee- and fill-aware simulation of the DEPLOYED decision.
+
+    Reproduces live behaviour (LR dampening, gates incl. block_yes_side, the
+    agreement-based confidence) so a profit here would be real.
+    """
+    cached = _materialize_folds(df, n_splits=n_splits)
+    return _evaluate_folds(cached, strategy, block_yes, edge_floor, lr_damping)
+
+
+def run_recalibration_backtest(df, n_splits=5, strategy="balanced", edge_floor=EDGE_FLOOR):
+    """No-ML strategy: bet where a per-(category,horizon) recalibration of the
+    MARKET PRICE diverges from the price. θ fit on train folds only (leak-free
+    via the market-grouped split). Fast — no ensemble training."""
+    from backtest.fees import net_pnl
+    from backtest.fills import fill_price, max_fillable
+    from backtest.metrics import summarize
+    from backtest.recalibration import (category_bucket, fit_theta,
+                                        horizon_bucket, recalibrate)
+    from backtest.walkforward import market_grouped_splits
+
+    s = STRATEGIES[strategy]
+    price = df["yes_price"].astype(float).values
+    outcome = df["label"].astype(int).values
+    dte = df["days_to_expiry"].astype(float).values
+    catcol = df["category"] if "category" in df else df["question"]
+    cats = [category_bucket(str(c)) for c in catcol.values]
+    bucket = np.array([f"{c}|{horizon_bucket(d)}" for c, d in zip(cats, dte)])
+    vol = df["volume"].astype(float)
+    liq = vol.fillna(vol.median()).clip(lower=0.0).values
+    mid = df["market_id"].values
+    ts = df["snapshot_ts"].values if "snapshot_ts" in df else np.arange(len(df))
+
+    bets = []
+    funnel = {"priced": 0, "no_edge": 0, "edge_floor": 0, "min_price": 0,
+              "min_kelly": 0, "stake_too_small": 0, "placed": 0}
+    theta_log = {}
+
+    for train_mask, test_mask in market_grouped_splits(mid, ts, n_splits):
+        thetas = {}
+        for b in np.unique(bucket[train_mask]):
+            m = train_mask & (bucket == b)
+            thetas[b] = fit_theta(price[m], outcome[m])
+            theta_log.setdefault(b, []).append(thetas[b])
+        for i in np.nonzero(test_mask)[0]:
+            p = float(price[i])
+            if p <= 0.01 or p >= 0.99:
+                continue
+            funnel["priced"] += 1
+            post = float(recalibrate(p, thetas.get(bucket[i], 1.0)))
+            yes_edge = post - p
+            no_edge = (1.0 - post) - (1.0 - p)
+            if yes_edge >= no_edge and yes_edge > 0:
+                side, edge, bet_price, bet_prob, won = "YES", yes_edge, p, post, outcome[i] == 1
+            elif no_edge > 0:
+                side, edge, bet_price, bet_prob, won = "NO", no_edge, 1.0 - p, 1.0 - post, outcome[i] == 0
+            else:
+                funnel["no_edge"] += 1
+                continue
+            if edge < edge_floor:
+                funnel["edge_floor"] += 1
+                continue
+            if bet_price < MIN_BET_PRICE:
+                funnel["min_price"] += 1
+                continue
+            k = fractional_kelly(bet_prob, bet_price, s["kelly_frac"])
+            if k < MIN_KELLY:
+                funnel["min_kelly"] += 1
+                continue
+            stake = min(FLAT_BANKROLL * k, max_fillable(liq[i]))
+            if stake < 0.50:
+                funnel["stake_too_small"] += 1
+                continue
+            funnel["placed"] += 1
+            filled = fill_price(bet_price, stake, liq[i])
+            pnl = net_pnl(stake, filled, won)
+            bets.append({"stake": stake, "entry_fee": stake * 0.02, "pnl": pnl,
+                         "won": won, "model_prob": post, "market_price": p,
+                         "outcome": int(outcome[i])})
+
+    out = summarize(bets)
+    out["funnel"] = funnel
+    out["theta_by_bucket"] = {b: round(float(np.mean(v)), 2) for b, v in sorted(theta_log.items())}
+    out["pnls"] = [b["pnl"] for b in bets]
+    return out
+
+
+def _materialize_folds(df, n_splits=5):
+    """Train the (expensive) per-fold models ONCE and cache each fold's
+    predictions + test arrays, so many gate configs evaluate cheaply."""
+    from backtest.walkforward import walk_forward
+    cached = []
+    for fold in walk_forward(df, FEATURE_COLS, n_splits=n_splits):
+        cached.append({
+            "probs": fold.model.predict_proba(fold.x_test_scaled)[:, 1],
+            "confs": _batch_confidence(fold.model, fold.x_test_scaled),
+            "prices": fold.prices_test,
+            "outcomes": fold.y_test,
+            "liq": fold.liquidity_test,
+        })
+    return cached
+
+
+def _evaluate_folds(cached, strategy="balanced", block_yes=BLOCK_YES_SIDE,
+                    edge_floor=EDGE_FLOOR, lr_damping=LR_DAMPING):
+    """Replay the deployed decision over cached folds under one gate config."""
+    from backtest.fees import net_pnl
+    from backtest.fills import fill_price, max_fillable
+    from backtest.metrics import summarize
+
+    s = STRATEGIES[strategy]
+    bets = []
+    funnel = {"priced": 0, "no_edge": 0, "block_yes": 0, "edge_floor": 0,
+              "min_price": 0, "min_kelly": 0, "stake_too_small": 0, "placed": 0}
+
+    for fold in cached:
+        probs, confs = fold["probs"], fold["confs"]
+        for i in range(len(probs)):
+            prob = float(probs[i])
+            price = float(fold["prices"][i])
+            outcome = int(fold["outcomes"][i])
+            liq = float(fold["liq"][i])
+            if price <= 0.01 or price >= 0.99:
+                continue
+            funnel["priced"] += 1
+
+            conf = float(confs[i])
+            lr = compute_lr(prob, price)
+            post = bayesian_posterior(price, lr, conf * lr_damping)
+
+            yes_edge = post - price
+            no_edge = (1.0 - post) - (1.0 - price)
+            if yes_edge >= no_edge and yes_edge > 0:
+                side, edge, bet_price, bet_prob, won = "YES", yes_edge, price, post, outcome == 1
+            elif no_edge > 0:
+                side, edge, bet_price, bet_prob, won = "NO", no_edge, 1.0 - price, 1.0 - post, outcome == 0
+            else:
+                funnel["no_edge"] += 1
+                continue
+
+            if block_yes and side == "YES":
+                funnel["block_yes"] += 1
+                continue
+            if edge * conf < edge_floor:
+                funnel["edge_floor"] += 1
+                continue
+            if bet_price < MIN_BET_PRICE:
+                funnel["min_price"] += 1
+                continue
+
+            k = fractional_kelly(bet_prob, bet_price, s["kelly_frac"])
+            if k < MIN_KELLY:
+                funnel["min_kelly"] += 1
+                continue
+
+            stake = min(FLAT_BANKROLL * k, max_fillable(liq))
+            if stake < 0.50:
+                funnel["stake_too_small"] += 1
+                continue
+
+            funnel["placed"] += 1
+            filled = fill_price(bet_price, stake, liq)
+            entry_fee = stake * 0.02
+            pnl = net_pnl(stake, filled, won)
+            bets.append({
+                "stake": stake, "entry_fee": entry_fee, "pnl": pnl, "won": won,
+                "model_prob": prob, "market_price": price, "outcome": outcome,
+            })
+
+    out = summarize(bets)
+    out["funnel"] = funnel
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description="Backtest with Bayesian anchoring")
     parser.add_argument("--input", default="model/training_data.json")
     parser.add_argument("--folds", type=int, default=5)
-    parser.add_argument("--sweep", action="store_true", help="Sweep conservative params")
-    parser.add_argument("--stop-loss", action="store_true", help="Compare stop-loss levels")
+    parser.add_argument("--honest", action="store_true",
+                        help="Leak-free, fee/fill-aware honest backtest (default)")
+    parser.add_argument("--sweep", action="store_true", help="Sweep conservative params (LEAKY — exploratory only)")
+    parser.add_argument("--stop-loss", action="store_true", help="Compare stop-loss levels (LEAKY — exploratory only)")
+    parser.add_argument("--legacy", action="store_true",
+                        help="Old OLD-vs-NEW comparison (LEAKY scaler — exploratory only)")
+    parser.add_argument("--landscape", action="store_true",
+                        help="Train folds once, sweep gate configs (block_yes / edge_floor / lr_damping)")
+    parser.add_argument("--recal", action="store_true",
+                        help="No-ML market-price recalibration strategy (per category x horizon)")
+    parser.add_argument("--diagnose", action="store_true",
+                        help="Learning-curve + permutation (data vs signal) and FLB robustness")
     args = parser.parse_args()
 
     df = load_data(args.input)
@@ -617,15 +838,93 @@ def main():
         sys.exit(1)
 
     if args.sweep:
+        print("WARNING: sweep uses pre-split scaling (look-ahead leakage) — exploratory only.\n")
         print(f"Sweeping conservative params on {len(df)} samples, {args.folds} folds")
         sweep_conservative(df, n_splits=args.folds)
     elif args.stop_loss:
+        print("WARNING: stop-loss sweep uses pre-split scaling (look-ahead leakage) — exploratory only.\n")
         print(f"Comparing stop-loss levels on {len(df)} samples, {args.folds} folds")
         sweep_stop_loss(df, n_splits=args.folds)
-    else:
-        print(f"Running backtest on {len(df)} samples across {args.folds} folds")
-        print(f"Comparing: OLD (raw model prob) vs NEW (Bayesian-anchored)")
+    elif args.legacy:
+        print("WARNING: legacy path fits the scaler on ALL rows (look-ahead leakage) — exploratory only.\n")
         run_backtest(df, n_splits=args.folds)
+    elif args.diagnose:
+        from backtest.diagnostics import flb_robustness, learning_and_permutation
+        print(f"Signal diagnostics on {len(df)} samples\n")
+        print("A) Learning curve + permutation (Brier skill vs market; >0 = real signal)")
+        try:
+            curve, real, perm = learning_and_permutation(df, FEATURE_COLS)
+            print(f"   learning curve (train frac -> skill): {curve}")
+            pmean = sum(perm) / len(perm)
+            pmax = max(perm)
+            print(f"   real skill (full train): {real:+.4f}")
+            print(f"   permutation null: mean={pmean:+.4f} max={pmax:+.4f}  (n={len(perm)})")
+            verdict = ("SIGNAL: real skill clears the shuffled-label null"
+                       if real > pmax and real > 0 else
+                       "NO SIGNAL beyond price: real skill within/under the null")
+            print(f"   => {verdict}")
+        except ValueError as e:
+            print(f"   skipped: {e}")
+        print("\nB) FLB (recalibration) robustness")
+        r = run_recalibration_backtest(df, n_splits=args.folds, strategy="balanced")
+        rob = flb_robustness(r.get("pnls", []))
+        print(f"   total=€{rob['total']}  ex_top5=€{rob['ex_top5']}  ex_top20=€{rob['ex_top20']}")
+        print(f"   bootstrap 95% CI on total PnL: {rob['boot_ci95']}")
+        ci_lo = rob["boot_ci95"][0]
+        print(f"   => {'ROBUST: CI lower bound > 0' if ci_lo > 0 else 'FRAGILE: CI includes 0/negative — not a reliable edge'}")
+    elif args.recal:
+        print(f"Recalibration backtest on {len(df)} samples, {args.folds} folds "
+              f"(no ML; θ per category×horizon, fit on train only)")
+        for strategy in ("aggressive", "balanced", "conservative"):
+            r = run_recalibration_backtest(df, n_splits=args.folds, strategy=strategy)
+            print(f"\n[{strategy.upper()}]")
+            print(f"  bets={r['n']}  net_pnl=€{r.get('net_pnl', 0):+.2f}  "
+                  f"net_roi={r.get('net_roi_pct', 0):+.1f}%  "
+                  f"win_rate={r.get('win_rate', 0):.0%}  "
+                  f"brier_skill_vs_market={r.get('brier_skill_vs_market', 0):+.2f}  "
+                  f"max_dd=€{r.get('max_drawdown', 0):.2f}")
+            if strategy == "balanced":
+                print(f"  funnel: {r.get('funnel', {})}")
+                print(f"  θ by bucket: {r.get('theta_by_bucket', {})}")
+                pnls = sorted(r.get("pnls", []), reverse=True)
+                if pnls:
+                    total = sum(pnls)
+                    top5 = sum(pnls[:5])
+                    ex_top5 = total - top5
+                    wins = [p for p in pnls if p > 0]
+                    print(f"  concentration: total=€{total:+.0f}  top5_wins=€{top5:+.0f} "
+                          f"({(top5 / total * 100 if total else 0):.0f}% of net)  "
+                          f"net_excl_top5=€{ex_top5:+.0f}  n_wins={len(wins)}")
+    elif args.landscape:
+        print(f"Landscape sweep on {len(df)} samples, {args.folds} folds "
+              f"(training once, replaying gate configs)")
+        cached = _materialize_folds(df, n_splits=args.folds)
+        configs = [
+            ("base: block_yes, floor .02, damp .5", dict(block_yes=True, edge_floor=0.02, lr_damping=0.5)),
+            ("allow_yes", dict(block_yes=False, edge_floor=0.02, lr_damping=0.5)),
+            ("trust model (damp 1.0)", dict(block_yes=True, edge_floor=0.02, lr_damping=1.0)),
+            ("trust market (damp 0.2)", dict(block_yes=True, edge_floor=0.02, lr_damping=0.2)),
+            ("higher floor .05", dict(block_yes=True, edge_floor=0.05, lr_damping=0.5)),
+            ("allow_yes + damp 1.0", dict(block_yes=False, edge_floor=0.02, lr_damping=1.0)),
+            ("allow_yes + floor .05 + damp 1.0", dict(block_yes=False, edge_floor=0.05, lr_damping=1.0)),
+        ]
+        print(f"\n{'config':<40s} {'bets':>6s} {'net_pnl':>10s} {'roi%':>7s} {'win%':>5s} {'skill':>6s}")
+        for label, cfg in configs:
+            r = _evaluate_folds(cached, strategy="balanced", **cfg)
+            print(f"{label:<40s} {r['n']:>6d} {r.get('net_pnl', 0):>+10.0f} "
+                  f"{r.get('net_roi_pct', 0):>+6.1f}% {r.get('win_rate', 0)*100:>4.0f}% "
+                  f"{r.get('brier_skill_vs_market', 0):>+6.2f}")
+    else:
+        print(f"Honest backtest on {len(df)} samples across {args.folds} folds")
+        for strategy in ("aggressive", "balanced", "conservative"):
+            r = run_honest_backtest(df, n_splits=args.folds, strategy=strategy)
+            print(f"\n[{strategy.upper()}]")
+            print(f"  bets={r['n']}  net_pnl=€{r.get('net_pnl', 0):+.2f}  "
+                  f"net_roi={r.get('net_roi_pct', 0):+.1f}%  "
+                  f"win_rate={r.get('win_rate', 0):.0%}  "
+                  f"brier_skill_vs_market={r.get('brier_skill_vs_market', 0):+.2f}  "
+                  f"max_dd=€{r.get('max_drawdown', 0):.2f}")
+            print(f"  funnel: {r.get('funnel', {})}")
 
 
 if __name__ == "__main__":
