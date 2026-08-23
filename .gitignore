@@ -8,3 +8,6 @@ __pycache__/
 CHANGELOG.gen
 .envrc
 tmp/
+
+# local backtest data (pulled from prod, not versioned)
+scripts/model/
