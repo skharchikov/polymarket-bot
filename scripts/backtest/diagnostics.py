@@ -44,6 +44,10 @@ def learning_and_permutation(df, feature_cols, fractions=(0.25, 0.5, 1.0),
     x, y, price, mid, ts = _prep(df, feature_cols)
     # take the LAST fold from a 4-way market split as the held-out test
     folds = list(market_grouped_splits(mid, ts, n_splits=4))
+    if not folds:
+        raise ValueError(
+            "insufficient markets for diagnostics (need > 5 distinct markets)"
+        )
     train_mask, test_mask = folds[-1]
     xtr_all, ytr_all = x[train_mask], y[train_mask]
     xte, yte, pte = x[test_mask], y[test_mask], price[test_mask]

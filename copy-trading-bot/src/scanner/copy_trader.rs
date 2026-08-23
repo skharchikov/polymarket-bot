@@ -199,8 +199,11 @@ pub async fn refresh_followed_trader_stats(http: &Client, portfolio: &PgPortfoli
 
     let fetches = traders.iter().map(|t| async move {
         // All-time drives rank/pnl/volume; MONTH supplies the last-month pnl.
-        let all = fetch_trader_stats(http, &t.proxy_wallet, "ALL").await;
-        let month = fetch_trader_stats(http, &t.proxy_wallet, "MONTH").await;
+        // Run both period fetches concurrently to halve per-trader latency.
+        let (all, month) = tokio::join!(
+            fetch_trader_stats(http, &t.proxy_wallet, "ALL"),
+            fetch_trader_stats(http, &t.proxy_wallet, "MONTH"),
+        );
         (t, all, month)
     });
 

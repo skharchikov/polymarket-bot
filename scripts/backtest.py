@@ -852,16 +852,19 @@ def main():
         from backtest.diagnostics import flb_robustness, learning_and_permutation
         print(f"Signal diagnostics on {len(df)} samples\n")
         print("A) Learning curve + permutation (Brier skill vs market; >0 = real signal)")
-        curve, real, perm = learning_and_permutation(df, FEATURE_COLS)
-        print(f"   learning curve (train frac -> skill): {curve}")
-        pmean = sum(perm) / len(perm)
-        pmax = max(perm)
-        print(f"   real skill (full train): {real:+.4f}")
-        print(f"   permutation null: mean={pmean:+.4f} max={pmax:+.4f}  (n={len(perm)})")
-        verdict = ("SIGNAL: real skill clears the shuffled-label null"
-                   if real > pmax and real > 0 else
-                   "NO SIGNAL beyond price: real skill within/under the null")
-        print(f"   => {verdict}")
+        try:
+            curve, real, perm = learning_and_permutation(df, FEATURE_COLS)
+            print(f"   learning curve (train frac -> skill): {curve}")
+            pmean = sum(perm) / len(perm)
+            pmax = max(perm)
+            print(f"   real skill (full train): {real:+.4f}")
+            print(f"   permutation null: mean={pmean:+.4f} max={pmax:+.4f}  (n={len(perm)})")
+            verdict = ("SIGNAL: real skill clears the shuffled-label null"
+                       if real > pmax and real > 0 else
+                       "NO SIGNAL beyond price: real skill within/under the null")
+            print(f"   => {verdict}")
+        except ValueError as e:
+            print(f"   skipped: {e}")
         print("\nB) FLB (recalibration) robustness")
         r = run_recalibration_backtest(df, n_splits=args.folds, strategy="balanced")
         rob = flb_robustness(r.get("pnls", []))
