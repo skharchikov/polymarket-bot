@@ -68,7 +68,10 @@ pub async fn housekeeping_cycle(
                     broadcast(notifier, portfolio, &msg).await;
                     if r.won && r.cost > 0.0 && r.pnl / r.cost >= 1.5 {
                         let gif = random_victory_gif();
-                        let subs = portfolio.telegram_subscribers().await.unwrap_or_default();
+                        let subs = portfolio
+                            .telegram_subscribers(notifier.bot_kind())
+                            .await
+                            .unwrap_or_default();
                         notifier.broadcast_animation(&subs, gif).await;
                     }
                     metrics::record_resolution(&r.strategy, r.won, r.pnl);

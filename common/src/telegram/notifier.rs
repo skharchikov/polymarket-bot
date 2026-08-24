@@ -2,22 +2,93 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+/// Outcome of a failed Telegram send, used to decide whether to prune a subscriber.
+#[derive(Debug)]
+pub enum SendError {
+    /// The chat is gone for this bot (blocked / not found / deactivated) — prune it.
+    Permanent(String),
+    /// Temporary failure (rate limit, server error, network) — keep the subscriber.
+    Transient(String),
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SendError::Permanent(m) => write!(f, "permanent: {m}"),
+            SendError::Transient(m) => write!(f, "transient: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for SendError {}
+
+/// Classify a Telegram sendMessage failure. `error_code` is Telegram's numeric
+/// code (None for a transport/network error). 400 (chat not found) and 403
+/// (bot blocked / user deactivated) mean the chat is permanently unreachable.
+pub fn classify_telegram_error(error_code: Option<i64>, body: &str) -> SendError {
+    match error_code {
+        Some(400) | Some(403) => SendError::Permanent(body.to_string()),
+        _ => SendError::Transient(body.to_string()),
+    }
+}
+
+/// Which bot a notifier belongs to — used to scope subscribers per bot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BotKind {
+    Trading,
+    Copy,
+}
+
+impl BotKind {
+    /// Storage/DB key form.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BotKind::Trading => "trading",
+            BotKind::Copy => "copy",
+        }
+    }
+}
+
+/// Result of a broadcast: chats we reached, and chats that permanently failed
+/// (to be deactivated by the prune worker). Transient failures are omitted.
+#[derive(Debug, Default)]
+pub struct BroadcastResponse {
+    pub sent: Vec<String>,
+    pub failed: Vec<String>,
+}
+
+/// Telegram sendMessage request body.
+#[derive(serde::Serialize)]
+struct SendMessagePayload<'a> {
+    chat_id: &'a str,
+    text: &'a str,
+    parse_mode: &'a str,
+    disable_web_page_preview: bool,
+}
+
 pub struct TelegramNotifier {
     client: Client,
     bot_token: String,
     chat_id: String,
+    bot_kind: BotKind,
     /// Last processed update_id for polling
     last_update_id: AtomicI64,
 }
 
 impl TelegramNotifier {
-    pub fn new(bot_token: &str, chat_id: &str) -> Self {
+    pub fn new(bot_token: &str, chat_id: &str, bot_kind: BotKind) -> Self {
         Self {
             client: Client::new(),
             bot_token: bot_token.to_string(),
             chat_id: chat_id.to_string(),
+            bot_kind,
             last_update_id: AtomicI64::new(0),
         }
+    }
+
+    /// The bot identity ("trading"/"copy") used to scope subscribers.
+    pub fn bot_kind(&self) -> &str {
+        self.bot_kind.as_str()
     }
 
     /// Check if a chat_id belongs to the bot owner.
@@ -29,22 +100,79 @@ impl TelegramNotifier {
         self.send_to(&self.chat_id, message).await
     }
 
-    /// Send to owner + all subscribers (deduped).
-    pub async fn broadcast(&self, subscribers: &[(String, Option<String>)], message: &str) {
-        let recipients = 1 + subscribers
-            .iter()
-            .filter(|(id, _)| id != &self.chat_id)
-            .count();
-        let _ = self.send(message).await;
+    /// Send to owner + all subscribers. Pure send: reports which chats succeeded
+    /// and which PERMANENTLY failed (blocked / chat not found). It does NOT touch
+    /// the DB — the caller routes `failed` to the prune worker. Transient failures
+    /// (rate-limit / server error) are kept (not reported as failed) and retried
+    /// on the next broadcast.
+    pub async fn broadcast(
+        &self,
+        subscribers: &[(String, Option<String>)],
+        message: &str,
+    ) -> BroadcastResponse {
+        let _ = self.send(message).await; // owner
+        let mut resp = BroadcastResponse::default();
         for (id, username) in subscribers {
-            if id != &self.chat_id {
-                let label = username.as_deref().unwrap_or("unknown");
-                if let Err(e) = self.send_to(id, message).await {
-                    tracing::warn!(chat_id = %id, username = label, err = %e, "Failed to send to subscriber");
+            if id == &self.chat_id {
+                continue;
+            }
+            let label = username.as_deref().unwrap_or("unknown");
+            match self.send_to_classified(id, message).await {
+                Ok(()) => resp.sent.push(id.clone()),
+                Err(SendError::Permanent(body)) => {
+                    tracing::debug!(chat_id = %id, username = label, body = %body, "Permanent Telegram failure");
+                    resp.failed.push(id.clone());
+                }
+                Err(SendError::Transient(body)) => {
+                    tracing::warn!(chat_id = %id, username = label, err = %body, "Transient send failure (kept)");
                 }
             }
         }
-        tracing::debug!(recipients = recipients, "Broadcast complete");
+        resp
+    }
+
+    /// Send to one chat, returning a typed error that says whether the failure
+    /// is permanent (prune the chat) or transient (keep it).
+    async fn send_to_classified(
+        &self,
+        chat_id: &str,
+        message: &str,
+    ) -> std::result::Result<(), SendError> {
+        let url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
+        let disclaimer = "_This is not financial advice. Do your own research._";
+        let footer = format!("\n\n{disclaimer}");
+        let chunks = split_message(message, 4096 - footer.len());
+
+        for (i, chunk) in chunks.iter().enumerate() {
+            let text = if i == chunks.len() - 1 {
+                format!("{chunk}{footer}")
+            } else {
+                chunk.to_string()
+            };
+            let resp = match self
+                .client
+                .post(&url)
+                .json(&SendMessagePayload {
+                    chat_id,
+                    text: &text,
+                    parse_mode: "Markdown",
+                    disable_web_page_preview: true,
+                })
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => return Err(SendError::Transient(e.to_string())),
+            };
+            if !resp.status().is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                let code = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| v["error_code"].as_i64());
+                return Err(classify_telegram_error(code, &body));
+            }
+        }
+        Ok(())
     }
 
     pub async fn send_to(&self, chat_id: &str, message: &str) -> Result<()> {
@@ -77,12 +205,12 @@ impl TelegramNotifier {
             let resp = self
                 .client
                 .post(&url)
-                .json(&serde_json::json!({
-                    "chat_id": chat_id,
-                    "text": text,
-                    "parse_mode": parse_mode,
-                    "disable_web_page_preview": true,
-                }))
+                .json(&SendMessagePayload {
+                    chat_id,
+                    text: &text,
+                    parse_mode,
+                    disable_web_page_preview: true,
+                })
                 .send()
                 .await
                 .context("failed to send telegram message")?;
@@ -244,6 +372,41 @@ fn split_message(text: &str, max_chars: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_classify_blocked_is_permanent() {
+        let body = r#"{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}"#;
+        assert!(matches!(
+            classify_telegram_error(Some(403), body),
+            SendError::Permanent(_)
+        ));
+    }
+
+    #[test]
+    fn test_classify_chat_not_found_is_permanent() {
+        let body = r#"{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}"#;
+        assert!(matches!(
+            classify_telegram_error(Some(400), body),
+            SendError::Permanent(_)
+        ));
+    }
+
+    #[test]
+    fn test_classify_rate_limit_is_transient() {
+        let body = r#"{"ok":false,"error_code":429,"description":"Too Many Requests"}"#;
+        assert!(matches!(
+            classify_telegram_error(Some(429), body),
+            SendError::Transient(_)
+        ));
+    }
+
+    #[test]
+    fn test_classify_unknown_is_transient() {
+        assert!(matches!(
+            classify_telegram_error(None, "network error"),
+            SendError::Transient(_)
+        ));
+    }
 
     #[test]
     fn test_split_short_message_unchanged() {

@@ -503,12 +503,49 @@ pub struct TraderRow {
     pub wallet_short: String,
     pub rank: Option<i32>,
     pub poly_pnl: Option<f64>,
+    pub poly_pnl_month: Option<f64>,
     pub bankroll: f64,
     pub starting_bankroll: f64,
     pub wins: usize,
     pub losses: usize,
     pub pnl: f64,
     pub open: usize,
+}
+
+/// A single subscriber row for the owner-only `/subscribers` view.
+pub struct SubscriberRow {
+    pub chat_id: String,
+    pub username: Option<String>,
+    pub first_name: Option<String>,
+    pub active: bool,
+    pub last_seen: chrono::DateTime<chrono::Utc>,
+}
+
+/// Render the owner-only `/subscribers` list (active first).
+pub fn format_subscribers(rows: &[SubscriberRow]) -> String {
+    if rows.is_empty() {
+        return "👥 *Subscribers*\n\nNo subscribers yet.".to_string();
+    }
+    let active = rows.iter().filter(|r| r.active).count();
+    let mut lines = vec![format!(
+        "👥 *Subscribers* ({active} active / {} total)\n",
+        rows.len()
+    )];
+    for r in rows {
+        let name = escape_markdown(
+            r.username
+                .as_deref()
+                .or(r.first_name.as_deref())
+                .unwrap_or("—"),
+        );
+        let status = if r.active { "" } else { " · inactive" };
+        lines.push(format!(
+            "• {name} — `{}` · seen {}{status}",
+            r.chat_id,
+            r.last_seen.format("%Y-%m-%d")
+        ));
+    }
+    lines.join("\n")
 }
 
 /// Render the `/traders` message from a slice of rows.
@@ -527,10 +564,14 @@ pub fn format_traders(traders: &[TraderRow]) -> String {
             .poly_pnl
             .map(|p| format!("${:.0}k", p / 1000.0))
             .unwrap_or_else(|| "—".into());
+        let poly_pnl_month = t
+            .poly_pnl_month
+            .map(|p| format!("${:.0}k", p / 1000.0))
+            .unwrap_or_else(|| "—".into());
         lines.push(format!(
             "👤 {name}\n\
              \u{00a0}\u{00a0}🔑 `{wallet}`\n\
-             \u{00a0}\u{00a0}🏆 Rank: {rank} | Poly PnL: {poly_pnl}\n\
+             \u{00a0}\u{00a0}🏆 Rank: {rank} | Poly PnL: {poly_pnl} (1M: {poly_pnl_month})\n\
              \u{00a0}\u{00a0}💰 Bankroll: `€{bankroll:.2}`\n\
              \u{00a0}\u{00a0}📊 Record: {wins}W/{losses}L ({pnl:+.2}€)\n\
              \u{00a0}\u{00a0}🔓 Open: {open}",
@@ -601,6 +642,31 @@ mod tests {
     use chrono::Utc;
 
     #[test]
+    fn test_format_subscribers_empty_and_counts() {
+        assert!(format_subscribers(&[]).contains("No subscribers"));
+        let rows = vec![
+            SubscriberRow {
+                chat_id: "111".into(),
+                username: Some("alice".into()),
+                first_name: Some("Alice".into()),
+                active: true,
+                last_seen: Utc::now(),
+            },
+            SubscriberRow {
+                chat_id: "222".into(),
+                username: None,
+                first_name: Some("Bob".into()),
+                active: false,
+                last_seen: Utc::now(),
+            },
+        ];
+        let out = format_subscribers(&rows);
+        assert!(out.contains("1 active / 2 total"));
+        assert!(out.contains("alice") && out.contains("`111`"));
+        assert!(out.contains("Bob") && out.contains("inactive"));
+    }
+
+    #[test]
     fn test_trader_row_has_starting_bankroll() {
         let row = TraderRow {
             name: "alice".to_string(),
@@ -608,6 +674,7 @@ mod tests {
             wallet_short: "0xabc123".to_string(),
             rank: None,
             poly_pnl: None,
+            poly_pnl_month: None,
             bankroll: 500.0,
             starting_bankroll: 400.0,
             wins: 3,
@@ -912,6 +979,7 @@ mod tests {
             wallet_short: format!("0x{name}"),
             rank: None,
             poly_pnl: None,
+            poly_pnl_month: None,
             bankroll,
             starting_bankroll: starting,
             wins,

@@ -1,16 +1,14 @@
 use anyhow::Result;
 
-use crate::config::CopyTradingConfig;
 use crate::data::models::{fetch_market_by_slug, fetch_yes_prices};
 use crate::format;
 use crate::live::broadcast;
 use crate::metrics;
 use crate::pricing::kelly::fractional_kelly;
-use crate::scanner::copy_trader::{CopyTraderMonitor, fetch_trader_username};
+use crate::scanner::copy_trader::fetch_trader_username;
 use crate::signal::SignalSource;
+use crate::state::AppState;
 use crate::storage::portfolio::{BetSide, CopyRef, NewBet};
-use crate::storage::postgres::PgPortfolio;
-use crate::telegram::notifier::TelegramNotifier;
 
 /// Default bankroll for a newly followed trader.
 pub const COPY_TRADER_STARTING_BANKROLL: f64 = 1000.0;
@@ -21,12 +19,10 @@ const MIN_BET: f64 = 3.0;
 /// Maximum allowed price drift from trader's entry before skipping.
 const MAX_PRICE_DRIFT: f64 = 0.05; // 5 percentage points
 
-pub async fn copy_trade_cycle(
-    portfolio: &PgPortfolio,
-    notifier: &TelegramNotifier,
-    monitor: &CopyTraderMonitor,
-    cfg: &CopyTradingConfig,
-) -> Result<()> {
+pub async fn copy_trade_cycle(state: &AppState) -> Result<()> {
+    let portfolio = state.portfolio.as_ref();
+    let monitor = state.monitor.as_ref();
+    let cfg = state.cfg.as_ref();
     let detected = monitor.detect_new_trades(portfolio).await?;
     if detected.is_empty() {
         return Ok(());
@@ -145,7 +141,7 @@ pub async fn copy_trade_cycle(
                             pnl = r.pnl,
                             bankroll = r.bankroll,
                         );
-                        broadcast(notifier, portfolio, &msg).await;
+                        broadcast(state, &msg).await;
                         tracing::info!(
                             market = %gamma_id,
                             trader = %trader_name,
@@ -392,7 +388,7 @@ pub async fn copy_trade_cycle(
                     bankroll: new_bankroll,
                     open: open_count,
                 });
-                broadcast(notifier, portfolio, &msg).await;
+                broadcast(state, &msg).await;
                 bets_placed += 1;
             }
             Err(e) => {

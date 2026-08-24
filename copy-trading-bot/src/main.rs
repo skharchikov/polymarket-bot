@@ -17,6 +17,7 @@ mod config;
 mod cycles;
 mod live;
 mod scanner;
+mod state;
 
 use anyhow::Result;
 use config::CopyTradingConfig;

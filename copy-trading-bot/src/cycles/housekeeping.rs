@@ -3,17 +3,14 @@ use std::time::Duration;
 
 use crate::data::models::GammaMarket;
 use crate::live::broadcast;
+use crate::state::AppState;
 use crate::storage::portfolio::BetSide;
-use crate::storage::postgres::PgPortfolio;
-use crate::telegram::notifier::TelegramNotifier;
 
 const GAMMA_API: &str = "https://gamma-api.polymarket.com";
 
-pub async fn housekeeping_cycle(
-    portfolio: &PgPortfolio,
-    notifier: &TelegramNotifier,
-    http: &reqwest::Client,
-) -> Result<()> {
+pub async fn housekeeping_cycle(state: &AppState) -> Result<()> {
+    let portfolio = state.portfolio.as_ref();
+    let http = &state.http;
     let open_ids = portfolio.open_copy_bet_market_ids().await?;
 
     for market_id in &open_ids {
@@ -50,7 +47,7 @@ pub async fn housekeeping_cycle(
                         losses = r.total_losses,
                         total_pnl = r.total_pnl,
                     );
-                    broadcast(notifier, portfolio, &msg).await;
+                    broadcast(state, &msg).await;
                     tracing::info!(
                         market = %market_id,
                         strategy = %r.strategy,

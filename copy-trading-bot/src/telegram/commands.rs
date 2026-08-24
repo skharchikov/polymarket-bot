@@ -1,27 +1,23 @@
 //! Telegram command dispatch for the copy-trading bot.
 
-use crate::config::CopyTradingConfig;
 use crate::cycles::copy_trade::COPY_TRADER_STARTING_BANKROLL;
 use crate::scanner::copy_trader::{
-    CopyTraderMonitor, fetch_leaderboard, fetch_trader_stats, fetch_trader_username,
-    format_multi_leaderboard, refresh_followed_trader_stats,
+    fetch_leaderboard, fetch_trader_stats, fetch_trader_username, format_multi_leaderboard,
+    refresh_followed_trader_stats,
 };
-use crate::storage::postgres::PgPortfolio;
-use crate::telegram::notifier::TelegramNotifier;
+use crate::state::AppState;
 
 /// Dispatch a single Telegram command and return the reply string.
-#[allow(clippy::too_many_arguments)]
 pub async fn handle_command(
     cmd: &str,
     chat_id: &str,
     full_text: &str,
     first_name: Option<&str>,
-    portfolio: &PgPortfolio,
-    notifier: &TelegramNotifier,
-    _monitor: &CopyTraderMonitor,
-    http: &reqwest::Client,
-    _cfg: &CopyTradingConfig,
+    state: &AppState,
 ) -> String {
+    let portfolio = state.portfolio.as_ref();
+    let notifier = state.notifier.as_ref();
+    let http = &state.http;
     match cmd {
         "start" => {
             let name = first_name.unwrap_or("there");
@@ -34,6 +30,7 @@ pub async fn handle_command(
                  /leaderboard — top traders\n\
                  /follow — follow a trader (owner)\n\
                  /unfollow — unfollow a trader (owner)\n\
+                 /subscribers — list subscribers (owner)\n\
                  /help — show commands"
             )
         }
@@ -88,6 +85,19 @@ pub async fn handle_command(
                 }
             }
         }
+        "subscribers" => {
+            if !notifier.is_owner(chat_id) {
+                "🔒 Only the bot owner can view subscribers.".to_string()
+            } else {
+                match portfolio.list_subscribers(notifier.bot_kind()).await {
+                    Ok(subs) => crate::format::format_subscribers(&subs),
+                    Err(e) => {
+                        tracing::warn!(err = %e, "Failed to load subscribers");
+                        "⚠️ Failed to load subscribers".to_string()
+                    }
+                }
+            }
+        }
         "follow" => {
             if !notifier.is_owner(chat_id) {
                 "🔒 Only the bot owner can follow traders.".to_string()
@@ -117,7 +127,10 @@ pub async fn handle_command(
                     {
                         tracing::warn!(err = %e, "Failed to init copy trader starting bankroll");
                     }
-                    let stats = fetch_trader_stats(http, &wallet).await.ok().flatten();
+                    let stats = fetch_trader_stats(http, &wallet, "ALL")
+                        .await
+                        .ok()
+                        .flatten();
                     let mut username = stats.as_ref().and_then(|s| s.username.clone());
                     if username.is_none() {
                         username = fetch_trader_username(http, &wallet).await;
@@ -172,6 +185,7 @@ pub async fn handle_command(
                  /leaderboard — top Polymarket traders\n\
                  /follow — follow a trader (owner)\n\
                  /unfollow — unfollow a trader (owner)\n\
+                 /subscribers — list subscribers (owner)\n\
                  /help — this message"
             .to_string(),
         _ => format!("❓ Unknown command: /{cmd}\nTry /help"),

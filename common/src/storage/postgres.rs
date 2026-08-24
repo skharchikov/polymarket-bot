@@ -233,36 +233,95 @@ impl PgPortfolio {
         Ok(())
     }
 
-    /// Upsert a Telegram user (tracks who interacts with the bot).
+    /// Upsert a Telegram user for a specific bot. Returns `true` if a new row
+    /// was inserted (first time this user joined this bot).
     pub async fn upsert_telegram_user(
         &self,
+        bot: &str,
         chat_id: &str,
         username: Option<&str>,
         first_name: Option<&str>,
-    ) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO telegram_users (chat_id, username, first_name, last_seen) \
-             VALUES ($1, $2, $3, NOW()) \
-             ON CONFLICT (chat_id) DO UPDATE SET \
+    ) -> Result<bool> {
+        // `xmax = 0` is true only for a freshly INSERTed row (no prior version),
+        // false when the ON CONFLICT UPDATE branch ran.
+        // `active = TRUE` in the UPDATE branch auto-reactivates a returning user
+        // who had previously been pruned.
+        let row: (bool,) = sqlx::query_as(
+            "INSERT INTO telegram_users (bot, chat_id, username, first_name, last_seen) \
+             VALUES ($1, $2, $3, $4, NOW()) \
+             ON CONFLICT (bot, chat_id) DO UPDATE SET \
                username = COALESCE(EXCLUDED.username, telegram_users.username), \
                first_name = COALESCE(EXCLUDED.first_name, telegram_users.first_name), \
-               last_seen = NOW()",
+               active = TRUE, \
+               last_seen = NOW() \
+             RETURNING (xmax = 0) AS inserted",
         )
+        .bind(bot)
         .bind(chat_id)
         .bind(username)
         .bind(first_name)
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await?;
-        Ok(())
+        Ok(row.0)
     }
 
-    /// Get subscriber chat IDs with their usernames for logging.
-    pub async fn telegram_subscribers(&self) -> Result<Vec<(String, Option<String>)>> {
-        let rows: Vec<(String, Option<String>)> =
-            sqlx::query_as("SELECT chat_id, username FROM telegram_users")
-                .fetch_all(&self.pool)
-                .await?;
+    /// Full subscriber detail for the owner's `/subscribers` view (this bot only),
+    /// active first then most-recently-seen.
+    pub async fn list_subscribers(&self, bot: &str) -> Result<Vec<crate::format::SubscriberRow>> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            chat_id: String,
+            username: Option<String>,
+            first_name: Option<String>,
+            active: bool,
+            last_seen: DateTime<Utc>,
+        }
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT chat_id, username, first_name, active, last_seen \
+             FROM telegram_users WHERE bot = $1 \
+             ORDER BY active DESC, last_seen DESC",
+        )
+        .bind(bot)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::format::SubscriberRow {
+                chat_id: r.chat_id,
+                username: r.username,
+                first_name: r.first_name,
+                active: r.active,
+                last_seen: r.last_seen,
+            })
+            .collect())
+    }
+
+    /// Active subscriber chat IDs (with usernames for logging) for a specific bot.
+    pub async fn telegram_subscribers(&self, bot: &str) -> Result<Vec<(String, Option<String>)>> {
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT chat_id, username FROM telegram_users WHERE bot = $1 AND active",
+        )
+        .bind(bot)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows)
+    }
+
+    /// Soft-deactivate subscribers of `bot` that permanently failed to receive
+    /// messages (blocked the bot / chat not found). Returns rows affected.
+    pub async fn deactivate_telegram_users(&self, bot: &str, chat_ids: &[String]) -> Result<u64> {
+        if chat_ids.is_empty() {
+            return Ok(0);
+        }
+        let res = sqlx::query(
+            "UPDATE telegram_users SET active = FALSE, blocked_at = NOW() \
+             WHERE bot = $1 AND chat_id = ANY($2)",
+        )
+        .bind(bot)
+        .bind(chat_ids)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
     }
 
     /// Build a stats summary string for /stats command.
@@ -641,6 +700,16 @@ impl PgPortfolio {
 
     pub async fn upsert_f64_pub(&self, key: &str, val: f64) -> Result<()> {
         self.upsert_f64(key, val).await
+    }
+
+    /// Read a text metadata value from the `portfolio` kv table (empty string if absent).
+    pub async fn get_text_pub(&self, key: &str) -> Result<String> {
+        self.get_text(key).await
+    }
+
+    /// Insert-or-update a text metadata value in the `portfolio` kv table.
+    pub async fn upsert_text_pub(&self, key: &str, val: &str) -> Result<()> {
+        self.upsert_text(key, val).await
     }
 
     async fn upsert_f64(&self, key: &str, val: f64) -> Result<()> {
@@ -1039,11 +1108,15 @@ impl PgPortfolio {
             .execute(&mut *tx)
             .await?;
 
-        // Atomically credit global bankroll
-        sqlx::query("UPDATE portfolio SET value_f64 = value_f64 + $1 WHERE key = 'bankroll'")
-            .bind(net_payout)
-            .execute(&mut *tx)
-            .await?;
+        // Credit the global bankroll ONLY for ML strategies. Copy-trade bets are
+        // fully separate from the ML bot: place_copy_bet never debits global, so
+        // crediting it here would inflate it (this was the source of the drift).
+        if !strategy.starts_with("copy:") {
+            sqlx::query("UPDATE portfolio SET value_f64 = value_f64 + $1 WHERE key = 'bankroll'")
+                .bind(net_payout)
+                .execute(&mut *tx)
+                .await?;
+        }
 
         // Read the updated strategy bankroll within the transaction for the return value
         let updated_strat_bankroll: Option<(Option<f64>,)> =
@@ -1172,11 +1245,14 @@ impl PgPortfolio {
             .execute(&mut *tx)
             .await?;
 
-        // Atomically credit global bankroll
-        sqlx::query("UPDATE portfolio SET value_f64 = value_f64 + $1 WHERE key = 'bankroll'")
-            .bind(net_payout)
-            .execute(&mut *tx)
-            .await?;
+        // Credit the global bankroll ONLY for ML strategies (copy is fully
+        // separate — place_copy_bet never debits global). See resolve_bet.
+        if !r.strategy.starts_with("copy:") {
+            sqlx::query("UPDATE portfolio SET value_f64 = value_f64 + $1 WHERE key = 'bankroll'")
+                .bind(net_payout)
+                .execute(&mut *tx)
+                .await?;
+        }
 
         // Read the updated strategy bankroll within the transaction for the return value
         let updated_strat_bankroll: Option<(Option<f64>,)> =
@@ -1626,6 +1702,7 @@ pub struct FollowedTrader {
     pub source: String,
     pub rank: Option<i32>,
     pub pnl: Option<f64>,
+    pub pnl_month: Option<f64>,
     pub volume: Option<f64>,
     pub win_rate: Option<f64>,
     pub added_at: DateTime<Utc>,
@@ -1672,6 +1749,7 @@ pub(super) struct FollowedTraderRow {
     source: String,
     rank: Option<i32>,
     pnl: Option<f64>,
+    pnl_month: Option<f64>,
     volume: Option<f64>,
     win_rate: Option<f64>,
     added_at: DateTime<Utc>,
@@ -1688,6 +1766,7 @@ impl FollowedTraderRow {
             source: self.source,
             rank: self.rank,
             pnl: self.pnl,
+            pnl_month: self.pnl_month,
             volume: self.volume,
             win_rate: self.win_rate,
             added_at: self.added_at,

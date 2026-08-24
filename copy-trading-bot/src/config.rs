@@ -30,6 +30,19 @@ pub struct CopyTradingConfig {
     /// Port for the Prometheus metrics HTTP endpoint.
     #[config(env = "METRICS_PORT", default = 9001)]
     pub metrics_port: u16,
+
+    // --- Daily top-traders digest (advisory) ---
+    /// Whether to broadcast the daily top-traders digest.
+    #[config(env = "DIGEST_ENABLED", default = true)]
+    pub digest_enabled: bool,
+
+    /// How many traders to include in the daily digest.
+    #[config(env = "DIGEST_TOP_N", default = 5)]
+    pub digest_top_n: usize,
+
+    /// UTC hour (0-23) at which the daily digest is sent.
+    #[config(env = "DIGEST_HOUR_UTC", default = 9)]
+    pub digest_hour_utc: u32,
 }
 
 impl CopyTradingConfig {

@@ -13,7 +13,7 @@ use crate::metrics;
 use crate::scanner::ws::{ActivityAlert, MarketWatcher};
 use crate::storage::postgres::PgPortfolio;
 use crate::strategy::StrategyProfile;
-use crate::telegram::notifier::TelegramNotifier;
+use crate::telegram::notifier::{BotKind, TelegramNotifier};
 
 /// Curated victory GIFs sent on winning bets.
 const VICTORY_GIFS: &[&str] = &[
@@ -49,10 +49,39 @@ pub struct ScanStats {
     pub signals_found: AtomicU64,
 }
 
-/// Broadcast a message to the owner and all subscribers.
+/// Broadcast a message to the owner and all active subscribers.
+///
+/// Sending and subscriber-lifecycle are separate concerns: `notifier.broadcast`
+/// only sends (and reports which chats are permanently gone); cleanup is
+/// delegated to [`prune_unreachable`], not done inline here.
 pub async fn broadcast(notifier: &TelegramNotifier, portfolio: &PgPortfolio, message: &str) {
-    let subs = portfolio.telegram_subscribers().await.unwrap_or_default();
-    notifier.broadcast(&subs, message).await;
+    let subs = portfolio
+        .telegram_subscribers(notifier.bot_kind())
+        .await
+        .unwrap_or_default();
+    let resp = notifier.broadcast(&subs, message).await;
+    prune_unreachable(notifier, portfolio, &resp.failed).await;
+}
+
+/// Deactivate subscribers that permanently failed delivery (blocked / chat not
+/// found). Separate from [`broadcast`] so subscriber lifecycle is its own unit.
+pub async fn prune_unreachable(
+    notifier: &TelegramNotifier,
+    portfolio: &PgPortfolio,
+    pruned: &[String],
+) {
+    if pruned.is_empty() {
+        return;
+    }
+    match portfolio
+        .deactivate_telegram_users(notifier.bot_kind(), pruned)
+        .await
+    {
+        Ok(_) => tracing::info!(count = pruned.len(), "Deactivated unreachable subscribers"),
+        Err(e) => {
+            tracing::warn!(err = %e, count = pruned.len(), "Failed to deactivate pruned subscribers")
+        }
+    }
 }
 
 /// Send a message only to the bot owner — operational noise subscribers don't need.
@@ -102,6 +131,7 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     let notifier = Arc::new(TelegramNotifier::new(
         &cfg.telegram_bot_token,
         &cfg.telegram_chat_id,
+        BotKind::Trading,
     ));
     let scanner = Arc::new(
         crate::scanner::live::LiveScanner::new(&cfg, pool)
@@ -342,12 +372,29 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         loop {
             let commands = cmd_notifier.poll_commands().await;
             for (chat_id, cmd, username, first_name, full_text) in &commands {
-                // Track the user
-                if let Err(e) = cmd_portfolio
-                    .upsert_telegram_user(chat_id, username.as_deref(), first_name.as_deref())
+                // Track the user; notify the owner on a brand-new join.
+                match cmd_portfolio
+                    .upsert_telegram_user(
+                        cmd_notifier.bot_kind(),
+                        chat_id,
+                        username.as_deref(),
+                        first_name.as_deref(),
+                    )
                     .await
                 {
-                    tracing::warn!(err = %e, "Failed to upsert telegram user");
+                    Ok(true) => {
+                        let uname = username.as_deref().unwrap_or("—");
+                        let fname = first_name.as_deref().unwrap_or("—");
+                        let _ = cmd_notifier
+                            .send(&format!(
+                                "🆕 *New user joined*\n\n\
+                                 👤 {fname} (@{uname})\n\
+                                 🆔 `{chat_id}`"
+                            ))
+                            .await;
+                    }
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!(err = %e, "Failed to upsert telegram user"),
                 }
 
                 tracing::info!(cmd = cmd.as_str(), chat_id, "Handling Telegram command");
