@@ -13,7 +13,7 @@ use crate::metrics;
 use crate::scanner::ws::{ActivityAlert, MarketWatcher};
 use crate::storage::postgres::PgPortfolio;
 use crate::strategy::StrategyProfile;
-use crate::telegram::notifier::TelegramNotifier;
+use crate::telegram::notifier::{BotKind, TelegramNotifier};
 
 /// Curated victory GIFs sent on winning bets.
 const VICTORY_GIFS: &[&str] = &[
@@ -49,19 +49,37 @@ pub struct ScanStats {
     pub signals_found: AtomicU64,
 }
 
-/// Broadcast a message to the owner and all active subscribers, pruning any that are gone.
+/// Broadcast a message to the owner and all active subscribers.
+///
+/// Sending and subscriber-lifecycle are separate concerns: `notifier.broadcast`
+/// only sends (and reports which chats are permanently gone); cleanup is
+/// delegated to [`prune_unreachable`], not done inline here.
 pub async fn broadcast(notifier: &TelegramNotifier, portfolio: &PgPortfolio, message: &str) {
-    let bot = notifier.bot_kind();
     let subs = portfolio
-        .telegram_subscribers(bot)
+        .telegram_subscribers(notifier.bot_kind())
         .await
         .unwrap_or_default();
     let pruned = notifier.broadcast(&subs, message).await;
-    if !pruned.is_empty() {
-        if let Err(e) = portfolio.deactivate_telegram_users(bot, &pruned).await {
-            tracing::warn!(err = %e, count = pruned.len(), "Failed to deactivate pruned subscribers");
-        } else {
-            tracing::info!(count = pruned.len(), "Deactivated unreachable subscribers");
+    prune_unreachable(notifier, portfolio, &pruned).await;
+}
+
+/// Deactivate subscribers that permanently failed delivery (blocked / chat not
+/// found). Separate from [`broadcast`] so subscriber lifecycle is its own unit.
+pub async fn prune_unreachable(
+    notifier: &TelegramNotifier,
+    portfolio: &PgPortfolio,
+    pruned: &[String],
+) {
+    if pruned.is_empty() {
+        return;
+    }
+    match portfolio
+        .deactivate_telegram_users(notifier.bot_kind(), pruned)
+        .await
+    {
+        Ok(_) => tracing::info!(count = pruned.len(), "Deactivated unreachable subscribers"),
+        Err(e) => {
+            tracing::warn!(err = %e, count = pruned.len(), "Failed to deactivate pruned subscribers")
         }
     }
 }
@@ -113,7 +131,7 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     let notifier = Arc::new(TelegramNotifier::new(
         &cfg.telegram_bot_token,
         &cfg.telegram_chat_id,
-        "trading",
+        BotKind::Trading,
     ));
     let scanner = Arc::new(
         crate::scanner::live::LiveScanner::new(&cfg, pool)

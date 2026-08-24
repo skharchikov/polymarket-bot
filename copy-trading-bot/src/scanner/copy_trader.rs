@@ -214,11 +214,13 @@ pub async fn refresh_followed_trader_stats(http: &Client, portfolio: &PgPortfoli
                 if let Err(e) = portfolio
                     .update_trader_stats(
                         &trader.proxy_wallet,
-                        stats.rank,
-                        Some(stats.pnl),
-                        pnl_month,
-                        Some(stats.volume),
-                        stats.username.as_deref(),
+                        crate::storage::copy_trade::TraderStatsUpdate {
+                            rank: stats.rank,
+                            pnl: Some(stats.pnl),
+                            pnl_month,
+                            volume: Some(stats.volume),
+                            username: stats.username.as_deref(),
+                        },
                     )
                     .await
                 {

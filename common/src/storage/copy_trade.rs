@@ -11,6 +11,16 @@ use anyhow::{Context, Result};
 use super::portfolio::Bet;
 use super::postgres::{FollowedTrader, FollowedTraderRow, NewCopyTradeEvent, PgPortfolio};
 
+/// Leaderboard stats to write for a followed trader — grouped to avoid a long
+/// positional argument list on `update_trader_stats`.
+pub struct TraderStatsUpdate<'a> {
+    pub rank: Option<i32>,
+    pub pnl: Option<f64>,
+    pub pnl_month: Option<f64>,
+    pub volume: Option<f64>,
+    pub username: Option<&'a str>,
+}
+
 impl PgPortfolio {
     /// Upsert a trader into `followed_traders`.
     ///
@@ -91,11 +101,7 @@ impl PgPortfolio {
     pub async fn update_trader_stats(
         &self,
         wallet: &str,
-        rank: Option<i32>,
-        pnl: Option<f64>,
-        pnl_month: Option<f64>,
-        volume: Option<f64>,
-        username: Option<&str>,
+        stats: TraderStatsUpdate<'_>,
     ) -> Result<()> {
         sqlx::query(
             "UPDATE followed_traders SET \
@@ -106,11 +112,11 @@ impl PgPortfolio {
                username  = COALESCE($5, username) \
              WHERE proxy_wallet = $6",
         )
-        .bind(rank)
-        .bind(pnl)
-        .bind(pnl_month)
-        .bind(volume)
-        .bind(username)
+        .bind(stats.rank)
+        .bind(stats.pnl)
+        .bind(stats.pnl_month)
+        .bind(stats.volume)
+        .bind(stats.username)
         .bind(wallet)
         .execute(&self.pool)
         .await

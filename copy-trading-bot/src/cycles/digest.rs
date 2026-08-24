@@ -26,16 +26,24 @@ pub fn should_send_digest(
     last != Some(today) && current_hour >= digest_hour
 }
 
+/// Whether the daily digest actually went out on this tick.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DigestOutcome {
+    Sent,
+    Skipped,
+}
+
 /// Send the daily digest if due. Best-effort: a fetch failure is logged and
 /// retried on the next tick (the date marker is only written on success).
+/// Returns whether it sent so callers/tests can tell.
 pub async fn maybe_send_daily_digest(
     http: &Client,
     portfolio: &PgPortfolio,
     notifier: &TelegramNotifier,
     cfg: &CopyTradingConfig,
-) -> Result<()> {
+) -> Result<DigestOutcome> {
     if !cfg.digest_enabled {
-        return Ok(());
+        return Ok(DigestOutcome::Skipped);
     }
 
     let now = Utc::now();
@@ -48,7 +56,7 @@ pub async fn maybe_send_daily_digest(
     };
 
     if !should_send_digest(last_opt, &today, now.hour(), cfg.digest_hour_utc) {
-        return Ok(());
+        return Ok(DigestOutcome::Skipped);
     }
 
     match fetch_leaderboard(http, "MONTH").await {
@@ -57,12 +65,13 @@ pub async fn maybe_send_daily_digest(
             crate::live::broadcast(notifier, portfolio, &msg).await;
             portfolio.upsert_text_pub(LAST_DIGEST_KEY, &today).await?;
             tracing::info!(top_n = cfg.digest_top_n, "Sent daily top-traders digest");
+            Ok(DigestOutcome::Sent)
         }
         Err(e) => {
             tracing::warn!(err = %e, "Digest leaderboard fetch failed; will retry next tick");
+            Ok(DigestOutcome::Skipped)
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]

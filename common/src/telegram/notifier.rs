@@ -32,29 +32,55 @@ pub fn classify_telegram_error(error_code: Option<i64>, body: &str) -> SendError
     }
 }
 
+/// Which bot a notifier belongs to — used to scope subscribers per bot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BotKind {
+    Trading,
+    Copy,
+}
+
+impl BotKind {
+    /// Storage/DB key form.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BotKind::Trading => "trading",
+            BotKind::Copy => "copy",
+        }
+    }
+}
+
+/// Telegram sendMessage request body.
+#[derive(serde::Serialize)]
+struct SendMessagePayload<'a> {
+    chat_id: &'a str,
+    text: &'a str,
+    parse_mode: &'a str,
+    disable_web_page_preview: bool,
+}
+
 pub struct TelegramNotifier {
     client: Client,
     bot_token: String,
     chat_id: String,
-    bot_kind: String,
+    bot_kind: BotKind,
     /// Last processed update_id for polling
     last_update_id: AtomicI64,
 }
 
 impl TelegramNotifier {
-    pub fn new(bot_token: &str, chat_id: &str, bot_kind: &str) -> Self {
+    pub fn new(bot_token: &str, chat_id: &str, bot_kind: BotKind) -> Self {
         Self {
             client: Client::new(),
             bot_token: bot_token.to_string(),
             chat_id: chat_id.to_string(),
-            bot_kind: bot_kind.to_string(),
+            bot_kind,
             last_update_id: AtomicI64::new(0),
         }
     }
 
-    /// The bot identity ("trading" or "copy") used to scope subscribers.
+    /// The bot identity ("trading"/"copy") used to scope subscribers.
     pub fn bot_kind(&self) -> &str {
-        &self.bot_kind
+        self.bot_kind.as_str()
     }
 
     /// Check if a chat_id belongs to the bot owner.
@@ -116,12 +142,12 @@ impl TelegramNotifier {
             let resp = match self
                 .client
                 .post(&url)
-                .json(&serde_json::json!({
-                    "chat_id": chat_id,
-                    "text": text,
-                    "parse_mode": "Markdown",
-                    "disable_web_page_preview": true,
-                }))
+                .json(&SendMessagePayload {
+                    chat_id,
+                    text: &text,
+                    parse_mode: "Markdown",
+                    disable_web_page_preview: true,
+                })
                 .send()
                 .await
             {
@@ -169,12 +195,12 @@ impl TelegramNotifier {
             let resp = self
                 .client
                 .post(&url)
-                .json(&serde_json::json!({
-                    "chat_id": chat_id,
-                    "text": text,
-                    "parse_mode": parse_mode,
-                    "disable_web_page_preview": true,
-                }))
+                .json(&SendMessagePayload {
+                    chat_id,
+                    text: &text,
+                    parse_mode,
+                    disable_web_page_preview: true,
+                })
                 .send()
                 .await
                 .context("failed to send telegram message")?;
