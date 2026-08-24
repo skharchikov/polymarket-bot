@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,22 +36,33 @@ pub async fn broadcast(state: &AppState, message: &str) {
 
 /// Prune worker: drains permanently-failed chat_ids from the in-memory queue and
 /// deactivates them. Runs as its own task, fully separate from broadcasting.
+///
+/// Coalesces: on each wake it drains every batch currently queued into a single
+/// `HashSet`, deduping chat_ids across broadcasts and collapsing them to one DB
+/// write. Without this, a dead chat_id re-enqueued by every failing broadcast
+/// would trigger a redundant (idempotent) UPDATE per occurrence.
 pub async fn run_prune_worker(
     portfolio: Arc<PgPortfolio>,
     notifier: Arc<TelegramNotifier>,
     mut rx: UnboundedReceiver<Vec<String>>,
 ) {
-    while let Some(ids) = rx.recv().await {
+    while let Some(first) = rx.recv().await {
+        let mut ids: HashSet<String> = first.into_iter().collect();
+        // Drain anything else already queued so duplicates collapse into one call.
+        while let Ok(more) = rx.try_recv() {
+            ids.extend(more);
+        }
         if ids.is_empty() {
             continue;
         }
+        let batch: Vec<String> = ids.into_iter().collect();
         match portfolio
-            .deactivate_telegram_users(notifier.bot_kind(), &ids)
+            .deactivate_telegram_users(notifier.bot_kind(), &batch)
             .await
         {
-            Ok(_) => tracing::info!(count = ids.len(), "Deactivated unreachable subscribers"),
+            Ok(_) => tracing::info!(count = batch.len(), "Deactivated unreachable subscribers"),
             Err(e) => {
-                tracing::warn!(err = %e, count = ids.len(), "Failed to deactivate pruned subscribers")
+                tracing::warn!(err = %e, count = batch.len(), "Failed to deactivate pruned subscribers")
             }
         }
     }
