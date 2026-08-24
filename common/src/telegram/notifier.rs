@@ -49,6 +49,14 @@ impl BotKind {
     }
 }
 
+/// Result of a broadcast: chats we reached, and chats that permanently failed
+/// (to be deactivated by the prune worker). Transient failures are omitted.
+#[derive(Debug, Default)]
+pub struct BroadcastResponse {
+    pub sent: Vec<String>,
+    pub failed: Vec<String>,
+}
+
 /// Telegram sendMessage request body.
 #[derive(serde::Serialize)]
 struct SendMessagePayload<'a> {
@@ -92,33 +100,35 @@ impl TelegramNotifier {
         self.send_to(&self.chat_id, message).await
     }
 
-    /// Send to owner + all subscribers. Returns chat_ids that PERMANENTLY failed
-    /// (blocked / chat not found) so the caller can deactivate them.
+    /// Send to owner + all subscribers. Pure send: reports which chats succeeded
+    /// and which PERMANENTLY failed (blocked / chat not found). It does NOT touch
+    /// the DB — the caller routes `failed` to the prune worker. Transient failures
+    /// (rate-limit / server error) are kept (not reported as failed) and retried
+    /// on the next broadcast.
     pub async fn broadcast(
         &self,
         subscribers: &[(String, Option<String>)],
         message: &str,
-    ) -> Vec<String> {
+    ) -> BroadcastResponse {
         let _ = self.send(message).await; // owner
-        let mut pruned = Vec::new();
+        let mut resp = BroadcastResponse::default();
         for (id, username) in subscribers {
             if id == &self.chat_id {
                 continue;
             }
             let label = username.as_deref().unwrap_or("unknown");
             match self.send_to_classified(id, message).await {
-                Ok(()) => {}
+                Ok(()) => resp.sent.push(id.clone()),
                 Err(SendError::Permanent(body)) => {
-                    tracing::info!(chat_id = %id, username = label, "Pruning unreachable subscriber");
-                    tracing::debug!(chat_id = %id, body = %body, "Permanent Telegram failure");
-                    pruned.push(id.clone());
+                    tracing::debug!(chat_id = %id, username = label, body = %body, "Permanent Telegram failure");
+                    resp.failed.push(id.clone());
                 }
                 Err(SendError::Transient(body)) => {
                     tracing::warn!(chat_id = %id, username = label, err = %body, "Transient send failure (kept)");
                 }
             }
         }
-        pruned
+        resp
     }
 
     /// Send to one chat, returning a typed error that says whether the failure

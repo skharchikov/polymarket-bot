@@ -4,45 +4,54 @@ use std::time::Duration;
 
 use sqlx::PgPool;
 
+use tokio::sync::mpsc::{self, UnboundedReceiver};
+
 use crate::config::CopyTradingConfig;
 use crate::cycles;
 use crate::metrics;
 use crate::scanner::copy_trader::CopyTraderMonitor;
+use crate::state::AppState;
 use crate::storage::postgres::PgPortfolio;
 use crate::telegram::notifier::{BotKind, TelegramNotifier};
 
 /// Broadcast a message to the owner and all active subscribers.
 ///
-/// Sending and subscriber-lifecycle are separate concerns: `notifier.broadcast`
-/// only sends (and reports which chats are permanently gone); the cleanup is
-/// delegated to [`prune_unreachable`], not done inline here.
-pub async fn broadcast(notifier: &TelegramNotifier, portfolio: &PgPortfolio, message: &str) {
-    let subs = portfolio
-        .telegram_subscribers(notifier.bot_kind())
+/// Pure send: `notifier.broadcast` reports which chats permanently failed, and we
+/// enqueue those to the prune worker via `state.fail_tx`. No DB access here —
+/// subscriber-lifecycle is the worker's job ([`run_prune_worker`]).
+pub async fn broadcast(state: &AppState, message: &str) {
+    let subs = state
+        .portfolio
+        .telegram_subscribers(state.notifier.bot_kind())
         .await
         .unwrap_or_default();
-    let pruned = notifier.broadcast(&subs, message).await;
-    prune_unreachable(notifier, portfolio, &pruned).await;
+    let resp = state.notifier.broadcast(&subs, message).await;
+    if !resp.failed.is_empty() {
+        // Non-blocking enqueue; if the worker is gone the ids are simply
+        // re-detected on the next broadcast.
+        let _ = state.fail_tx.send(resp.failed);
+    }
 }
 
-/// Deactivate subscribers that permanently failed delivery (blocked / chat not
-/// found). Separate from [`broadcast`] so subscriber lifecycle is its own unit —
-/// it can be driven by any source of failed chat_ids (a broadcast, a cleanup job).
-pub async fn prune_unreachable(
-    notifier: &TelegramNotifier,
-    portfolio: &PgPortfolio,
-    pruned: &[String],
+/// Prune worker: drains permanently-failed chat_ids from the in-memory queue and
+/// deactivates them. Runs as its own task, fully separate from broadcasting.
+pub async fn run_prune_worker(
+    portfolio: Arc<PgPortfolio>,
+    notifier: Arc<TelegramNotifier>,
+    mut rx: UnboundedReceiver<Vec<String>>,
 ) {
-    if pruned.is_empty() {
-        return;
-    }
-    match portfolio
-        .deactivate_telegram_users(notifier.bot_kind(), pruned)
-        .await
-    {
-        Ok(_) => tracing::info!(count = pruned.len(), "Deactivated unreachable subscribers"),
-        Err(e) => {
-            tracing::warn!(err = %e, count = pruned.len(), "Failed to deactivate pruned subscribers")
+    while let Some(ids) = rx.recv().await {
+        if ids.is_empty() {
+            continue;
+        }
+        match portfolio
+            .deactivate_telegram_users(notifier.bot_kind(), &ids)
+            .await
+        {
+            Ok(_) => tracing::info!(count = ids.len(), "Deactivated unreachable subscribers"),
+            Err(e) => {
+                tracing::warn!(err = %e, count = ids.len(), "Failed to deactivate pruned subscribers")
+            }
         }
     }
 }
@@ -97,22 +106,38 @@ pub async fn run_live(cfg: Arc<CopyTradingConfig>) -> Result<()> {
         ))
         .await;
 
-    // Spawn Telegram command polling loop
-    let cmd_portfolio = Arc::clone(&portfolio);
-    let cmd_notifier = Arc::clone(&notifier);
-    let cmd_cfg = Arc::clone(&cfg);
-    let cmd_monitor = Arc::clone(&monitor);
-    let cmd_http = reqwest::Client::builder()
+    // Shared state + in-memory prune queue.
+    let (fail_tx, fail_rx) = mpsc::unbounded_channel::<Vec<String>>();
+    let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
-        .expect("failed to build command HTTP client");
+        .expect("failed to build HTTP client");
+    let state = Arc::new(AppState {
+        portfolio: Arc::clone(&portfolio),
+        notifier: Arc::clone(&notifier),
+        monitor: Arc::clone(&monitor),
+        cfg: Arc::clone(&cfg),
+        http,
+        fail_tx,
+    });
+
+    // Prune worker — deactivates permanently-failed subscribers off the queue.
+    tokio::spawn(run_prune_worker(
+        Arc::clone(&portfolio),
+        Arc::clone(&notifier),
+        fail_rx,
+    ));
+
+    // Telegram command polling loop
+    let cmd_state = Arc::clone(&state);
     let command_loop = tokio::spawn(async move {
         loop {
-            let commands = cmd_notifier.poll_commands().await;
+            let commands = cmd_state.notifier.poll_commands().await;
             for (chat_id, cmd, username, first_name, full_text) in &commands {
-                match cmd_portfolio
+                match cmd_state
+                    .portfolio
                     .upsert_telegram_user(
-                        cmd_notifier.bot_kind(),
+                        cmd_state.notifier.bot_kind(),
                         chat_id,
                         username.as_deref(),
                         first_name.as_deref(),
@@ -122,7 +147,8 @@ pub async fn run_live(cfg: Arc<CopyTradingConfig>) -> Result<()> {
                     Ok(true) => {
                         let uname = username.as_deref().unwrap_or("—");
                         let fname = first_name.as_deref().unwrap_or("—");
-                        let _ = cmd_notifier
+                        let _ = cmd_state
+                            .notifier
                             .send(&format!(
                                 "🆕 *New user joined*\n\n\
                                  👤 {fname} (@{uname})\n\
@@ -140,15 +166,11 @@ pub async fn run_live(cfg: Arc<CopyTradingConfig>) -> Result<()> {
                     chat_id,
                     full_text,
                     first_name.as_deref(),
-                    &cmd_portfolio,
-                    &cmd_notifier,
-                    &cmd_monitor,
-                    &cmd_http,
-                    &cmd_cfg,
+                    &cmd_state,
                 )
                 .await;
 
-                if let Err(e) = cmd_notifier.send_to(chat_id, &reply).await {
+                if let Err(e) = cmd_state.notifier.send_to(chat_id, &reply).await {
                     tracing::warn!(err = %e, chat_id = chat_id, "Failed to reply to command");
                 }
             }
@@ -157,43 +179,27 @@ pub async fn run_live(cfg: Arc<CopyTradingConfig>) -> Result<()> {
     });
 
     // Copy trade main loop
-    let ct_portfolio = Arc::clone(&portfolio);
-    let ct_notifier = Arc::clone(&notifier);
-    let ct_monitor = Arc::clone(&monitor);
-    let ct_cfg = Arc::clone(&cfg);
+    let ct_state = Arc::clone(&state);
     let copy_trade_loop = tokio::spawn(async move {
         loop {
-            if let Err(e) =
-                cycles::copy_trade_cycle(&ct_portfolio, &ct_notifier, &ct_monitor, &ct_cfg).await
-            {
+            if let Err(e) = cycles::copy_trade_cycle(&ct_state).await {
                 tracing::error!(err = %e, "Copy trade cycle failed");
             }
-            tokio::time::sleep(Duration::from_secs(ct_cfg.copy_trade_interval_mins * 60)).await;
+            tokio::time::sleep(Duration::from_secs(
+                ct_state.cfg.copy_trade_interval_mins * 60,
+            ))
+            .await;
         }
     });
 
-    // Housekeeping loop — resolves copy bets independently
-    let hk_portfolio = Arc::clone(&portfolio);
-    let hk_notifier = Arc::clone(&notifier);
-    let hk_cfg = Arc::clone(&cfg);
-    let hk_http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .expect("failed to build housekeeping HTTP client");
+    // Housekeeping loop — resolves copy bets + daily digest
+    let hk_state = Arc::clone(&state);
     let housekeeping_loop = tokio::spawn(async move {
         loop {
-            if let Err(e) = cycles::housekeeping_cycle(&hk_portfolio, &hk_notifier, &hk_http).await
-            {
+            if let Err(e) = cycles::housekeeping_cycle(&hk_state).await {
                 tracing::error!(err = %e, "Copy housekeeping cycle failed");
             }
-            if let Err(e) = cycles::digest::maybe_send_daily_digest(
-                &hk_http,
-                &hk_portfolio,
-                &hk_notifier,
-                &hk_cfg,
-            )
-            .await
-            {
+            if let Err(e) = cycles::digest::maybe_send_daily_digest(&hk_state).await {
                 tracing::warn!(err = %e, "Daily digest check failed");
             }
             tokio::time::sleep(Duration::from_secs(5 * 60)).await;

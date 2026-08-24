@@ -6,12 +6,9 @@
 
 use anyhow::Result;
 use chrono::{Timelike, Utc};
-use reqwest::Client;
 
-use crate::config::CopyTradingConfig;
 use crate::scanner::copy_trader::{fetch_leaderboard, format_top_traders_digest};
-use crate::storage::postgres::PgPortfolio;
-use crate::telegram::notifier::TelegramNotifier;
+use crate::state::AppState;
 
 const LAST_DIGEST_KEY: &str = "last_digest_date";
 
@@ -36,12 +33,10 @@ pub enum DigestOutcome {
 /// Send the daily digest if due. Best-effort: a fetch failure is logged and
 /// retried on the next tick (the date marker is only written on success).
 /// Returns whether it sent so callers/tests can tell.
-pub async fn maybe_send_daily_digest(
-    http: &Client,
-    portfolio: &PgPortfolio,
-    notifier: &TelegramNotifier,
-    cfg: &CopyTradingConfig,
-) -> Result<DigestOutcome> {
+pub async fn maybe_send_daily_digest(state: &AppState) -> Result<DigestOutcome> {
+    let portfolio = state.portfolio.as_ref();
+    let http = &state.http;
+    let cfg = state.cfg.as_ref();
     if !cfg.digest_enabled {
         return Ok(DigestOutcome::Skipped);
     }
@@ -62,7 +57,7 @@ pub async fn maybe_send_daily_digest(
     match fetch_leaderboard(http, "MONTH").await {
         Ok(entries) => {
             let msg = format_top_traders_digest(&entries, cfg.digest_top_n);
-            crate::live::broadcast(notifier, portfolio, &msg).await;
+            crate::live::broadcast(state, &msg).await;
             portfolio.upsert_text_pub(LAST_DIGEST_KEY, &today).await?;
             tracing::info!(top_n = cfg.digest_top_n, "Sent daily top-traders digest");
             Ok(DigestOutcome::Sent)

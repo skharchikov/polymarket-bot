@@ -1,27 +1,23 @@
 //! Telegram command dispatch for the copy-trading bot.
 
-use crate::config::CopyTradingConfig;
 use crate::cycles::copy_trade::COPY_TRADER_STARTING_BANKROLL;
 use crate::scanner::copy_trader::{
-    CopyTraderMonitor, fetch_leaderboard, fetch_trader_stats, fetch_trader_username,
-    format_multi_leaderboard, refresh_followed_trader_stats,
+    fetch_leaderboard, fetch_trader_stats, fetch_trader_username, format_multi_leaderboard,
+    refresh_followed_trader_stats,
 };
-use crate::storage::postgres::PgPortfolio;
-use crate::telegram::notifier::TelegramNotifier;
+use crate::state::AppState;
 
 /// Dispatch a single Telegram command and return the reply string.
-#[allow(clippy::too_many_arguments)]
 pub async fn handle_command(
     cmd: &str,
     chat_id: &str,
     full_text: &str,
     first_name: Option<&str>,
-    portfolio: &PgPortfolio,
-    notifier: &TelegramNotifier,
-    _monitor: &CopyTraderMonitor,
-    http: &reqwest::Client,
-    _cfg: &CopyTradingConfig,
+    state: &AppState,
 ) -> String {
+    let portfolio = state.portfolio.as_ref();
+    let notifier = state.notifier.as_ref();
+    let http = &state.http;
     match cmd {
         "start" => {
             let name = first_name.unwrap_or("there");

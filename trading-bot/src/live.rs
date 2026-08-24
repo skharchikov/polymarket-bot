@@ -59,8 +59,8 @@ pub async fn broadcast(notifier: &TelegramNotifier, portfolio: &PgPortfolio, mes
         .telegram_subscribers(notifier.bot_kind())
         .await
         .unwrap_or_default();
-    let pruned = notifier.broadcast(&subs, message).await;
-    prune_unreachable(notifier, portfolio, &pruned).await;
+    let resp = notifier.broadcast(&subs, message).await;
+    prune_unreachable(notifier, portfolio, &resp.failed).await;
 }
 
 /// Deactivate subscribers that permanently failed delivery (blocked / chat not
