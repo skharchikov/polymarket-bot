@@ -114,6 +114,14 @@ polymarket-bot/                  # Cargo workspace root
 └── adr/                         # Architecture Decision Records
 ```
 
+## Operator access
+
+Grafana, Prometheus and (from phase 1) the admin dashboard are not exposed publicly. Reach them over Tailscale:
+
+- Grafana: `https://<host>.<tailnet>.ts.net:8443`
+- Prometheus: not exposed; query it through Grafana Explore.
+- Fallback without Tailscale: `ssh -L 3000:127.0.0.1:3000 root@<host>` and open `http://localhost:3000`.
+
 ## How It Works
 
 ### Trading Bot — ML Pipeline
