@@ -8,3 +8,4 @@ __pycache__/
 CHANGELOG.gen
 .envrc
 tmp/
+.superpowers/
