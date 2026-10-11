@@ -20,7 +20,7 @@ use state::AdminState;
 
 pub fn app(state: AdminState, auth: Arc<AuthConfig>) -> Router {
     let protected = Router::new()
-        .route("/", get(pages::home))
+        .route("/", get(pages::overview::page))
         .route("/partials/status", get(pages::status::pills))
         .route("/static/{name}", get(assets::asset))
         .layer(middleware::from_fn_with_state(

@@ -5,4 +5,5 @@ pub const BOT_EXPR: &str = "CASE WHEN strategy LIKE 'copy:%' THEN 'copy' ELSE 't
 
 /// Phase 1 only shows paper money; the mode switch arrives with live trading.
 pub const DEFAULT_MODE: &str = "paper";
+pub mod overview;
 pub mod status;

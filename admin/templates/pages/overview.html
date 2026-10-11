@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Overview{% endblock %}
+{% block content %}
+<div class="kpis">
+  {% for k in kpis %}
+  <div class="kpi"><div class="l">{{ k.label }}</div><div class="v {{ k.class }}">{{ k.value }}</div><div class="s">{{ k.sub }}</div></div>
+  {% endfor %}
+</div>
+<div class="grid2">
+  <div class="panel">
+    <h4>Equity by bot · 90d (cumulative realized PnL)</h4>
+    <script type="application/json" id="equity-data">{{ equity_json|safe }}</script>
+    <div data-chart="equity" data-src="equity-data"></div>
+  </div>
+  <div class="panel">
+    <h4>Needs attention</h4>
+    {% if attention.is_empty() %}<div class="mut">All clear.</div>{% endif %}
+    <ul class="att">
+      {% for a in attention %}<li><span class="dot {{ a.level.css() }}"></span><span>{{ a.text }}</span></li>{% endfor %}
+    </ul>
+  </div>
+</div>
+<div class="panel">
+  <h4>Recent activity</h4>
+  {% if activity.is_empty() %}<div class="mut">No activity yet.</div>{% else %}
+  <table>
+    <tr><th>Time (UTC)</th><th>Bot</th><th>Market</th><th>Side</th><th>Price</th><th>Size</th><th>Event</th></tr>
+    {% for a in activity %}
+    <tr><td>{{ a.time }}</td><td><span class="tag">{{ a.bot }}</span></td><td>{{ a.label }}</td><td>{{ a.side }}</td><td>{{ a.price }}</td><td>{{ a.amount }}</td><td class="{{ a.class }}">{{ a.event }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+{% endblock %}
