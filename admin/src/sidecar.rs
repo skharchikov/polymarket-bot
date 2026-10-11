@@ -7,9 +7,13 @@ pub struct Health {
     pub model_age_secs: Option<f64>,
 }
 
+/// Health probes must not stall page loads when the sidecar is down.
+const HEALTH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+
 pub async fn health(http: &reqwest::Client, base: &str) -> anyhow::Result<Health> {
     Ok(http
         .get(format!("{}/health", base.trim_end_matches('/')))
+        .timeout(HEALTH_TIMEOUT)
         .send()
         .await?
         .error_for_status()?
@@ -69,5 +73,30 @@ mod tests {
         assert!(f.contains(&("last.ok".into(), "true".into())));
         assert!(f.contains(&("last.secs".into(), "12.5".into())));
         assert!(f.contains(&("list".into(), "[1,2]".into())));
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::health;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn health_gives_up_within_per_request_timeout() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((s, _)) = l.accept().await {
+                held.push(s);
+            }
+        });
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let t = Instant::now();
+        assert!(health(&http, &format!("http://{addr}")).await.is_err());
+        assert!(t.elapsed() < Duration::from_secs(3));
     }
 }

@@ -42,17 +42,20 @@ pub struct OverviewPage {
 
 pub async fn page(State(st): State<AdminState>) -> Result<Html<String>, AppError> {
     let mode = DEFAULT_MODE;
-    let (k, eq, act, times, counts) = tokio::try_join!(
-        db::overview::kpis(&st.db, mode),
-        db::overview::equity_rows(&st.db, mode),
-        db::overview::activity(&st.db, mode),
-        db::status::activity_times(&st.db),
-        db::status::attention_counts(&st.db, mode),
-    )?;
-    let model_age = sidecar::health(&st.http, &st.sidecar_url)
-        .await
-        .ok()
-        .and_then(|h| h.model_age_secs);
+    let (db_res, health) = tokio::join!(
+        async {
+            tokio::try_join!(
+                db::overview::kpis(&st.db, mode),
+                db::overview::equity_rows(&st.db, mode),
+                db::overview::activity(&st.db, mode),
+                db::status::activity_times(&st.db),
+                db::status::attention_counts(&st.db, mode),
+            )
+        },
+        sidecar::health(&st.http, &st.sidecar_url),
+    );
+    let (k, eq, act, times, counts) = db_res?;
+    let model_age = health.ok().and_then(|h| h.model_age_secs);
 
     let kpis = vec![
         Kpi {

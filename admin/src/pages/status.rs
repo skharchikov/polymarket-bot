@@ -43,14 +43,15 @@ pub fn build_pills(
 
 pub async fn pills(State(st): State<AdminState>) -> Result<Html<String>, AppError> {
     let now = Utc::now();
-    let act = db::status::activity_times(&st.db).await.map_err(|e| {
+    let (act, health) = tokio::join!(
+        db::status::activity_times(&st.db),
+        sidecar::health(&st.http, &st.sidecar_url),
+    );
+    let act = act.map_err(|e| {
         tracing::error!(err = %e, "status pills: activity query failed");
         e.to_string()
     });
-    let model_age = sidecar::health(&st.http, &st.sidecar_url)
-        .await
-        .ok()
-        .and_then(|h| h.model_age_secs);
+    let model_age = health.ok().and_then(|h| h.model_age_secs);
     render(&StatusPills {
         pills: build_pills(act, model_age, now),
     })
