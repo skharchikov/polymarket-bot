@@ -6,6 +6,7 @@ pub fn nonempty(v: Option<String>) -> Option<String> {
     v.filter(|s| !s.trim().is_empty())
 }
 pub mod history;
+pub mod model;
 pub mod positions;
 pub mod signals;
 pub mod traders;

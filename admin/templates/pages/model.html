@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Model{% endblock %}
+{% block content %}
+<div class="kpis"><div class="kpi"><div class="l">Model age</div><div class="v">{{ model_age }}</div><div class="s">retrain target 24h</div></div></div>
+<div class="grid2">
+  <div class="panel"><h4>Sidecar /health</h4>
+    {% match health %}{% when Ok with (rows) %}<table>{% for (k, v) in rows %}<tr><td class="mut">{{ k }}</td><td>{{ v }}</td></tr>{% endfor %}</table>
+    {% when Err with (e) %}<div class="err">Sidecar unreachable: {{ e }}</div>{% endmatch %}
+  </div>
+  <div class="panel"><h4>Retrain status</h4>
+    {% match retrain %}{% when Ok with (rows) %}<table>{% for (k, v) in rows %}<tr><td class="mut">{{ k }}</td><td>{{ v }}</td></tr>{% endfor %}</table>
+    {% when Err with (e) %}<div class="err">Unavailable: {{ e }}</div>{% endmatch %}
+  </div>
+</div>
+{% endblock %}
