@@ -89,33 +89,34 @@ impl PriceCache {
                 .collect()
         };
         if !todo.is_empty() {
-            let fetch = futures_util::stream::iter(todo.iter().cloned())
+            let deadline = tokio::time::Instant::now() + FETCH_BUDGET;
+            let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut stream = futures_util::stream::iter(todo.iter().cloned())
                 .map(|id| async move {
                     let p = self.fetch_one(&id).await;
                     (id, p)
                 })
-                .buffer_unordered(CONCURRENCY)
-                .collect::<Vec<_>>();
-            if let Ok(fetched) = tokio::time::timeout(FETCH_BUDGET, fetch).await {
+                .buffer_unordered(CONCURRENCY);
+            // Record each result as it arrives so a slow straggler cannot discard
+            // the ones that already finished.
+            while let Ok(Some((id, p))) = tokio::time::timeout_at(deadline, stream.next()).await {
                 let mut map = self.map.lock().await;
                 let mut misses = self.misses.lock().await;
-                for (id, p) in fetched {
-                    match p {
-                        Some(p) => {
-                            misses.remove(&id);
-                            map.insert(id, (now, p));
-                        }
-                        None => {
-                            misses.insert(id, now);
-                        }
+                match p {
+                    Some(p) => {
+                        misses.remove(&id);
+                        map.insert(id.clone(), (now, p));
+                    }
+                    None => {
+                        misses.insert(id.clone(), now);
                     }
                 }
-            } else {
-                // Budget exhausted: negative-cache everything so the next load is fast.
-                let mut misses = self.misses.lock().await;
-                for id in todo {
-                    misses.insert(id, now);
-                }
+                done.insert(id);
+            }
+            // Budget exhausted: negative-cache only what did not finish.
+            let mut misses = self.misses.lock().await;
+            for id in todo.iter().filter(|id| !done.contains(*id)) {
+                misses.insert(id.clone(), now);
             }
         }
         let map = self.map.lock().await;
@@ -191,6 +192,48 @@ mod tests {
         assert!(t.elapsed() < Duration::from_secs(4));
         let t = Instant::now();
         cache.yes_prices(&["m1".to_string()]).await;
+        assert!(t.elapsed() < Duration::from_millis(50));
+    }
+
+    #[tokio::test]
+    async fn fast_ids_survive_when_another_id_hangs() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 2048];
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if req.contains("/markets/fast") {
+                        let body =
+                            r#"{"id":"fast","question":"q","outcomePrices":"[\"0.42\",\"0.58\"]"}"#;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = s.write_all(resp.as_bytes()).await;
+                    } else {
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                    }
+                });
+            }
+        });
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let cache = PriceCache::with_base(http, Duration::from_secs(60), format!("http://{addr}"));
+        let ids = vec!["fast".to_string(), "hang".to_string()];
+        let got = cache.yes_prices(&ids).await;
+        assert_eq!(got.get("fast"), Some(&0.42));
+        assert!(!got.contains_key("hang"));
+        assert!(cache.misses.lock().await.contains_key("hang"));
+        assert!(!cache.misses.lock().await.contains_key("fast"));
+        // Cached: second call returns promptly with the fast price.
+        let t = Instant::now();
+        assert_eq!(cache.yes_prices(&ids).await.get("fast"), Some(&0.42));
         assert!(t.elapsed() < Duration::from_millis(50));
     }
 }
