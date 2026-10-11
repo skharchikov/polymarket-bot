@@ -18,6 +18,7 @@ dependencies = [
  "chrono",
  "confique",
  "dotenvy",
+ "futures-util",
  "http-body-util",
  "polymarket-common",
  "reqwest",

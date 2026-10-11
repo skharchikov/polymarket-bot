@@ -5,6 +5,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod pages;
+pub mod prices;
 pub mod render;
 pub mod sidecar;
 pub mod state;
@@ -21,6 +22,8 @@ use state::AdminState;
 pub fn app(state: AdminState, auth: Arc<AuthConfig>) -> Router {
     let protected = Router::new()
         .route("/", get(pages::overview::page))
+        .route("/positions", get(pages::positions::page))
+        .route("/positions/{id}", get(pages::positions::detail))
         .route("/partials/status", get(pages::status::pills))
         .route("/static/{name}", get(assets::asset))
         .layer(middleware::from_fn_with_state(

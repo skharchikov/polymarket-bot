@@ -30,9 +30,14 @@ async fn main() -> anyhow::Result<()> {
         .timeout(Duration::from_secs(5))
         .build()?;
 
+    let prices = Arc::new(admin::prices::PriceCache::new(
+        http.clone(),
+        Duration::from_secs(60),
+    ));
     let state = AdminState {
         db,
         http,
+        prices,
         sidecar_url: cfg.sidecar_url.clone(),
     };
     let auth = Arc::new(AuthConfig {

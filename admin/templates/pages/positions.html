@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Positions{% endblock %}
+{% block content %}
+<form class="filters" method="get" action="/positions">
+  <select name="bot">
+    <option value="">Bot: all</option>
+    <option value="trading" {% if f_bot == "trading" %}selected{% endif %}>trading</option>
+    <option value="copy" {% if f_bot == "copy" %}selected{% endif %}>copy</option>
+  </select>
+  <select name="source"><option value="">Source: all</option>
+    {% for s in sources %}<option value="{{ s }}" {% if f_source == s.as_str() %}selected{% endif %}>{{ s }}</option>{% endfor %}
+  </select>
+  <select name="strategy"><option value="">Strategy: all</option>
+    {% for s in strategies %}<option value="{{ s }}" {% if f_strategy == s.as_str() %}selected{% endif %}>{{ s }}</option>{% endfor %}
+  </select>
+  <button class="btn" type="submit">Apply</button>
+  <span class="spacer"></span>
+  <span class="mut">{{ summary }} · unrealized <span class="{{ unreal_class }}">{{ unreal_total }}</span></span>
+</form>
+<div class="panel">
+  {% if rows.is_empty() %}<div class="mut">No open positions.</div>{% else %}
+  <table>
+    <tr><th>#</th><th>Market</th><th>Bot / who</th><th>Side</th><th>Entry</th><th>Now</th><th>Cost</th><th>Unreal.</th><th>Expires</th><th></th></tr>
+    {% for r in rows %}
+    <tr>
+      <td class="mut">{{ r.id }}</td>
+      <td>{% if r.url.is_empty() %}{{ r.question }}{% else %}<a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.question }} ↗</a>{% endif %}</td>
+      <td><span class="tag">{{ r.bot }}</span> {{ r.who }}</td>
+      <td>{{ r.side }}</td><td>{{ r.entry }}</td><td>{{ r.now }}</td><td>{{ r.cost }}</td>
+      <td class="{{ r.unreal_class }}">{{ r.unreal }}</td>
+      <td class="{{ r.expires_class }}">{{ r.expires }}</td>
+      <td><button class="btn" hx-get="/positions/{{ r.id }}" hx-target="#detail-{{ r.id }}" hx-swap="innerHTML">▸</button></td>
+    </tr>
+    <tr class="detail"><td colspan="10" id="detail-{{ r.id }}" style="padding:0"></td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+{% endblock %}

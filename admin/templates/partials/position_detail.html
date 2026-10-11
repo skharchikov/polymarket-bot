@@ -1,0 +1,13 @@
+<div class="dgrid" style="padding:10px 12px">
+  <div>
+    <div class="k">Model</div>
+    p̂ {{ "{:.2}"|format(d.estimated_prob) }} · entry {{ "{:.2}"|format(d.entry_price) }} · edge {{ "{:.1}"|format(d.edge * 100.0) }}% · conf {{ "{:.2}"|format(d.confidence) }}<br>
+    Kelly {{ "{:.3}"|format(d.kelly_size) }} · fee €{{ "{:.2}"|format(d.fee_paid) }}
+    <div class="k" style="margin-top:6px">Reasoning</div><span class="mut">{{ d.reasoning }}</span>
+  </div>
+  <div><div class="k">Features (bet_features)</div><pre>{% match d.features %}{% when Some with (f) %}{{ f }}{% when None %}—{% endmatch %}</pre></div>
+  <div>
+    <div class="k">Context</div><pre>{% match d.context %}{% when Some with (c) %}{{ c }}{% when None %}—{% endmatch %}</pre>
+    {% match d.copy_ref %}{% when Some with (c) %}<div class="k">Copy ref</div><pre>{{ c }}</pre>{% when None %}{% endmatch %}
+  </div>
+</div>
