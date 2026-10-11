@@ -45,6 +45,7 @@ jobs:
         run: |
           sed -i "s/^version = \"${{ steps.version.outputs.current }}\"/version = \"${{ steps.version.outputs.new }}\"/" trading-bot/Cargo.toml
           sed -i "s/^version = \"${{ steps.version.outputs.current }}\"/version = \"${{ steps.version.outputs.new }}\"/" copy-trading-bot/Cargo.toml
+          sed -i "s/^version = \"${{ steps.version.outputs.current }}\"/version = \"${{ steps.version.outputs.new }}\"/" admin/Cargo.toml
 
       - name: Update Cargo.lock
         run: cargo generate-lockfile
@@ -53,7 +54,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add trading-bot/Cargo.toml copy-trading-bot/Cargo.toml Cargo.lock
+          git add trading-bot/Cargo.toml copy-trading-bot/Cargo.toml admin/Cargo.toml Cargo.lock
           git commit -m "release: ${{ steps.version.outputs.tag }}"
           git tag "${{ steps.version.outputs.tag }}"
           git push origin HEAD "${{ steps.version.outputs.tag }}"
@@ -119,6 +120,16 @@ jobs:
             ghcr.io/${{ github.repository }}-copy:latest
             ghcr.io/${{ github.repository }}-copy:${{ needs.release.outputs.tag }}
 
+      - name: Build and push admin
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: admin/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}-admin:latest
+            ghcr.io/${{ github.repository }}-admin:${{ needs.release.outputs.tag }}
+
       - name: Prune old images (keep last 3)
         uses: actions/delete-package-versions@v5
         with:
@@ -131,6 +142,14 @@ jobs:
         uses: actions/delete-package-versions@v5
         with:
           package-name: polymarket-bot-copy
+          package-type: container
+          min-versions-to-keep: 3
+          delete-untagged-versions: true
+
+      - name: Prune old admin images (keep last 3)
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: polymarket-bot-admin
           package-type: container
           min-versions-to-keep: 3
           delete-untagged-versions: true

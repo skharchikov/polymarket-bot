@@ -76,6 +76,27 @@ services:
     stop_grace_period: 15s
     restart: unless-stopped
 
+  admin:
+    image: ghcr.io/skharchikov/polymarket-bot-admin:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Deliberately no env_file: the admin gets only these variables, so bot
+    # secrets (Telegram tokens, OpenAI key) never enter this container.
+    environment:
+      ADMIN_DB_URL: postgres://admin_ro:${ADMIN_RO_PASSWORD:?set ADMIN_RO_PASSWORD in .env}@postgres:5432/polymarket
+      ADMIN_TAILSCALE_LOGIN: ${ADMIN_TAILSCALE_LOGIN:?set ADMIN_TAILSCALE_LOGIN in .env}
+      MODEL_SIDECAR_URL: http://model-server:8000
+    # Loopback only; reached through `tailscale serve --https=443`.
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:v3.10.0
     volumes:

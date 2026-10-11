@@ -124,6 +124,18 @@ Grafana, Prometheus and (from phase 1) the admin dashboard are not exposed publi
 Set `GF_SERVER_ROOT_URL` to the tailnet URL in the deploy env so Grafana links and redirects work.
 - Fallback without Tailscale: `ssh -L 3000:127.0.0.1:3000 root@<host>` and open `http://localhost:3000`.
 
+### Admin dashboard
+
+1. Add to the `DEPLOY_ENV` secret: `ADMIN_RO_PASSWORD=<openssl rand -base64 32>` and `ADMIN_TAILSCALE_LOGIN=<your tailnet login, e.g. you@github>`.
+2. Deploy. The bots apply migrations 025–026 on start; the admin restarts until step 3 is done.
+3. Set the role password once:
+   `ssh root@<host> "docker exec -i polymarket-bot-postgres-1 psql -U bot -d polymarket -c \"ALTER ROLE admin_ro PASSWORD '<same value>'\""`
+4. Expose it on the tailnet: `ssh root@<host> "tailscale serve --bg --https=443 http://127.0.0.1:8080"`
+5. Open `https://<host>.<tailnet>.ts.net/`.
+6. Spoof check, from a tailnet device:
+   `curl -s -o /dev/null -w "%{http_code}\n" -H "Tailscale-User-Login: <owner login>" https://<host>.<tailnet>.ts.net/`
+   on a device logged in as a *different* tailnet user must print 403. If it prints 200, `tailscale serve` is passing the client header through; stop and fix before continuing.
+
 ## How It Works
 
 ### Trading Bot — ML Pipeline
