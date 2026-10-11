@@ -1,0 +1,3 @@
+{% for p in pills %}
+<span class="pill"><span class="dot {{ p.state.css() }}"></span>{{ p.name }} · {{ p.detail }}</span>
+{% endfor %}

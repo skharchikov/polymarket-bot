@@ -13,3 +13,4 @@ struct Placeholder {
 pub async fn home() -> Result<Html<String>, AppError> {
     render(&Placeholder { active: "overview" })
 }
+pub mod status;
