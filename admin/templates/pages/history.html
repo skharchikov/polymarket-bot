@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}History{% endblock %}
+{% block content %}
+<form class="filters" method="get" action="/bets">
+  <select name="bot"><option value="">Bot: all</option>
+    <option value="trading" {% if q.bot.as_deref() == Some("trading") %}selected{% endif %}>trading</option>
+    <option value="copy" {% if q.bot.as_deref() == Some("copy") %}selected{% endif %}>copy</option></select>
+  <select name="outcome"><option value="">Outcome: any</option>
+    <option value="won" {% if q.outcome.as_deref() == Some("won") %}selected{% endif %}>won</option>
+    <option value="lost" {% if q.outcome.as_deref() == Some("lost") %}selected{% endif %}>lost</option></select>
+  <input type="text" name="strategy" placeholder="strategy" value="{{ q.strategy.as_deref().unwrap_or("") }}">
+  <input type="text" name="source" placeholder="source" value="{{ q.source.as_deref().unwrap_or("") }}">
+  <input type="date" name="from" value="{{ q.from.as_deref().unwrap_or("") }}">
+  <input type="date" name="to" value="{{ q.to.as_deref().unwrap_or("") }}">
+  <button class="btn" type="submit">Apply</button>
+  <span class="spacer"></span>
+  <a class="btn" href="/bets.csv?{{ qs }}">⬇ CSV</a>
+</form>
+<div class="panel">
+  <h4>Breakdown (worst first)</h4>
+  {% if breakdown.is_empty() %}<div class="mut">No resolved bets.</div>{% else %}
+  <table>
+    <tr><th>Bot</th><th>Source</th><th>Strategy</th><th>Category</th><th>N</th><th>Win</th><th>PnL</th><th>ROI</th></tr>
+    {% for b in breakdown %}<tr><td>{{ b.bot }}</td><td>{{ b.source }}</td><td>{{ b.strategy }}</td><td>{{ b.category }}</td><td>{{ b.n }}</td><td>{{ b.win_rate }}</td><td class="{{ b.class }}">{{ b.pnl }}</td><td class="{{ b.class }}">{{ b.roi }}</td></tr>{% endfor %}
+  </table>{% endif %}
+</div>
+<div class="panel">
+  <h4>Resolved bets · {{ total }}</h4>
+  <table>
+    <tr><th>Resolved</th><th>Bot</th><th>Strategy</th><th>Market</th><th>Side</th><th>Cost</th><th>Outcome</th><th>PnL</th></tr>
+    {% for r in rows %}<tr><td>{{ r.resolved }}</td><td><span class="tag">{{ r.bot }}</span></td><td>{{ r.strategy }}</td>
+      <td>{% if r.url.is_empty() %}{{ r.question }}{% else %}<a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.question }} ↗</a>{% endif %}</td>
+      <td>{{ r.side }}</td><td>{{ r.cost }}</td><td>{{ r.outcome }}</td><td class="{{ r.class }}">{{ r.pnl }}</td></tr>{% endfor %}
+  </table>
+  <div class="pager">
+    {% if page > 1 %}<a class="btn" href="/bets?{{ qs }}&page={{ page - 1 }}">← Prev</a>{% endif %}
+    <span class="mut">page {{ page }} / {{ pages }}</span>
+    {% if page < pages %}<a class="btn" href="/bets?{{ qs }}&page={{ page + 1 }}">Next →</a>{% endif %}
+  </div>
+</div>
+{% endblock %}

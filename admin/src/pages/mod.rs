@@ -5,4 +5,5 @@ pub mod status;
 pub fn nonempty(v: Option<String>) -> Option<String> {
     v.filter(|s| !s.trim().is_empty())
 }
+pub mod history;
 pub mod positions;
