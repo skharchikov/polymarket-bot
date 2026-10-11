@@ -10,3 +10,4 @@ pub mod overview;
 pub mod positions;
 pub mod signals;
 pub mod status;
+pub mod traders;

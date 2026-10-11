@@ -8,3 +8,4 @@ pub fn nonempty(v: Option<String>) -> Option<String> {
 pub mod history;
 pub mod positions;
 pub mod signals;
+pub mod traders;

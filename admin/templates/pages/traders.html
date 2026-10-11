@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Traders{% endblock %}
+{% block content %}
+<div class="panel">
+  <h4>Followed traders</h4>
+  {% if rows.is_empty() %}<div class="mut">No followed traders. Use /follow in the copy bot's Telegram.</div>{% else %}
+  <table>
+    <tr><th>Trader</th><th>Rank</th><th>Poly PnL all</th><th>Poly PnL month</th><th>Our bets</th><th>Our PnL</th><th>Last checked</th><th>Status</th></tr>
+    {% for t in rows %}
+    <tr><td><a href="{{ t.profile }}" target="_blank" rel="noopener">{{ t.name }} ↗</a></td><td>{{ t.rank }}</td><td>{{ t.poly_all }}</td>
+      <td>{{ t.poly_month }}</td><td>{{ t.bets }}</td><td class="{{ t.class }}">{{ t.our_pnl }}</td><td>{{ t.seen }}</td>
+      <td>{% if t.active %}<span class="tag">active</span>{% else %}<span class="mut">inactive</span>{% endif %}</td></tr>
+    {% endfor %}
+  </table>{% endif %}
+</div>
+{% endblock %}
