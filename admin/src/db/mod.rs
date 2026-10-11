@@ -8,4 +8,5 @@ pub const DEFAULT_MODE: &str = "paper";
 pub mod history;
 pub mod overview;
 pub mod positions;
+pub mod signals;
 pub mod status;

@@ -27,6 +27,7 @@ pub fn app(state: AdminState, auth: Arc<AuthConfig>) -> Router {
         .route("/positions/{id}", get(pages::positions::detail))
         .route("/bets", get(pages::history::page))
         .route("/bets.csv", get(pages::history::csv_export))
+        .route("/signals", get(pages::signals::page))
         .route("/partials/status", get(pages::status::pills))
         .route("/static/{name}", get(assets::asset))
         .layer(middleware::from_fn_with_state(

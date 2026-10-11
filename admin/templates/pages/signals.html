@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Signals{% endblock %}
+{% block content %}
+<div class="grid2">
+  <div class="panel">
+    <h4>ML near-misses · 24h (highest edge first)</h4>
+    {% if near.is_empty() %}<div class="mut">No rejections with an edge in 24h.</div>{% else %}
+    <table><tr><th>Time</th><th>Market</th><th>Reason</th><th>Price</th><th>p̂</th><th>Edge %</th><th>Conf</th></tr>
+    {% for n in near %}<tr><td>{{ n.time }}</td><td>{{ n.question }}</td><td><span class="tag">{{ n.reason }}</span></td>
+      <td>{{ n.price }}</td><td>{{ n.prob }}</td><td>{{ n.edge }}</td><td>{{ n.conf }}</td></tr>{% endfor %}
+    </table>{% endif %}
+  </div>
+  <div class="panel">
+    <h4>ML rejection reasons</h4>
+    {% if reasons.is_empty() %}<div class="mut">None in 7d.</div>{% else %}
+    <table><tr><th>Reason</th><th>24h</th><th>7d</th></tr>
+    {% for r in reasons %}<tr><td>{{ r.reason }}</td><td>{{ r.n_24h }}</td><td>{{ r.n_7d }}</td></tr>{% endfor %}
+    </table>{% endif %}
+    <h4 style="margin-top:12px">Correlation blocked</h4>
+    {% if blocked.is_empty() %}<div class="mut">None.</div>{% else %}
+    <table>{% for b in blocked %}<tr><td>{{ b.created_at.format("%m-%d") }}</td><td>{{ b.question }}</td><td>{{ b.side }}</td><td class="mut">{{ b.reason }}</td></tr>{% endfor %}</table>{% endif %}
+  </div>
+</div>
+<div class="grid2">
+  <div class="panel">
+    <h4>Copy-trade events (latest 50)</h4>
+    {% if events.is_empty() %}<div class="mut">No events.</div>{% else %}
+    <table><tr><th>Time</th><th>Trader</th><th>Market</th><th>Side</th><th>Price</th><th>Size</th><th>Result</th></tr>
+    {% for e in events %}<tr><td>{{ e.time }}</td><td>{{ e.who }}</td><td class="mut">{{ e.market_id }}</td>
+      <td>{{ e.side }}</td><td>{{ e.price }}</td><td>{{ e.size }}</td>
+      <td>{% if e.copied %}<span class="pos">copied</span>{% else %}<span class="warn">skipped · {{ e.skip }}</span>{% endif %}</td></tr>{% endfor %}
+    </table>{% endif %}
+  </div>
+  <div class="panel">
+    <h4>Copy skip reasons · 24h</h4>
+    {% if skips.is_empty() %}<div class="mut">No skips.</div>{% else %}
+    <table>{% for s in skips %}<tr><td>{{ s.reason }}</td><td>{{ s.n }}</td></tr>{% endfor %}</table>{% endif %}
+  </div>
+</div>
+{% endblock %}
