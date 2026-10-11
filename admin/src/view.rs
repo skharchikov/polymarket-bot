@@ -76,10 +76,15 @@ pub fn ago(secs: f64) -> String {
 }
 
 pub fn short_wallet(w: &str) -> String {
-    if w.len() <= 8 {
+    let c: Vec<char> = w.chars().collect();
+    if c.len() <= 8 {
         return w.to_string();
     }
-    format!("{}…{}", &w[..4], &w[w.len() - 2..])
+    format!(
+        "{}…{}",
+        c[..4].iter().collect::<String>(),
+        c[c.len() - 2..].iter().collect::<String>()
+    )
 }
 
 #[cfg(test)]
@@ -129,5 +134,7 @@ mod tests {
     fn short_wallet_truncates() {
         assert_eq!(short_wallet("0x9f12345678a1"), "0x9f…a1");
         assert_eq!(short_wallet("abc"), "abc");
+        // multi-byte input must not panic on a char boundary
+        assert_eq!(short_wallet("добрыйдень-трейдер"), "добр…ер");
     }
 }

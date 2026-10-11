@@ -38,7 +38,8 @@ pub struct OpenRow {
     pub source: String,
     pub url: String,
     pub end_date: Option<String>,
-    pub trader: Option<String>,
+    pub wallet: Option<String>,
+    pub username: Option<String>,
     pub bot: String,
     pub placed_at: DateTime<Utc>,
 }
@@ -46,7 +47,9 @@ pub struct OpenRow {
 pub async fn open_positions(db: &PgPool, mode: &str, f: &Filter) -> sqlx::Result<Vec<OpenRow>> {
     let mut qb = QueryBuilder::new(format!(
         "SELECT id, market_id, question, side, entry_price, shares, cost, fee_paid, strategy, source, url, \
-         end_date, copy_ref->>'trader' AS trader, {BOT_EXPR} AS bot, placed_at \
+         end_date, copy_ref->>'wallet' AS wallet, \
+         (SELECT ft.username FROM followed_traders ft \
+          WHERE LOWER(ft.proxy_wallet) = LOWER(copy_ref->>'wallet') LIMIT 1) AS username, {BOT_EXPR} AS bot, placed_at \
          FROM bets WHERE NOT resolved AND mode = "
     ));
     qb.push_bind(mode.to_string());

@@ -33,6 +33,14 @@ pub struct Row {
     pub expires_class: &'static str,
 }
 
+/// Username if known, else shortened wallet, else the strategy name.
+pub fn who_label(username: Option<String>, wallet: Option<String>, strategy: String) -> String {
+    username
+        .filter(|u| !u.is_empty())
+        .or_else(|| wallet.filter(|w| !w.is_empty()).map(|w| short_wallet(&w)))
+        .unwrap_or(strategy)
+}
+
 #[derive(Template)]
 #[template(path = "pages/positions.html")]
 pub struct PositionsPage {
@@ -101,7 +109,7 @@ pub async fn page(
                     String::new()
                 },
                 bot: r.bot,
-                who: r.trader.map(|t| short_wallet(&t)).unwrap_or(r.strategy),
+                who: who_label(r.username, r.wallet, r.strategy),
                 side: r.side.to_uppercase(),
                 entry: format!("{:.2}", r.entry_price),
                 now: cur.map(|p| format!("{p:.2}")).unwrap_or_else(|| "—".into()),
@@ -157,5 +165,21 @@ pub async fn detail(
     match db::positions::detail(&st.db, id).await? {
         Some(d) => Ok(render(&DetailPartial { d })?.into_response()),
         None => Ok((StatusCode::NOT_FOUND, "bet not found").into_response()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn who_prefers_username_then_wallet_then_strategy() {
+        let s = || "copy:0xab".to_string();
+        assert_eq!(
+            who_label(Some("alice".into()), Some("0xABCDEF1234".into()), s()),
+            "alice"
+        );
+        assert_eq!(who_label(None, Some("0xABCDEF1234".into()), s()), "0xAB…34");
+        assert_eq!(who_label(None, None, s()), "copy:0xab");
     }
 }
