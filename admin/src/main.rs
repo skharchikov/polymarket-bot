@@ -17,6 +17,7 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg = AdminConfig::load()?;
     let bind: SocketAddr = cfg.bind.parse()?;
+    admin::auth::validate_auth(&cfg.tailscale_login)?;
     admin::auth::validate_bind(&bind, &cfg.dev_bypass())?;
 
     // Lazy: the admin starts even if the DB (or the admin_ro password) isn't ready;

@@ -29,6 +29,29 @@ impl AdminConfig {
     }
 
     pub fn dev_bypass(&self) -> Option<String> {
-        (!self.dev_bypass_login.is_empty()).then(|| self.dev_bypass_login.clone())
+        let t = self.dev_bypass_login.trim();
+        (!t.is_empty()).then(|| t.to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(bypass: &str) -> AdminConfig {
+        AdminConfig {
+            db_url: String::new(),
+            bind: String::new(),
+            tailscale_login: "a".into(),
+            dev_bypass_login: bypass.into(),
+            sidecar_url: String::new(),
+        }
+    }
+
+    #[test]
+    fn whitespace_bypass_is_none() {
+        assert_eq!(cfg("  ").dev_bypass(), None);
+        assert_eq!(cfg("").dev_bypass(), None);
+        assert_eq!(cfg(" me@x.com ").dev_bypass().as_deref(), Some("me@x.com"));
     }
 }

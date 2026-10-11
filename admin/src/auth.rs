@@ -33,16 +33,29 @@ pub async fn require_tailscale_login(
         .headers()
         .get(LOGIN_HEADER)
         .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
         .map(str::to_owned)
         .or_else(|| auth.dev_bypass.clone());
 
     match login {
-        Some(l) if l.eq_ignore_ascii_case(&auth.allowed_login) => {
+        Some(l)
+            if !auth.allowed_login.trim().is_empty()
+                && l.eq_ignore_ascii_case(auth.allowed_login.trim()) =>
+        {
             req.extensions_mut().insert(Operator(l));
             next.run(req).await
         }
         _ => (StatusCode::FORBIDDEN, "forbidden").into_response(),
     }
+}
+
+/// Refuse to start without a configured allowed login.
+pub fn validate_auth(allowed_login: &str) -> anyhow::Result<()> {
+    if allowed_login.trim().is_empty() {
+        anyhow::bail!("ADMIN_TAILSCALE_LOGIN must not be empty");
+    }
+    Ok(())
 }
 
 /// Refuse to start with the dev bypass on anything but loopback.
@@ -126,6 +139,21 @@ mod tests {
             .await,
             403
         );
+    }
+
+    #[tokio::test]
+    async fn empty_header_is_forbidden_even_with_empty_allowed_login() {
+        let mut c = cfg(None);
+        c.allowed_login = String::new();
+        assert_eq!(status(guarded(c), Some("")).await, 403);
+        assert_eq!(status(guarded(cfg(None)), Some("  ")).await, 403);
+    }
+
+    #[test]
+    fn startup_rejects_empty_login() {
+        assert!(validate_auth("").is_err());
+        assert!(validate_auth("  ").is_err());
+        assert!(validate_auth("owner@example.com").is_ok());
     }
 
     #[test]
