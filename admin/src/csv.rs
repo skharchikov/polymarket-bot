@@ -2,7 +2,7 @@ use crate::db::history::ResolvedRow;
 
 /// RFC 4180 field; prefixes spreadsheet formula triggers with `'`.
 pub fn field(s: &str) -> String {
-    let s = if s.starts_with(['=', '+', '-', '@']) {
+    let s = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) {
         format!("'{s}")
     } else {
         s.to_string()
@@ -70,5 +70,7 @@ mod tests {
     fn neutralises_formula_injection() {
         assert_eq!(field("=HYPERLINK(\"x\")"), "\"'=HYPERLINK(\"\"x\"\")\"");
         assert_eq!(field("+1"), "'+1");
+        assert_eq!(field("\tx"), "'\tx");
+        assert_eq!(field("\rx"), "\"'\rx\"");
     }
 }

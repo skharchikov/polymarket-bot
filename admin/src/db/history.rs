@@ -73,7 +73,7 @@ pub async fn resolved(
          entry_price, cost, fee_paid, won, pnl, url"
     ));
     push_history(&mut qb, mode, f);
-    qb.push(" ORDER BY resolved_at DESC NULLS LAST LIMIT ")
+    qb.push(" ORDER BY resolved_at DESC NULLS LAST, id DESC LIMIT ")
         .push_bind(limit)
         .push(" OFFSET ")
         .push_bind(offset);
@@ -108,6 +108,6 @@ pub async fn breakdown(
          (SUM(pnl) / NULLIF(SUM(cost + fee_paid), 0) * 100)::float8 AS roi"
     ));
     push_history(&mut qb, mode, f);
-    qb.push(" GROUP BY 1, 2, 3, 4 ORDER BY pnl ASC");
+    qb.push(" GROUP BY 1, 2, 3, 4 ORDER BY pnl ASC, bot, source, strategy, category");
     qb.build_query_as().fetch_all(db).await
 }

@@ -115,14 +115,20 @@ pub struct HistoryPage {
     pub q: HistoryQuery,
 }
 
+/// Clamp the user-supplied page so the OFFSET can neither overflow nor go negative.
+fn page_offset(page: Option<i64>) -> (i64, i64) {
+    let page = page.unwrap_or(1).clamp(1, 1_000_000);
+    (page, (page - 1) * PAGE_SIZE)
+}
+
 pub async fn page(
     State(st): State<AdminState>,
     Query(q): Query<HistoryQuery>,
 ) -> Result<Html<String>, AppError> {
     let f = q.filter();
-    let page = q.page.unwrap_or(1).max(1);
+    let (page, offset) = page_offset(q.page);
     let ((rows, total), bd) = tokio::try_join!(
-        db::history::resolved(&st.db, DEFAULT_MODE, &f, PAGE_SIZE, (page - 1) * PAGE_SIZE),
+        db::history::resolved(&st.db, DEFAULT_MODE, &f, PAGE_SIZE, offset),
         db::history::breakdown(&st.db, DEFAULT_MODE, &f),
     )?;
     let rows = rows
@@ -203,4 +209,20 @@ pub async fn csv_export(
         csv::write_rows(&rows),
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_offset_is_bounded() {
+        assert_eq!(page_offset(None), (1, 0));
+        assert_eq!(page_offset(Some(0)), (1, 0));
+        assert_eq!(page_offset(Some(-5)), (1, 0));
+        assert_eq!(page_offset(Some(3)), (3, 100));
+        let (p, o) = page_offset(Some(i64::MAX));
+        assert_eq!(p, 1_000_000);
+        assert_eq!(o, 999_999 * PAGE_SIZE);
+    }
 }
