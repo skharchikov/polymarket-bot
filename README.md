@@ -120,6 +120,8 @@ Grafana, Prometheus and (from phase 1) the admin dashboard are not exposed publi
 
 - Grafana: `https://<host>.<tailnet>.ts.net:8443`
 - Prometheus: not exposed; query it through Grafana Explore.
+
+Set `GF_SERVER_ROOT_URL` to the tailnet URL in the deploy env so Grafana links and redirects work.
 - Fallback without Tailscale: `ssh -L 3000:127.0.0.1:3000 root@<host>` and open `http://localhost:3000`.
 
 ## How It Works
@@ -253,7 +255,7 @@ Starts 6 services:
 | **bot** | Trading bot — pre-built image from GHCR |
 | **copy-trading-bot** | Copy trading bot — pre-built image from GHCR |
 | **prometheus** | Metrics collection (scrapes both bots) |
-| **grafana** | Dashboards (port 3000) |
+| **grafana** | Dashboards (bound to 127.0.0.1:3000; reached via Tailscale, see Operator access) |
 
 ### Local Development
 
