@@ -126,8 +126,9 @@ Set `GF_SERVER_ROOT_URL` to the tailnet URL in the deploy env so Grafana links a
 
 ### Admin dashboard
 
-1. Add to the `DEPLOY_ENV` secret: `ADMIN_RO_PASSWORD=<openssl rand -base64 32>` and `ADMIN_TAILSCALE_LOGIN=<your tailnet login, e.g. you@github>`.
-2. Deploy. The bots apply migrations 025–026 on start; the admin restarts until step 3 is done.
+1. Add to the `DEPLOY_ENV` secret: `ADMIN_RO_PASSWORD=<openssl rand -hex 32>` and `ADMIN_TAILSCALE_LOGIN=<your tailnet login, e.g. you@github>`.
+   **Warning:** add these keys BEFORE the next release/deploy. Otherwise `docker compose up` aborts for the whole project and the bots are not updated either.
+2. Deploy. The bots apply migrations 025–026 on start; DB-backed admin pages show errors until step 3 is done (the admin itself stays up).
 3. Set the role password once:
    `ssh root@<host> "docker exec -i polymarket-bot-postgres-1 psql -U bot -d polymarket -c \"ALTER ROLE admin_ro PASSWORD '<same value>'\""`
 4. Expose it on the tailnet: `ssh root@<host> "tailscale serve --bg --https=443 http://127.0.0.1:8080"`
