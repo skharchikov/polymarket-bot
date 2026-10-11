@@ -82,7 +82,8 @@ pub async fn page(
             exposure += r.cost + r.fee_paid;
             let side = side_of(&r.side);
             let cur = prices.get(&r.market_id).map(|y| side.price_from_yes(*y));
-            // Same definition as early_exit in common/src/storage/postgres.rs.
+            // Gross-of-fees mark-to-market (shares * current - cost). Not identical to
+            // early_exit in common/src/storage/postgres.rs, which nets exit fee and fee_paid.
             let unreal = cur.map(|p| r.shares * p - r.cost);
             if let Some(u) = unreal {
                 unreal_total += u;
@@ -93,7 +94,12 @@ pub async fn page(
             Row {
                 id: r.id,
                 question: r.question,
-                url: r.url,
+                // Only link out to https URLs; anything else renders as plain text.
+                url: if r.url.starts_with("https://") {
+                    r.url
+                } else {
+                    String::new()
+                },
                 bot: r.bot,
                 who: r.trader.map(|t| short_wallet(&t)).unwrap_or(r.strategy),
                 side: r.side.to_uppercase(),
