@@ -1,5 +1,5 @@
 [workspace]
-members = ["common", "trading-bot", "copy-trading-bot"]
+members = ["common", "trading-bot", "copy-trading-bot", "admin"]
 resolver = "2"
 
 [profile.release]

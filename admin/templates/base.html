@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{% endblock %} · polybot admin</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/uplot.min.css">
+  <script src="/static/htmx.min.js" defer></script>
+  <script src="/static/uplot.iife.min.js" defer></script>
+  <script src="/static/charts.js" defer></script>
+</head>
+<body>
+<div class="shell">
+  <nav class="side">
+    <div class="brand">◆ polybot admin</div>
+    <div class="grp">Observe</div>
+    <a href="/" class="{% if active == "overview" %}on{% endif %}">Overview</a>
+    <a href="/positions" class="{% if active == "positions" %}on{% endif %}">Positions</a>
+    <a href="/bets" class="{% if active == "history" %}on{% endif %}">History</a>
+    <a href="/signals" class="{% if active == "signals" %}on{% endif %}">Signals</a>
+    <a href="/traders" class="{% if active == "traders" %}on{% endif %}">Traders</a>
+    <a href="/model" class="{% if active == "model" %}on{% endif %}">Model</a>
+  </nav>
+  <main class="main">
+    <header class="topbar">
+      <div id="pills" class="pills" hx-get="/partials/status" hx-trigger="load, every 15s" hx-swap="innerHTML"></div>
+      <span class="spacer"></span>
+    </header>
+    <section class="content">
+      {% block content %}{% endblock %}
+    </section>
+  </main>
+</div>
+</body>
+</html>
