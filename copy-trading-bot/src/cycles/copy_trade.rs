@@ -74,7 +74,7 @@ pub async fn copy_trade_cycle(state: &AppState) -> Result<()> {
             let gamma_id = match fetch_market_by_slug(&http, &trade.slug).await {
                 Ok(m) => m.market_id,
                 Err(e) => {
-                    tracing::warn!(slug = %trade.slug, err = %e, "Copy-exit: failed to resolve market slug");
+                    tracing::warn!(slug = %trade.slug, err = format!("{e:#}"), "Copy-exit: failed to resolve market slug");
                     continue;
                 }
             };
@@ -151,7 +151,9 @@ pub async fn copy_trade_cycle(state: &AppState) -> Result<()> {
                         exits_triggered += 1;
                     }
                     Ok(None) => {}
-                    Err(e) => tracing::error!(err = %e, "Copy-exit early_exit failed"),
+                    Err(e) => {
+                        tracing::error!(err = format!("{e:#}"), "Copy-exit early_exit failed")
+                    }
                 }
             } else {
                 tracing::debug!(
@@ -186,7 +188,7 @@ pub async fn copy_trade_cycle(state: &AppState) -> Result<()> {
         let market = match fetch_market_by_slug(&http, &trade.slug).await {
             Ok(m) => m,
             Err(e) => {
-                tracing::warn!(slug = %trade.slug, err = %e, "Failed to fetch market for copy-trade");
+                tracing::warn!(slug = %trade.slug, err = format!("{e:#}"), "Failed to fetch market for copy-trade");
                 continue;
             }
         };
@@ -392,7 +394,7 @@ pub async fn copy_trade_cycle(state: &AppState) -> Result<()> {
                 bets_placed += 1;
             }
             Err(e) => {
-                tracing::error!(err = %e, "Failed to place copy-trade bet");
+                tracing::error!(err = format!("{e:#}"), "Failed to place copy-trade bet");
             }
         }
     }

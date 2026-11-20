@@ -323,7 +323,7 @@ impl LiveScanner {
         let Some(sidecar) = &self.sidecar else { return };
         match sidecar.warmstart().await {
             Ok(()) => tracing::info!("Warm-start retrain triggered"),
-            Err(e) => tracing::warn!(err = %e, "Warm-start retrain request failed"),
+            Err(e) => tracing::warn!(err = format!("{e:#}"), "Warm-start retrain request failed"),
         }
     }
 
@@ -342,7 +342,7 @@ impl LiveScanner {
                 Some((pred.prob, pred.confidence))
             }
             Err(e) => {
-                tracing::warn!(err = %e, "Sidecar prediction failed");
+                tracing::warn!(err = format!("{e:#}"), "Sidecar prediction failed");
                 None
             }
         }
@@ -370,7 +370,7 @@ impl LiveScanner {
                     .collect()
             }
             Err(e) => {
-                tracing::warn!(err = %e, "Sidecar batch prediction failed");
+                tracing::warn!(err = format!("{e:#}"), "Sidecar batch prediction failed");
                 vec![None; items.len()]
             }
         }
@@ -470,7 +470,7 @@ impl LiveScanner {
 
             let resp = self.http.get(&url).send().await.map_err(|e| {
                 tracing::warn!(
-                    err = %e,
+                    err = format!("{e:#}"),
                     offset,
                     is_timeout = e.is_timeout(),
                     is_connect = e.is_connect(),
@@ -591,7 +591,7 @@ impl LiveScanner {
         .await;
 
         if let Err(e) = result {
-            tracing::warn!(err = %e, "Failed to log LLM estimate");
+            tracing::warn!(err = format!("{e:#}"), "Failed to log LLM estimate");
         }
     }
 
@@ -747,7 +747,7 @@ impl LiveScanner {
                     tracing::warn!(
                         market = %market.question,
                         agent = role.label(),
-                        err = %e,
+                        err = format!("{e:#}"),
                         "Agent assessment failed, continuing with remaining agents"
                     );
                 }
@@ -1487,7 +1487,7 @@ impl LiveScanner {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!(market = %nm.market.market_id, err = %e, "LLM failed");
+                    tracing::warn!(market = %nm.market.market_id, err = format!("{e:#}"), "LLM failed");
                     continue;
                 }
             };
@@ -1801,7 +1801,10 @@ async fn run_correlation_check(
     let json_str = match extract_json_array(&response) {
         Ok(s) => s,
         Err(e) => {
-            tracing::warn!(err = %e, "Failed to extract JSON array from correlation response, keeping all");
+            tracing::warn!(
+                err = format!("{e:#}"),
+                "Failed to extract JSON array from correlation response, keeping all"
+            );
             return Ok(candidates
                 .iter()
                 .map(|_| CorrelationDecision {
@@ -1815,7 +1818,10 @@ async fn run_correlation_check(
     let items: Vec<serde_json::Value> = match serde_json::from_str(&json_str) {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!(err = %e, "Failed to parse correlation JSON, keeping all");
+            tracing::warn!(
+                err = format!("{e:#}"),
+                "Failed to parse correlation JSON, keeping all"
+            );
             return Ok(candidates
                 .iter()
                 .map(|_| CorrelationDecision {

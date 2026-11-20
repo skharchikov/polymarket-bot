@@ -43,21 +43,21 @@ pub async fn handle_command(
         "stats" => match portfolio.stats_summary_ml_only().await {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(err = %e, "Failed to build stats");
+                tracing::warn!(err = format!("{e:#}"), "Failed to build stats");
                 "⚠️ Failed to load stats".to_string()
             }
         },
         "open" => match portfolio.open_bets_summary().await {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(err = %e, "Failed to build open bets");
+                tracing::warn!(err = format!("{e:#}"), "Failed to build open bets");
                 "⚠️ Failed to load open bets".to_string()
             }
         },
         "brier" => match portfolio.brier_summary().await {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(err = %e, "Failed to build brier");
+                tracing::warn!(err = format!("{e:#}"), "Failed to build brier");
                 "⚠️ Failed to load model accuracy".to_string()
             }
         },

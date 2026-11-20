@@ -37,14 +37,14 @@ pub async fn handle_command(
         "stats" => match portfolio.stats_summary_copy().await {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(err = %e, "Failed to build copy stats");
+                tracing::warn!(err = format!("{e:#}"), "Failed to build copy stats");
                 "⚠️ Failed to load stats".to_string()
             }
         },
         "copy" => match portfolio.open_copy_summary().await {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(err = %e, "Failed to build copy positions");
+                tracing::warn!(err = format!("{e:#}"), "Failed to build copy positions");
                 "⚠️ Failed to load copy positions".to_string()
             }
         },
@@ -54,7 +54,7 @@ pub async fn handle_command(
             match portfolio.traders_summary().await {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!(err = %e, "Failed to build traders summary");
+                    tracing::warn!(err = format!("{e:#}"), "Failed to build traders summary");
                     "⚠️ Failed to load traders".to_string()
                 }
             }
@@ -73,13 +73,13 @@ pub async fn handle_command(
                 ]),
                 (day_res, month_res, all_res) => {
                     if let Err(e) = day_res.as_ref() {
-                        tracing::warn!(err = %e, "Failed to fetch DAY leaderboard");
+                        tracing::warn!(err = format!("{e:#}"), "Failed to fetch DAY leaderboard");
                     }
                     if let Err(e) = month_res.as_ref() {
-                        tracing::warn!(err = %e, "Failed to fetch MONTH leaderboard");
+                        tracing::warn!(err = format!("{e:#}"), "Failed to fetch MONTH leaderboard");
                     }
                     if let Err(e) = all_res.as_ref() {
-                        tracing::warn!(err = %e, "Failed to fetch ALL leaderboard");
+                        tracing::warn!(err = format!("{e:#}"), "Failed to fetch ALL leaderboard");
                     }
                     "⚠️ Could not fetch leaderboard — try again shortly.".to_string()
                 }
@@ -92,7 +92,7 @@ pub async fn handle_command(
                 match portfolio.list_subscribers(notifier.bot_kind()).await {
                     Ok(subs) => crate::format::format_subscribers(&subs),
                     Err(e) => {
-                        tracing::warn!(err = %e, "Failed to load subscribers");
+                        tracing::warn!(err = format!("{e:#}"), "Failed to load subscribers");
                         "⚠️ Failed to load subscribers".to_string()
                     }
                 }
@@ -116,7 +116,10 @@ pub async fn handle_command(
                         )
                         .await
                     {
-                        tracing::warn!(err = %e, "Failed to init copy trader bankroll");
+                        tracing::warn!(
+                            err = format!("{e:#}"),
+                            "Failed to init copy trader bankroll"
+                        );
                     }
                     if let Err(e) = portfolio
                         .ensure_key(
@@ -125,7 +128,10 @@ pub async fn handle_command(
                         )
                         .await
                     {
-                        tracing::warn!(err = %e, "Failed to init copy trader starting bankroll");
+                        tracing::warn!(
+                            err = format!("{e:#}"),
+                            "Failed to init copy trader starting bankroll"
+                        );
                     }
                     let stats = fetch_trader_stats(http, &wallet, "ALL")
                         .await

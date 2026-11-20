@@ -225,7 +225,10 @@ pub async fn bet_scan_cycle(
                         )
                         .await
                     {
-                        tracing::warn!(err = %e, "Failed to persist correlation block");
+                        tracing::warn!(
+                            err = format!("{e:#}"),
+                            "Failed to persist correlation block"
+                        );
                     }
                     let side_emoji = match signal.side {
                         BetSide::Yes => "🟢 YES",
@@ -358,7 +361,7 @@ pub async fn bet_scan_cycle(
                     Err(e) => {
                         tracing::error!(
                             strategy = %strat.name,
-                            err = %e,
+                            err = format!("{e:#}"),
                             "Failed to place bet in DB"
                         );
                     }
@@ -376,7 +379,7 @@ pub async fn bet_scan_cycle(
 
             // Persist rejected signals to DB for analysis
             if let Err(e) = portfolio.save_rejected_signals(&result.rejections).await {
-                tracing::warn!(err = %e, "Failed to save rejected signals");
+                tracing::warn!(err = format!("{e:#}"), "Failed to save rejected signals");
             }
 
             // Send scan cycle summary to Telegram
@@ -414,7 +417,7 @@ pub async fn bet_scan_cycle(
             }
         }
         Err(e) => {
-            tracing::error!(err = %e, "Bet scan failed");
+            tracing::error!(err = format!("{e:#}"), "Bet scan failed");
         }
     }
 

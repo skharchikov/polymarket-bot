@@ -280,7 +280,7 @@ impl TelegramNotifier {
         let resp = match self.client.post(&url).json(&body).send().await {
             Ok(r) => r,
             Err(e) => {
-                tracing::debug!(err = %e, "Telegram poll failed");
+                tracing::debug!(err = format!("{e:#}"), "Telegram poll failed");
                 return vec![];
             }
         };

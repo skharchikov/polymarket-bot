@@ -123,7 +123,10 @@ impl MarketWatcher {
                     tracing::info!("WebSocket stream ended, reconnecting...");
                 }
                 Err(e) => {
-                    tracing::warn!(err = %e, "WebSocket connection failed, reconnecting...");
+                    tracing::warn!(
+                        err = format!("{e:#}"),
+                        "WebSocket connection failed, reconnecting..."
+                    );
                 }
             }
 

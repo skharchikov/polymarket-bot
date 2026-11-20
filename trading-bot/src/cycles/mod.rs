@@ -45,7 +45,10 @@ pub(super) async fn portfolio_correlation_check(
         .check_portfolio_correlation(candidates, &open_bets, &blocked)
         .await
         .unwrap_or_else(|e| {
-            tracing::warn!(err = %e, "Correlation check failed, keeping all candidates");
+            tracing::warn!(
+                err = format!("{e:#}"),
+                "Correlation check failed, keeping all candidates"
+            );
             candidates
                 .iter()
                 .map(|_| CorrelationDecision {

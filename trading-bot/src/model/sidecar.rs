@@ -95,7 +95,11 @@ impl SidecarClient {
             match self.do_predict(&req).await {
                 Ok(pred) => return Ok(pred),
                 Err(e) => {
-                    tracing::debug!(attempt = attempt + 1, err = %e, "Sidecar predict retry");
+                    tracing::debug!(
+                        attempt = attempt + 1,
+                        err = format!("{e:#}"),
+                        "Sidecar predict retry"
+                    );
                     last_err = Some(e);
                 }
             }
@@ -143,7 +147,11 @@ impl SidecarClient {
             match self.do_predict_batch(&req).await {
                 Ok(preds) => return Ok(preds),
                 Err(e) => {
-                    tracing::debug!(attempt = attempt + 1, err = %e, "Sidecar batch retry");
+                    tracing::debug!(
+                        attempt = attempt + 1,
+                        err = format!("{e:#}"),
+                        "Sidecar batch retry"
+                    );
                     last_err = Some(e);
                 }
             }

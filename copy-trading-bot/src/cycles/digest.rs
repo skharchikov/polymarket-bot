@@ -63,7 +63,10 @@ pub async fn maybe_send_daily_digest(state: &AppState) -> Result<DigestOutcome> 
             Ok(DigestOutcome::Sent)
         }
         Err(e) => {
-            tracing::warn!(err = %e, "Digest leaderboard fetch failed; will retry next tick");
+            tracing::warn!(
+                err = format!("{e:#}"),
+                "Digest leaderboard fetch failed; will retry next tick"
+            );
             Ok(DigestOutcome::Skipped)
         }
     }
