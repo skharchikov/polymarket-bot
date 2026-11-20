@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use sqlx::PgPool;
 
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
@@ -62,7 +61,11 @@ pub async fn run_prune_worker(
         {
             Ok(_) => tracing::info!(count = batch.len(), "Deactivated unreachable subscribers"),
             Err(e) => {
-                tracing::warn!(err = %e, count = batch.len(), "Failed to deactivate pruned subscribers")
+                tracing::warn!(
+                    err = format!("{e:#}"),
+                    count = batch.len(),
+                    "Failed to deactivate pruned subscribers"
+                )
             }
         }
     }
@@ -77,22 +80,7 @@ pub async fn run_live(cfg: Arc<CopyTradingConfig>) -> Result<()> {
     // Start Prometheus metrics server
     metrics::init(cfg.metrics_port);
 
-    let pool = {
-        let mut attempts = 0;
-        loop {
-            match PgPool::connect(&cfg.database_url).await {
-                Ok(p) => break p,
-                Err(e) => {
-                    attempts += 1;
-                    if attempts >= 10 {
-                        return Err(e.into());
-                    }
-                    tracing::warn!(attempt = attempts, err = %e, "DB connect failed, retrying in 3s...");
-                    tokio::time::sleep(Duration::from_secs(3)).await;
-                }
-            }
-        }
-    };
+    let pool = polymarket_common::storage::connect::connect_with_retry(&cfg.database_url).await?;
     let portfolio = Arc::new(PgPortfolio::new(pool.clone()).await?);
     portfolio.run_migrations().await?;
     tracing::info!("Database connected and migrations applied");
@@ -169,7 +157,9 @@ pub async fn run_live(cfg: Arc<CopyTradingConfig>) -> Result<()> {
                             .await;
                     }
                     Ok(false) => {}
-                    Err(e) => tracing::warn!(err = %e, "Failed to upsert telegram user"),
+                    Err(e) => {
+                        tracing::warn!(err = format!("{e:#}"), "Failed to upsert telegram user")
+                    }
                 }
 
                 tracing::info!(cmd = cmd.as_str(), chat_id, "Handling Telegram command");
@@ -183,7 +173,11 @@ pub async fn run_live(cfg: Arc<CopyTradingConfig>) -> Result<()> {
                 .await;
 
                 if let Err(e) = cmd_state.notifier.send_to(chat_id, &reply).await {
-                    tracing::warn!(err = %e, chat_id = chat_id, "Failed to reply to command");
+                    tracing::warn!(
+                        err = format!("{e:#}"),
+                        chat_id = chat_id,
+                        "Failed to reply to command"
+                    );
                 }
             }
             tokio::time::sleep(Duration::from_secs(3)).await;
@@ -195,7 +189,7 @@ pub async fn run_live(cfg: Arc<CopyTradingConfig>) -> Result<()> {
     let copy_trade_loop = tokio::spawn(async move {
         loop {
             if let Err(e) = cycles::copy_trade_cycle(&ct_state).await {
-                tracing::error!(err = %e, "Copy trade cycle failed");
+                tracing::error!(err = format!("{e:#}"), "Copy trade cycle failed");
             }
             tokio::time::sleep(Duration::from_secs(
                 ct_state.cfg.copy_trade_interval_mins * 60,
@@ -209,10 +203,10 @@ pub async fn run_live(cfg: Arc<CopyTradingConfig>) -> Result<()> {
     let housekeeping_loop = tokio::spawn(async move {
         loop {
             if let Err(e) = cycles::housekeeping_cycle(&hk_state).await {
-                tracing::error!(err = %e, "Copy housekeeping cycle failed");
+                tracing::error!(err = format!("{e:#}"), "Copy housekeeping cycle failed");
             }
             if let Err(e) = cycles::digest::maybe_send_daily_digest(&hk_state).await {
-                tracing::warn!(err = %e, "Daily digest check failed");
+                tracing::warn!(err = format!("{e:#}"), "Daily digest check failed");
             }
             tokio::time::sleep(Duration::from_secs(5 * 60)).await;
         }

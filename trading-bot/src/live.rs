@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
-use sqlx::PgPool;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::config::AppConfig;
@@ -79,7 +78,11 @@ pub async fn prune_unreachable(
     {
         Ok(_) => tracing::info!(count = pruned.len(), "Deactivated unreachable subscribers"),
         Err(e) => {
-            tracing::warn!(err = %e, count = pruned.len(), "Failed to deactivate pruned subscribers")
+            tracing::warn!(
+                err = format!("{e:#}"),
+                count = pruned.len(),
+                "Failed to deactivate pruned subscribers"
+            )
         }
     }
 }
@@ -87,7 +90,7 @@ pub async fn prune_unreachable(
 /// Send a message only to the bot owner — operational noise subscribers don't need.
 pub async fn notify_owner(notifier: &TelegramNotifier, message: &str) {
     if let Err(e) = notifier.send(message).await {
-        tracing::warn!(err = %e, "Failed to send owner-only message");
+        tracing::warn!(err = format!("{e:#}"), "Failed to send owner-only message");
     }
 }
 
@@ -103,29 +106,14 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     let runtime_monitor = tokio_metrics::RuntimeMonitor::new(&tokio::runtime::Handle::current());
     metrics::spawn_tokio_collector(runtime_monitor);
 
-    let pool = {
-        let mut attempts = 0;
-        loop {
-            match PgPool::connect(&cfg.database_url).await {
-                Ok(p) => break p,
-                Err(e) => {
-                    attempts += 1;
-                    if attempts >= 10 {
-                        return Err(e.into());
-                    }
-                    tracing::warn!(attempt = attempts, err = %e, "DB connect failed, retrying in 3s...");
-                    tokio::time::sleep(Duration::from_secs(3)).await;
-                }
-            }
-        }
-    };
+    let pool = polymarket_common::storage::connect::connect_with_retry(&cfg.database_url).await?;
     let portfolio = Arc::new(PgPortfolio::new(pool.clone()).await?);
     portfolio.run_migrations().await?;
     tracing::info!("Database connected and migrations applied");
 
     // Backfill URLs for any bets that were placed before the url column existed
     if let Err(e) = portfolio.backfill_urls().await {
-        tracing::warn!(err = %e, "URL backfill failed (non-fatal)");
+        tracing::warn!(err = format!("{e:#}"), "URL backfill failed (non-fatal)");
     }
 
     let notifier = Arc::new(TelegramNotifier::new(
@@ -296,7 +284,7 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             )
             .await
             {
-                tracing::error!(err = %e, "Housekeeping cycle failed");
+                tracing::error!(err = format!("{e:#}"), "Housekeeping cycle failed");
             }
 
             // Check model retrain status every housekeeping cycle
@@ -348,7 +336,7 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             )
             .await
             {
-                tracing::error!(err = %e, "Bet scan cycle failed");
+                tracing::error!(err = format!("{e:#}"), "Bet scan cycle failed");
             }
             metrics::record_duration("bot_scan_duration_seconds", scan_start.elapsed());
             tokio::time::sleep(Duration::from_secs(bs_cfg.bet_scan_interval_mins * 60)).await;
@@ -394,7 +382,9 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                             .await;
                     }
                     Ok(false) => {}
-                    Err(e) => tracing::warn!(err = %e, "Failed to upsert telegram user"),
+                    Err(e) => {
+                        tracing::warn!(err = format!("{e:#}"), "Failed to upsert telegram user")
+                    }
                 }
 
                 tracing::info!(cmd = cmd.as_str(), chat_id, "Handling Telegram command");
@@ -414,7 +404,11 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                 .await;
 
                 if let Err(e) = cmd_notifier.send_to(chat_id, &reply).await {
-                    tracing::warn!(err = %e, chat_id = chat_id, "Failed to reply to command");
+                    tracing::warn!(
+                        err = format!("{e:#}"),
+                        chat_id = chat_id,
+                        "Failed to reply to command"
+                    );
                 }
             }
             tokio::time::sleep(Duration::from_secs(3)).await;
@@ -445,7 +439,7 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
             )
             .await
             {
-                tracing::error!(err = %e, "Heartbeat failed");
+                tracing::error!(err = format!("{e:#}"), "Heartbeat failed");
             }
         }
     });
@@ -489,7 +483,7 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
                     tracing::info!(count = pairs.len(), "Refreshed WS token subscriptions");
                 }
                 Err(e) => {
-                    tracing::warn!(err = %e, "Failed to refresh WS tokens");
+                    tracing::warn!(err = format!("{e:#}"), "Failed to refresh WS tokens");
                 }
             }
             tokio::time::sleep(Duration::from_secs(30 * 60)).await;
