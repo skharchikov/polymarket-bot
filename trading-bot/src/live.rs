@@ -106,7 +106,23 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
     let runtime_monitor = tokio_metrics::RuntimeMonitor::new(&tokio::runtime::Handle::current());
     metrics::spawn_tokio_collector(runtime_monitor);
 
-    let pool = polymarket_common::storage::connect::connect_with_retry(&cfg.database_url).await?;
+    let notifier = Arc::new(TelegramNotifier::new(
+        &cfg.telegram_bot_token,
+        &cfg.telegram_chat_id,
+        BotKind::Trading,
+    ));
+    let Some(pool) = polymarket_common::storage::connect::connect_or_alert(
+        &cfg.database_url,
+        &notifier,
+        "Signal Bot",
+    )
+    .await
+    else {
+        // Halt in place (see connect_or_alert): exiting would make Docker
+        // restart us and re-alert every few minutes.
+        shutdown_signal().await;
+        return Ok(());
+    };
     let portfolio = Arc::new(PgPortfolio::new(pool.clone()).await?);
     portfolio.run_migrations().await?;
     tracing::info!("Database connected and migrations applied");
@@ -116,11 +132,6 @@ pub async fn run_live(cfg: Arc<AppConfig>) -> Result<()> {
         tracing::warn!(err = format!("{e:#}"), "URL backfill failed (non-fatal)");
     }
 
-    let notifier = Arc::new(TelegramNotifier::new(
-        &cfg.telegram_bot_token,
-        &cfg.telegram_chat_id,
-        BotKind::Trading,
-    ));
     let scanner = Arc::new(
         crate::scanner::live::LiveScanner::new(&cfg, pool)
             .await

@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use crate::config::CopyTradingConfig;
@@ -80,16 +79,26 @@ pub async fn run_live(cfg: Arc<CopyTradingConfig>) -> Result<()> {
     // Start Prometheus metrics server
     metrics::init(cfg.metrics_port);
 
-    let pool = polymarket_common::storage::connect::connect_with_retry(&cfg.database_url).await?;
-    let portfolio = Arc::new(PgPortfolio::new(pool.clone()).await?);
-    portfolio.run_migrations().await?;
-    tracing::info!("Database connected and migrations applied");
-
     let notifier = Arc::new(TelegramNotifier::new(
         &cfg.telegram_bot_token,
         &cfg.telegram_chat_id,
         BotKind::Copy,
     ));
+    let Some(pool) = polymarket_common::storage::connect::connect_or_alert(
+        &cfg.database_url,
+        &notifier,
+        "Copy Trading Bot",
+    )
+    .await
+    else {
+        // Halt in place (see connect_or_alert): exiting would make Docker
+        // restart us and re-alert every few minutes.
+        shutdown_signal().await;
+        return Ok(());
+    };
+    let portfolio = Arc::new(PgPortfolio::new(pool.clone()).await?);
+    portfolio.run_migrations().await?;
+    tracing::info!("Database connected and migrations applied");
 
     let monitor = Arc::new(CopyTraderMonitor::new(
         reqwest::Client::builder()
