@@ -151,7 +151,7 @@ impl Crawler {
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    tracing::warn!(market = %gm.market_id, err = %e, "Failed to fetch history");
+                    tracing::warn!(market = %gm.market_id, err = format!("{e:#}"), "Failed to fetch history");
                 }
             }
 

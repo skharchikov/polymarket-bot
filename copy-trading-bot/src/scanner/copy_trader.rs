@@ -4,91 +4,144 @@
 //! This module is not yet wired into the main execution loop — it will be
 //! integrated via the `copy_trade_cycle` in `src/cycles/copy_trade.rs`.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use futures_util::future::join_all;
 use reqwest::Client;
 use serde::Deserialize;
-use std::time::Duration;
+use serde::de::DeserializeOwned;
+use std::time::{Duration, Instant};
 
 use crate::storage::postgres::{NewCopyTradeEvent, PgPortfolio};
 
 /// Trades older than this are skipped — price has likely moved too far.
 const STALE_TRADE_SECS: i64 = 300; // 5 minutes
 
-const DATA_API: &str = "https://data-api.polymarket.com";
+/// Polymarket Data API v2 (v1 was retired 2026-11-02 and now returns 410).
+/// Docs: <https://docs.polymarket.com/api-reference/data-api/overview>
+const DATA_API: &str = "https://data-api.polymarket.com/v2";
 /// Default HTTP timeout for all data-API calls.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// Number of traders shown per period section in the inline leaderboard reply.
 const LEADERBOARD_SECTION_LIMIT: usize = 5;
+/// Max characters of a response body included in error messages.
+const ERROR_BODY_SNIPPET: usize = 300;
 
 // ---------------------------------------------------------------------------
-// API response types
+// HTTP helper
 // ---------------------------------------------------------------------------
 
-/// One entry from `GET /leaderboard`.
-/// Fields come as strings from the API, so we deserialize to `Value` and parse.
+/// Every v2 response is wrapped as `{"data": ..., "pagination": {...}}`.
+/// `data` is `null` (or `[]`) on a miss rather than a 404.
+#[derive(Debug, Deserialize)]
+struct DataEnvelope<T> {
+    data: Option<T>,
+}
+
+/// Truncate `body` to [`ERROR_BODY_SNIPPET`] chars on a char boundary.
+fn snippet(body: &str) -> String {
+    let mut out: String = body.chars().take(ERROR_BODY_SNIPPET).collect();
+    if out.len() < body.len() {
+        out.push('…');
+    }
+    out
+}
+
+/// GET a Data API v2 URL and unwrap its `data` envelope.
+///
+/// Errors carry the endpoint, HTTP status, `Retry-After` (if any) and a body
+/// snippet — the API's error body includes `error`, `code` and `trace_id`, so
+/// a failure is diagnosable straight from the log line.
+async fn get_data<T: DeserializeOwned>(http: &Client, what: &str, url: &str) -> Result<Option<T>> {
+    let started = Instant::now();
+    let resp = http
+        .get(url)
+        .timeout(REQUEST_TIMEOUT)
+        .send()
+        .await
+        .with_context(|| format!("{what}: GET {url} failed"))?;
+
+    let status = resp.status();
+    let retry_after = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let body = resp
+        .text()
+        .await
+        .with_context(|| format!("{what}: reading body of GET {url} failed (HTTP {status})"))?;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+
+    if !status.is_success() {
+        let retry = retry_after
+            .map(|r| format!(" retry-after={r}s"))
+            .unwrap_or_default();
+        bail!(
+            "{what}: HTTP {status} from GET {url} after {elapsed_ms}ms{retry}: {}",
+            snippet(&body)
+        );
+    }
+
+    tracing::debug!(what, url, %status, elapsed_ms, bytes = body.len(), "Data API request ok");
+
+    let env: DataEnvelope<T> = serde_json::from_str(&body)
+        .with_context(|| format!("{what}: unexpected JSON from GET {url}: {}", snippet(&body)))?;
+    Ok(env.data)
+}
+
+/// Map the legacy upper-case period names used by callers (`"DAY"`,
+/// `"MONTH"`, `"ALL"`) to v2's lower-case `time_period` values.
+fn v2_period(period: &str) -> String {
+    period.to_ascii_lowercase()
+}
+
+// ---------------------------------------------------------------------------
+// API response types (Data API v2: snake_case, numbers are JSON numbers)
+// ---------------------------------------------------------------------------
+
+/// One row from `GET /v2/leaderboard`.
 #[derive(Debug, Deserialize)]
 struct LeaderboardEntry {
-    #[serde(rename = "proxyWallet")]
-    proxy_wallet: String,
-    #[serde(rename = "userName")]
-    name: Option<String>,
+    user_id: String,
     #[serde(default)]
-    rank: Option<serde_json::Value>,
+    user_name: Option<String>,
     #[serde(default)]
-    pnl: Option<serde_json::Value>,
-    #[serde(default, rename = "vol")]
-    volume: Option<serde_json::Value>,
+    pnl: Option<f64>,
+    #[serde(default)]
+    volume: Option<f64>,
 }
 
-impl LeaderboardEntry {
-    fn pnl_f64(&self) -> f64 {
-        self.volume_like(&self.pnl)
-    }
-
-    fn volume_f64(&self) -> f64 {
-        self.volume_like(&self.volume)
-    }
-
-    /// Rank arrives as a string (e.g. `"80"`) — parse to i32, `None` if absent.
-    fn rank_i32(&self) -> Option<i32> {
-        self.rank.as_ref().and_then(|v| match v {
-            serde_json::Value::Number(n) => n.as_i64().map(|n| n as i32),
-            serde_json::Value::String(s) => s.parse().ok(),
-            _ => None,
-        })
-    }
-
-    fn volume_like(&self, v: &Option<serde_json::Value>) -> f64 {
-        v.as_ref()
-            .and_then(|v| match v {
-                serde_json::Value::Number(n) => n.as_f64(),
-                serde_json::Value::String(s) => s.parse().ok(),
-                _ => None,
-            })
-            .unwrap_or(0.0)
-    }
+/// Single-wallet standing from `GET /v2/leaderboard?user=<wallet>`.
+#[derive(Debug, Deserialize)]
+struct LeaderboardUserEntry {
+    #[serde(default)]
+    user_name: Option<String>,
+    #[serde(default)]
+    pnl: Option<f64>,
+    #[serde(default)]
+    volume: Option<f64>,
+    /// Rank by PnL; `0`/`null` means unranked.
+    #[serde(default)]
+    rank_pnl: Option<i64>,
 }
 
-/// One trade event from `GET /activity`.
+/// One event from `GET /v2/activity`.
 #[derive(Debug, Deserialize)]
 struct ActivityEvent {
     /// Market slug — used to look up the Gamma numeric ID.
     slug: Option<String>,
-    #[serde(rename = "conditionId")]
     condition_id: Option<String>,
-    /// "BUY" | "SELL"
+    /// "BUY" | "SELL" (empty for non-trade activity)
     side: Option<String>,
     /// Which market outcome token was traded: 0 = YES (first token), 1 = NO.
-    #[serde(rename = "outcomeIndex")]
     outcome_index: Option<i64>,
     price: Option<f64>,
     /// Actual USD value of the trade (not shares).
-    #[serde(rename = "usdcSize")]
     usdc_size: Option<f64>,
-    #[serde(rename = "transactionHash")]
+    #[serde(rename = "transaction_hash")]
     tx_hash: Option<String>,
+    /// Epoch seconds.
     timestamp: Option<i64>,
 }
 
@@ -146,20 +199,23 @@ pub struct TraderStats {
     pub username: Option<String>,
 }
 
-/// Extract [`TraderStats`] from a per-wallet leaderboard response.
-/// Returns `None` when the wallet has no leaderboard entry.
-fn parse_trader_stats(entries: Vec<LeaderboardEntry>) -> Option<TraderStats> {
-    let e = entries.into_iter().next()?;
+/// Convert a per-wallet leaderboard response into [`TraderStats`].
+/// Returns `None` when the wallet has no leaderboard entry (`data: null`).
+fn parse_trader_stats(entry: Option<LeaderboardUserEntry>) -> Option<TraderStats> {
+    let e = entry?;
     Some(TraderStats {
-        rank: e.rank_i32(),
-        pnl: e.pnl_f64(),
-        volume: e.volume_f64(),
-        username: e.name.filter(|n| !n.is_empty()),
+        rank: e
+            .rank_pnl
+            .filter(|r| *r > 0)
+            .and_then(|r| i32::try_from(r).ok()),
+        pnl: e.pnl.unwrap_or(0.0),
+        volume: e.volume.unwrap_or(0.0),
+        username: e.user_name.filter(|n| !n.is_empty()),
     })
 }
 
 /// Fetch stats (rank, PnL, volume, username) for a single wallet and time
-/// period via `GET /v1/leaderboard?timePeriod=<period>&limit=1&user=<wallet>`.
+/// period via `GET /v2/leaderboard?time_period=<period>&user=<wallet>`.
 /// `period` is one of `"ALL"`, `"MONTH"`, `"DAY"`.
 ///
 /// Returns `Ok(None)` when the wallet has no leaderboard entry.
@@ -168,19 +224,12 @@ pub async fn fetch_trader_stats(
     wallet: &str,
     period: &str,
 ) -> Result<Option<TraderStats>> {
-    let url = format!("{DATA_API}/v1/leaderboard?timePeriod={period}&limit=1&user={wallet}");
-    let entries: Vec<LeaderboardEntry> = http
-        .get(&url)
-        .timeout(REQUEST_TIMEOUT)
-        .send()
-        .await
-        .context("trader stats request failed")?
-        .error_for_status()
-        .context("trader stats returned non-2xx")?
-        .json()
-        .await
-        .context("trader stats JSON parse failed")?;
-    Ok(parse_trader_stats(entries))
+    let url = format!(
+        "{DATA_API}/leaderboard?time_period={}&user={wallet}",
+        v2_period(period)
+    );
+    let entry: Option<LeaderboardUserEntry> = get_data(http, "trader stats", &url).await?;
+    Ok(parse_trader_stats(entry))
 }
 
 /// Refresh leaderboard stats for all active followed traders (best-effort).
@@ -192,7 +241,10 @@ pub async fn refresh_followed_trader_stats(http: &Client, portfolio: &PgPortfoli
     let traders = match portfolio.get_active_traders().await {
         Ok(t) => t,
         Err(e) => {
-            tracing::warn!(err = %e, "Failed to load traders for stats refresh");
+            tracing::warn!(
+                err = format!("{e:#}"),
+                "Failed to load traders for stats refresh"
+            );
             return;
         }
     };
@@ -210,7 +262,13 @@ pub async fn refresh_followed_trader_stats(http: &Client, portfolio: &PgPortfoli
     for (trader, res, month_res) in join_all(fetches).await {
         match res {
             Ok(Some(stats)) => {
-                let pnl_month = month_res.ok().flatten().map(|m| m.pnl);
+                let pnl_month = match month_res {
+                    Ok(m) => m.map(|m| m.pnl),
+                    Err(e) => {
+                        tracing::warn!(wallet = %trader.proxy_wallet, err = format!("{e:#}"), "Failed to fetch MONTH trader stats");
+                        None
+                    }
+                };
                 if let Err(e) = portfolio
                     .update_trader_stats(
                         &trader.proxy_wallet,
@@ -224,14 +282,14 @@ pub async fn refresh_followed_trader_stats(http: &Client, portfolio: &PgPortfoli
                     )
                     .await
                 {
-                    tracing::warn!(wallet = %trader.proxy_wallet, err = %e, "Failed to save trader stats");
+                    tracing::warn!(wallet = %trader.proxy_wallet, err = format!("{e:#}"), "Failed to save trader stats");
                 }
             }
             Ok(None) => {
                 tracing::debug!(wallet = %trader.proxy_wallet, "No leaderboard entry for trader");
             }
             Err(e) => {
-                tracing::warn!(wallet = %trader.proxy_wallet, err = %e, "Failed to fetch trader stats");
+                tracing::warn!(wallet = %trader.proxy_wallet, err = format!("{e:#}"), "Failed to fetch trader stats");
             }
         }
     }
@@ -241,16 +299,18 @@ pub async fn refresh_followed_trader_stats(http: &Client, portfolio: &PgPortfoli
 /// Returns `None` if the request fails or the trader has no activity.
 pub async fn fetch_trader_username(http: &Client, wallet: &str) -> Option<String> {
     let url = format!("{DATA_API}/activity?user={wallet}&type=TRADE&limit=1");
-    let resp: serde_json::Value = http
-        .get(&url)
-        .timeout(REQUEST_TIMEOUT)
-        .send()
-        .await
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    let name = resp.as_array()?.first()?["name"].as_str()?;
+    let rows: Vec<serde_json::Value> = match get_data(http, "trader username", &url).await {
+        Ok(rows) => rows.unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(
+                wallet,
+                err = format!("{e:#}"),
+                "Failed to fetch trader username"
+            );
+            return None;
+        }
+    };
+    let name = rows.first()?["name"].as_str()?;
     if name.is_empty() {
         None
     } else {
@@ -272,25 +332,20 @@ pub async fn fetch_leaderboard(
     http: &Client,
     time_period: &str,
 ) -> Result<Vec<LeaderboardDisplay>> {
-    let url = format!("{DATA_API}/v1/leaderboard?timePeriod={time_period}&limit=10");
-
-    let entries: Vec<LeaderboardEntry> = http
-        .get(&url)
-        .timeout(REQUEST_TIMEOUT)
-        .send()
-        .await
-        .context("leaderboard request failed")?
-        .error_for_status()
-        .context("leaderboard returned non-2xx")?
-        .json()
-        .await
-        .context("leaderboard JSON parse failed")?;
+    let url = format!(
+        "{DATA_API}/leaderboard?time_period={}&limit=10",
+        v2_period(time_period)
+    );
+    let entries: Vec<LeaderboardEntry> = get_data(http, "leaderboard", &url)
+        .await?
+        .unwrap_or_default();
 
     // Sort by descending PnL, then assign sequential display ranks.
     let mut sorted = entries;
     sorted.sort_by(|a, b| {
-        b.pnl_f64()
-            .partial_cmp(&a.pnl_f64())
+        b.pnl
+            .unwrap_or(0.0)
+            .partial_cmp(&a.pnl.unwrap_or(0.0))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
@@ -299,11 +354,11 @@ pub async fn fetch_leaderboard(
         .take(LEADERBOARD_SECTION_LIMIT)
         .enumerate()
         .map(|(i, e)| {
-            let pnl = e.pnl_f64();
-            let volume = e.volume_f64();
-            let wallet = e.proxy_wallet;
+            let pnl = e.pnl.unwrap_or(0.0);
+            let volume = e.volume.unwrap_or(0.0);
+            let wallet = e.user_id;
             let name = e
-                .name
+                .user_name
                 .filter(|n| !n.is_empty())
                 .unwrap_or_else(|| format!("{}…", &wallet[..8.min(wallet.len())]));
             LeaderboardDisplay {
@@ -485,20 +540,13 @@ impl CopyTraderMonitor {
         since: DateTime<Utc>,
     ) -> Result<Vec<TraderTrade>> {
         let since_ts = since.timestamp();
-        let url = format!("{DATA_API}/activity?user={wallet}&type=TRADE&startTs={since_ts}",);
+        // v2 renamed `startTs` → `start` (epoch seconds, inclusive). Newest
+        // first, default page of 100 — plenty for a 1-minute poll window.
+        let url = format!("{DATA_API}/activity?user={wallet}&type=TRADE&start={since_ts}");
 
-        let events: Vec<ActivityEvent> = self
-            .http
-            .get(&url)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
-            .await
-            .context("activity request failed")?
-            .error_for_status()
-            .context("activity returned non-2xx")?
-            .json()
-            .await
-            .context("activity JSON parse failed")?;
+        let events: Vec<ActivityEvent> = get_data(&self.http, "trader activity", &url)
+            .await?
+            .unwrap_or_default();
 
         let raw_count = events.len();
         let trades: Vec<TraderTrade> = parse_activity_events(events);
@@ -562,7 +610,7 @@ impl CopyTraderMonitor {
                     tracing::warn!(
                         trader = %name,
                         wallet = %trader.proxy_wallet,
-                        err = %e,
+                        err = format!("{e:#}"),
                         "Failed to poll trader activity, skipping"
                     );
                     continue;
@@ -630,7 +678,7 @@ impl CopyTraderMonitor {
             if let Err(e) = portfolio.update_trader_checked(&trader.proxy_wallet).await {
                 tracing::warn!(
                     wallet = %trader.proxy_wallet,
-                    err = %e,
+                    err = format!("{e:#}"),
                     "Failed to update last_checked_at"
                 );
             }
@@ -686,123 +734,127 @@ mod tests {
         assert!(out.contains("/follow 0xabc12345def"));
     }
 
-    // Real API response shape captured 2026-03-15
-    const ACTIVITY_JSON: &str = r#"[
+    /// Deserialize a v2 `{"data": [...]}` activity body into events.
+    fn activity(json: &str) -> Vec<ActivityEvent> {
+        let env: DataEnvelope<Vec<ActivityEvent>> = serde_json::from_str(json).unwrap();
+        env.data.unwrap_or_default()
+    }
+
+    // Real v2 response shape captured 2026-11-20 from
+    // GET /v2/activity?user=<wallet>&type=TRADE&start=<ts>&limit=2
+    const ACTIVITY_JSON: &str = r#"{"data":[
         {
-            "proxyWallet": "0x37c1874a60d348903594a96703e0507c518fc53a",
-            "timestamp": 1773601939,
-            "conditionId": "0xfab8520004b4d201119f0362dc8678e8cf7f11b514efc48bc5a48aebf7974b50",
+            "proxy_wallet": "0x08458f7e9d2858027de579e4c3ca305475496b6f",
+            "timestamp": 1795121488,
+            "condition_id": "0x800376dc64e4e2376a495ed0df4a789192256c821bb4d1452acdd5931bca2fa5",
             "type": "TRADE",
-            "size": 19.6,
-            "usdcSize": 9.604,
-            "transactionHash": "0x36b6c841eb1",
-            "price": 0.49,
-            "asset": "87207434043876055147",
+            "size": 407.6,
+            "usdc_size": 28.532,
+            "transaction_hash": "0x8091362238",
+            "price": 0.07,
+            "token_id": "112320928806010548033202438997",
             "side": "BUY",
-            "outcomeIndex": 0,
-            "title": "Spread: Trail Blazers (-8.5)",
-            "slug": "nba-por-phi-2026-03-15-spread-away-8pt5",
+            "outcome_index": 0,
+            "title": "Will Anthropic's market cap be less than $1.25T at market close on IPO day?",
+            "slug": "will-anthropics-market-cap-be-less-than-1pt25t-at-market-close-on-ipo-day",
             "icon": "https://example.com/icon.png",
-            "eventSlug": "nba-por-phi-2026-03-15",
-            "outcome": "Trail Blazers",
-            "name": "CemeterySun",
-            "pseudonym": "Pale-Bend",
+            "event_slug": "anthropic-ipo-closing-market-cap-higher-strikes",
+            "outcome": "Yes",
+            "name": "GollumGekko",
+            "pseudonym": "Grumpy-Urn",
             "bio": "",
-            "profileImage": ""
+            "profile_image": "",
+            "profile_image_optimized": ""
         },
         {
-            "proxyWallet": "0x37c1874a60d348903594a96703e0507c518fc53a",
-            "timestamp": 1773601939,
-            "conditionId": "0x65c3ff402d81e756af732fd67ea6521b15395206d2d77b8b2b006c212f620981",
+            "proxy_wallet": "0x08458f7e9d2858027de579e4c3ca305475496b6f",
+            "timestamp": 1795121483,
+            "condition_id": "0x65c3ff402d81e756af732fd67ea6521b15395206d2d77b8b2b006c212f620981",
             "type": "TRADE",
-            "size": 1554.74,
-            "usdcSize": 855.107,
-            "transactionHash": "0x197d26499737",
-            "price": 0.55,
-            "asset": "87796361570300895",
-            "side": "BUY",
-            "outcomeIndex": 0,
-            "title": "Spread: Bucks (-6.5)",
-            "slug": "nba-ind-mil-2026-03-15-spread-home-6pt5",
-            "icon": "https://example.com/icon2.png",
-            "eventSlug": "nba-ind-mil-2026-03-15",
-            "outcome": "Bucks",
-            "name": "CemeterySun",
-            "pseudonym": "Pale-Bend",
+            "size": 88.857143,
+            "usdc_size": 6.22,
+            "transaction_hash": "0xbc7afc5f20",
+            "price": 0.0699999999,
+            "token_id": "87796361570300895",
+            "side": "SELL",
+            "outcome_index": 1,
+            "title": "Other market",
+            "slug": "other-market",
+            "icon": "",
+            "event_slug": "other-event",
+            "outcome": "No",
+            "name": "GollumGekko",
+            "pseudonym": "Grumpy-Urn",
             "bio": "",
-            "profileImage": ""
+            "profile_image": "",
+            "profile_image_optimized": ""
         }
-    ]"#;
+    ],"pagination":{"limit":2,"offset":0,"has_more":true,"next_cursor":"abc"}}"#;
 
-    /// Verify that the real API response shape deserializes correctly and all
-    /// mandatory fields are extracted — this guards against the previous bug
-    /// where `marketId` (non-existent) caused every trade to be dropped.
     #[test]
     fn test_parse_activity_events_real_shape() {
-        let events: Vec<ActivityEvent> = serde_json::from_str(ACTIVITY_JSON).unwrap();
+        let events = activity(ACTIVITY_JSON);
         assert_eq!(events.len(), 2, "should deserialize both events");
 
         let trades = parse_activity_events(events);
         assert_eq!(trades.len(), 2, "both trades should survive parsing");
 
         let t = &trades[0];
-        assert_eq!(t.slug, "nba-por-phi-2026-03-15-spread-away-8pt5");
+        assert_eq!(
+            t.slug,
+            "will-anthropics-market-cap-be-less-than-1pt25t-at-market-close-on-ipo-day"
+        );
         assert_eq!(
             t.condition_id,
-            "0xfab8520004b4d201119f0362dc8678e8cf7f11b514efc48bc5a48aebf7974b50"
+            "0x800376dc64e4e2376a495ed0df4a789192256c821bb4d1452acdd5931bca2fa5"
         );
         assert_eq!(t.side, "BUY");
         assert_eq!(t.outcome_index, 0);
-        assert_eq!(t.price, 0.49);
-        // usdcSize, not size (shares)
-        assert_eq!(t.size_usd, 9.604);
-        assert_eq!(t.tx_hash.as_deref(), Some("0x36b6c841eb1"));
-        assert_eq!(t.timestamp.timestamp(), 1773601939);
+        assert_eq!(t.price, 0.07);
+        // usdc_size, not size (shares)
+        assert_eq!(t.size_usd, 28.532);
+        assert_eq!(t.tx_hash.as_deref(), Some("0x8091362238"));
+        assert_eq!(t.timestamp.timestamp(), 1795121488);
+        assert_eq!(trades[1].outcome_index, 1, "NO trade must be preserved");
     }
 
-    /// A trader buying the NO token (outcomeIndex 1) must be carried through so
-    /// the copy-bot mirrors the correct side instead of always betting YES.
+    /// `data: null` (a miss) must yield no events rather than an error.
     #[test]
-    fn test_parse_activity_events_carries_no_outcome() {
-        let json = r#"[{
-            "slug": "some-market",
-            "conditionId": "0xabc",
-            "side": "BUY",
-            "price": 0.30,
-            "usdcSize": 15.0,
-            "outcomeIndex": 1,
-            "timestamp": 1000
-        }]"#;
-        let events: Vec<ActivityEvent> = serde_json::from_str(json).unwrap();
-        let trades = parse_activity_events(events);
-        assert_eq!(trades.len(), 1);
-        assert_eq!(trades[0].outcome_index, 1, "NO trade must be preserved");
+    fn test_activity_null_data_is_empty() {
+        let events = activity(r#"{"data":null}"#);
+        assert!(events.is_empty());
     }
 
-    /// When the API omits outcomeIndex, default to 0 (YES).
+    /// The retired v1 camelCase shape must not silently parse as trades.
+    #[test]
+    fn test_v1_camel_case_fields_are_not_parsed() {
+        let events = activity(
+            r#"{"data":[{"slug":"m","conditionId":"0xabc","side":"BUY","price":0.5,"timestamp":1000}]}"#,
+        );
+        assert!(parse_activity_events(events).is_empty());
+    }
+
+    /// When the API omits outcome_index, default to 0 (YES).
     #[test]
     fn test_parse_activity_events_defaults_outcome_index() {
-        let json = r#"[{
-            "slug": "some-market",
-            "conditionId": "0xabc",
-            "side": "BUY",
-            "price": 0.5,
-            "timestamp": 1000
-        }]"#;
-        let events: Vec<ActivityEvent> = serde_json::from_str(json).unwrap();
+        let events = activity(
+            r#"{"data":[{"slug":"some-market","condition_id":"0xabc","side":"BUY","price":0.5,"timestamp":1000}]}"#,
+        );
         let trades = parse_activity_events(events);
         assert_eq!(trades.len(), 1);
         assert_eq!(trades[0].outcome_index, 0);
+        assert_eq!(trades[0].size_usd, 0.0, "missing usdc_size defaults to 0");
     }
 
     #[test]
     fn test_parse_drops_events_missing_mandatory_fields() {
-        // Missing slug → should be dropped
-        let json = r#"[
-            {"conditionId": "0xabc", "side": "BUY", "price": 0.5, "usdcSize": 10.0, "timestamp": 1000},
-            {"slug": "some-market", "conditionId": "0xdef", "side": "BUY", "price": 0.6, "usdcSize": 20.0, "timestamp": 2000}
-        ]"#;
-        let events: Vec<ActivityEvent> = serde_json::from_str(json).unwrap();
+        // First event has no slug → dropped
+        let events = activity(
+            r#"{"data":[
+                {"condition_id":"0xabc","side":"BUY","price":0.5,"usdc_size":10.0,"timestamp":1000},
+                {"slug":"some-market","condition_id":"0xdef","side":"BUY","price":0.6,"usdc_size":20.0,"timestamp":2000}
+            ]}"#,
+        );
         let trades = parse_activity_events(events);
         assert_eq!(trades.len(), 1, "event with missing slug should be dropped");
         assert_eq!(trades[0].slug, "some-market");
@@ -810,80 +862,93 @@ mod tests {
 
     #[test]
     fn test_parse_uses_usdc_size_not_shares() {
-        let json = r#"[{
-            "slug": "market-a",
-            "conditionId": "0xabc",
-            "side": "SELL",
-            "price": 0.9,
-            "size": 1000.0,
-            "usdcSize": 900.0,
-            "timestamp": 1000
-        }]"#;
-        let events: Vec<ActivityEvent> = serde_json::from_str(json).unwrap();
+        let events = activity(
+            r#"{"data":[{"slug":"market-a","condition_id":"0xabc","side":"SELL","price":0.9,"size":1000.0,"usdc_size":900.0,"timestamp":1000}]}"#,
+        );
         let trades = parse_activity_events(events);
         assert_eq!(trades.len(), 1);
-        // Must be usdcSize (900), not size/shares (1000)
         assert_eq!(trades[0].size_usd, 900.0);
     }
 
-    #[test]
-    fn test_parse_usdc_size_defaults_to_zero_when_absent() {
-        let json = r#"[{
-            "slug": "market-b",
-            "conditionId": "0xabc",
-            "side": "BUY",
-            "price": 0.5,
-            "timestamp": 1000
-        }]"#;
-        let events: Vec<ActivityEvent> = serde_json::from_str(json).unwrap();
-        let trades = parse_activity_events(events);
-        assert_eq!(trades.len(), 1);
-        assert_eq!(trades[0].size_usd, 0.0);
-    }
+    // Real v2 response shape captured 2026-11-20 from
+    // GET /v2/leaderboard?time_period=month&user=<wallet>
+    const TRADER_STATS_JSON: &str = r#"{"data":{
+        "user_id": "0x08458f7e9d2858027de579e4c3ca305475496b6f",
+        "pnl": -49909.12817958895,
+        "volume": 1924516.784266,
+        "rank_pnl": 683225,
+        "rank_volume": 850,
+        "user_name": "GollumGekko",
+        "profile_image": "",
+        "x_username": "GollumGekko1",
+        "verified": false
+    }}"#;
 
-    // Real API response shape captured 2026-07-15 from
-    // GET /v1/leaderboard?timePeriod=ALL&limit=1&user=<wallet>
-    const TRADER_STATS_JSON: &str = r#"[
-        {
-            "rank": "80",
-            "proxyWallet": "0x37c1874a60d348903594a96703e0507c518fc53a",
-            "userName": "CemeterySun",
-            "xUsername": "",
-            "verifiedBadge": false,
-            "vol": 148559637.69049004,
-            "pnl": 1927132.677116769,
-            "profileImage": ""
-        }
-    ]"#;
+    fn user_entry(json: &str) -> Option<LeaderboardUserEntry> {
+        serde_json::from_str::<DataEnvelope<LeaderboardUserEntry>>(json)
+            .unwrap()
+            .data
+    }
 
     #[test]
     fn test_parse_trader_stats_real_shape() {
-        let entries: Vec<LeaderboardEntry> = serde_json::from_str(TRADER_STATS_JSON).unwrap();
-        let stats = parse_trader_stats(entries).expect("stats should parse");
-        // rank arrives as a string — must be parsed to i32
-        assert_eq!(stats.rank, Some(80));
-        assert!((stats.pnl - 1_927_132.677_116_769).abs() < 1e-6);
-        assert!((stats.volume - 148_559_637.690_490_04).abs() < 1e-6);
-        assert_eq!(stats.username.as_deref(), Some("CemeterySun"));
+        let stats = parse_trader_stats(user_entry(TRADER_STATS_JSON)).expect("stats should parse");
+        assert_eq!(stats.rank, Some(683_225));
+        assert!((stats.pnl - -49_909.128_179_588_95).abs() < 1e-6);
+        assert!((stats.volume - 1_924_516.784_266).abs() < 1e-6);
+        assert_eq!(stats.username.as_deref(), Some("GollumGekko"));
     }
 
     #[test]
-    fn test_parse_trader_stats_empty_response() {
-        // Wallet with no leaderboard entry → empty array → None
-        let entries: Vec<LeaderboardEntry> = serde_json::from_str("[]").unwrap();
-        assert!(parse_trader_stats(entries).is_none());
+    fn test_parse_trader_stats_unknown_wallet() {
+        // Wallet with no leaderboard entry → data: null → None
+        assert!(parse_trader_stats(user_entry(r#"{"data":null}"#)).is_none());
     }
 
     #[test]
-    fn test_parse_trader_stats_missing_optional_fields() {
-        // rank absent, empty username → still returns pnl/vol, rank None, username None
-        let json = r#"[{"proxyWallet": "0xabc", "userName": "", "pnl": 100.5, "vol": 200.0}]"#;
-        let entries: Vec<LeaderboardEntry> = serde_json::from_str(json).unwrap();
-        let stats = parse_trader_stats(entries).expect("stats should parse");
+    fn test_parse_trader_stats_unranked_and_missing_fields() {
+        // rank 0 = unranked; empty username → None
+        let stats = parse_trader_stats(user_entry(
+            r#"{"data":{"user_id":"0xabc","user_name":"","pnl":100.5,"volume":200.0,"rank_pnl":0}}"#,
+        ))
+        .expect("stats should parse");
         assert_eq!(stats.rank, None);
         assert_eq!(stats.pnl, 100.5);
         assert_eq!(stats.volume, 200.0);
         assert_eq!(stats.username, None);
+    }
+
+    #[test]
+    fn test_leaderboard_board_shape() {
+        let json = r#"{"data":[
+            {"rank":1,"user_id":"0x2c33","pnl":3978314.97,"volume":226352898.6,"user_name":"whale","profile_image":"","x_username":"","verified":false},
+            {"rank":2,"user_id":"0x4f1d","pnl":3297010.74,"volume":3797191.5,"user_name":"","verified":false}
+        ],"pagination":{"limit":2,"offset":0,"has_more":true,"next_cursor":"x"}}"#;
+        let rows: Vec<LeaderboardEntry> =
+            serde_json::from_str::<DataEnvelope<Vec<LeaderboardEntry>>>(json)
+                .unwrap()
+                .data
+                .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].user_id, "0x2c33");
+        assert_eq!(rows[0].user_name.as_deref(), Some("whale"));
+        assert_eq!(rows[1].pnl, Some(3297010.74));
+    }
+
+    #[test]
+    fn test_v2_period_lowercases() {
+        assert_eq!(v2_period("MONTH"), "month");
+        assert_eq!(v2_period("ALL"), "all");
+        assert_eq!(v2_period("DAY"), "day");
+    }
+
+    #[test]
+    fn test_snippet_truncates_on_char_boundary() {
+        let long = "é".repeat(ERROR_BODY_SNIPPET + 10);
+        let out = snippet(&long);
+        assert_eq!(out.chars().count(), ERROR_BODY_SNIPPET + 1);
+        assert!(out.ends_with('…'));
+        assert_eq!(snippet("short"), "short");
     }
 
     #[tokio::test]
@@ -921,9 +986,9 @@ mod tests {
     #[ignore] // hits real API
     async fn test_poll_trader_activity_live() {
         let monitor = CopyTraderMonitor::new(Client::new());
-        // Top leaderboard trader from 2026-03-15
-        let wallet = "0x37c1874a60d348903594a96703e0507c518fc53a";
-        let since = chrono::Utc::now() - chrono::Duration::hours(24);
+        // Active trader as of 2026-11-20
+        let wallet = "0x08458f7e9d2858027de579e4c3ca305475496b6f";
+        let since = chrono::Utc::now() - chrono::Duration::days(7);
         let trades = monitor.poll_trader_activity(wallet, since).await.unwrap();
         assert!(
             !trades.is_empty(),

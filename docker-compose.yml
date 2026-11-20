@@ -1,6 +1,9 @@
 services:
   postgres:
     image: postgres:17-alpine
+    # Without this Postgres stays down after a host reboot while every app
+    # restarts and crash-loops on DNS lookup of `postgres`.
+    restart: unless-stopped
     environment:
       POSTGRES_DB: polymarket
       POSTGRES_USER: bot

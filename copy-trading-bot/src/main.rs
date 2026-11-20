@@ -34,7 +34,8 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("copy_trading_bot=info".parse()?),
         )
-        .with_ansi(true)
+        // Colour codes only on a TTY — keeps `docker logs` greppable.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .with_target(true)
         .init();
 

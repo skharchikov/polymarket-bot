@@ -60,7 +60,7 @@ pub async fn housekeeping_cycle(state: &AppState) -> Result<()> {
             }
             Ok(None) => {} // still open
             Err(e) => {
-                tracing::warn!(market = %market_id, err = %e, "Copy resolution check failed");
+                tracing::warn!(market = %market_id, err = format!("{e:#}"), "Copy resolution check failed");
             }
         }
     }

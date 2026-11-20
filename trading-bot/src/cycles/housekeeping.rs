@@ -28,7 +28,7 @@ pub async fn housekeeping_cycle(
             Ok(Some(yes_won)) => {
                 // Resolve LLM estimates for calibration tracking
                 if let Err(e) = portfolio.resolve_estimates(market_id, yes_won).await {
-                    tracing::warn!(err = %e, "Failed to resolve LLM estimates");
+                    tracing::warn!(err = format!("{e:#}"), "Failed to resolve LLM estimates");
                 }
                 if let Some(r) = portfolio.resolve_bet(market_id, yes_won).await? {
                     let emoji = if r.won { "✅" } else { "❌" };
@@ -92,7 +92,7 @@ pub async fn housekeeping_cycle(
             }
             Ok(None) => {} // still open
             Err(e) => {
-                tracing::warn!(market = %market_id, err = %e, "Resolution check failed");
+                tracing::warn!(market = %market_id, err = format!("{e:#}"), "Resolution check failed");
             }
         }
     }
@@ -109,7 +109,7 @@ pub async fn housekeeping_cycle(
 
     // Reload calibration curve with any newly resolved data
     if let Err(e) = scanner.reload_calibration().await {
-        tracing::warn!(err = %e, "Failed to reload calibration curve");
+        tracing::warn!(err = format!("{e:#}"), "Failed to reload calibration curve");
     }
 
     // Check open ML positions for early exit and report unrealized P&L
@@ -135,7 +135,7 @@ pub async fn housekeeping_cycle(
                     continue;
                 }
                 Err(e) => {
-                    tracing::debug!(market = %bet.market_id, err = %e, "Price fetch failed");
+                    tracing::debug!(market = %bet.market_id, err = format!("{e:#}"), "Price fetch failed");
                     views.push(format::OpenBetView {
                         bet,
                         current_yes_price: None,
@@ -231,7 +231,7 @@ pub async fn housekeeping_cycle(
                         );
                     }
                     Ok(None) => {}
-                    Err(e) => tracing::error!(err = %e, "Early exit failed"),
+                    Err(e) => tracing::error!(err = format!("{e:#}"), "Early exit failed"),
                 }
                 continue; // Skip adding to open positions report
             }

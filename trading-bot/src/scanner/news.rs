@@ -66,7 +66,7 @@ impl NewsAggregator {
                     all.extend(items);
                 }
                 Err(e) => {
-                    tracing::warn!(source = name, err = %e, "News fetch failed");
+                    tracing::warn!(source = name, err = format!("{e:#}"), "News fetch failed");
                     source_counts.push((name.to_string(), 0));
                 }
             }
@@ -95,7 +95,9 @@ impl NewsAggregator {
         for feed_url in feeds {
             match self.fetch_rss(feed_url, "Google News").await {
                 Ok(feed_items) => items.extend(feed_items),
-                Err(e) => tracing::debug!(url = feed_url, err = %e, "RSS fetch failed"),
+                Err(e) => {
+                    tracing::debug!(url = feed_url, err = format!("{e:#}"), "RSS fetch failed")
+                }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -154,7 +156,9 @@ impl NewsAggregator {
         for (url, source) in feeds {
             match self.fetch_rss(url, source).await {
                 Ok(feed_items) => items.extend(feed_items),
-                Err(e) => tracing::debug!(source = source, err = %e, "Sports RSS failed"),
+                Err(e) => {
+                    tracing::debug!(source = source, err = format!("{e:#}"), "Sports RSS failed")
+                }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -181,7 +185,9 @@ impl NewsAggregator {
         for (url, source) in feeds {
             match self.fetch_rss(url, source).await {
                 Ok(feed_items) => items.extend(feed_items),
-                Err(e) => tracing::debug!(source = source, err = %e, "Crypto RSS failed"),
+                Err(e) => {
+                    tracing::debug!(source = source, err = format!("{e:#}"), "Crypto RSS failed")
+                }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -201,7 +207,7 @@ impl NewsAggregator {
         for url in feeds {
             match self.fetch_rss(url, "Reuters").await {
                 Ok(feed_items) => items.extend(feed_items),
-                Err(e) => tracing::debug!(url = url, err = %e, "Reuters RSS failed"),
+                Err(e) => tracing::debug!(url = url, err = format!("{e:#}"), "Reuters RSS failed"),
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -377,7 +383,12 @@ async fn fetch_with_retry(http: &Client, url: &str, user_agent: &str) -> Result<
                 last_err = Some(anyhow::anyhow!("HTTP {status}"));
             }
             Err(e) => {
-                tracing::warn!(url = url, attempt = attempt + 1, err = %e, "HTTP error, retrying");
+                tracing::warn!(
+                    url = url,
+                    attempt = attempt + 1,
+                    err = format!("{e:#}"),
+                    "HTTP error, retrying"
+                );
                 last_err = Some(e.into());
             }
         }

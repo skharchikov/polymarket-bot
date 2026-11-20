@@ -273,7 +273,10 @@ pub async fn alert_loop(
                             break;
                         }
                         Err(e) => {
-                            tracing::error!(err = %e, "Failed to place WS-triggered bet");
+                            tracing::error!(
+                                err = format!("{e:#}"),
+                                "Failed to place WS-triggered bet"
+                            );
                         }
                     }
                 }
@@ -287,7 +290,7 @@ pub async fn alert_loop(
             }
             Err(e) => {
                 metrics::record_ws_alert(false);
-                tracing::warn!(err = %e, "WS alert assessment failed");
+                tracing::warn!(err = format!("{e:#}"), "WS alert assessment failed");
             }
         }
     }
